@@ -1,0 +1,53 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "array",
+    "items": { "$ref": "#/$defs/Publication" },
+    "$defs": {
+        "Publication": {
+            "type": "object",
+            "required": ["files", "submissionTimestamp", "description", "uuid", "state"],
+            "properties": {
+                "uuid": { "type": "string", "minLength": 36, "maxLength": 36},
+                "state": { "type": "string", "enum": ["unpublished", "published_or_scheduled"]},
+                "submissionTimestamp": { "type": "integer" },
+                "description": { "type": "string" },
+                "files": {
+                    "type": "array",
+                    "items": { "$ref": "#/$defs/File" }
+                },
+                "apparitions": {
+                    "type": "array",
+                    "items": { "$ref": "#/$defs/Apparition" }
+                },
+                "freeVersionPublicationUuid": { "type": "string", "minLength": 36, "maxLength": 36}
+            }
+        },
+        "File": {
+            "type": "object",
+            "required": [],
+            "properties": {
+                "basename": { "type": "string", "minLength": 1 },
+                "sha512sum": {
+                    "type": "string",
+                    "minLength": 128,
+                    "maxLength": 128
+                }
+            }
+        },
+        "Apparition": {
+            "type": "object",
+            "required": ["platformName", "urlElsePublicationName"],
+            "properties": {
+                "platformName": {
+                    "type": "string",
+                    "enum": ["deviantart", "pixiv"]
+                },
+                "urlElsePublicationName": { "type": "string" },
+                "apparitionTimestampIfDifferentThanSubmission": {
+                    "type": "integer"
+                },
+                "priceIfNotFree": { "type": "number", "minimum": 0 }
+            }
+        }
+    }
+}
