@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
-"""Unified publish workflow: gallery + AI metadata + Playwright Chromium batch.
+"""Unified publish workflow: gallery + AI metadata + Playwright Firefox batch.
 
 Single entrypoint. Scans picked/, opens a dark gallery on 127.0.0.1:PORT, lets
 you delete images or add them to a queue (with AI-generated title/description
 and per-entry schedule override), then writes to publications.json and drives a
-Chromium persistent context through the DeviantArt submission flow.
+Firefox persistent context through the DeviantArt submission flow.
+
+DeviantArt is behind PerimeterX bot detection, which blocks EVERY Playwright
+browser at the login page (Chromium and Firefox alike, since Playwright forces
+navigator.webdriver). So login is NOT automated: `nix run <publicator>#login`
+opens a real, flake-managed Firefox on the repo-local `.deviantart-login/`
+profile for a one-time human sign-in. publish_batch copies that logged-in +
+PerimeterX-cleared profile into the Playwright Firefox session and only VERIFIES
+it — the submission pages themselves are not bot-walled.
 """
 
 import argparse
@@ -27,12 +35,16 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from echo_first_unpublished_publication_data import find_art_path, format_schedule
-from publish_deviantart import pick_schedule, set_checkbox, type_tags
+from echo_first_unpublished_publication_data import (
+    deviantart_apparition,
+    find_art_path,
+    format_schedule,
+)
 
 PKG = Path(__file__).resolve().parent  # code assets (schema) travel with the package
 # Runtime state lives in the caller's CWD (the app is invoked from the Art data dir).
-SESSION_DIR = Path.cwd() / ".deviantart-session"
+LOGIN_DIR = Path.cwd() / ".deviantart-login"      # human sign-in profile (real Firefox, via #login)
+SESSION_DIR = Path.cwd() / ".deviantart-session"  # Playwright working copy of the login profile
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tiff", ".mp4"}
 MIME = {
     ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
@@ -271,7 +283,8 @@ _PAGE_TMPL = r"""<!DOCTYPE html>
   .card { background: #2a2a2a; border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
   .card img { max-width: 100%; max-height: 240px; border-radius: 4px; object-fit: contain; background: #000; }
   .card .name { font-size: 13px; word-break: break-all; color: #ccc; }
-  .card.queued { opacity: 0.5; border: 1px solid #4caf50; }
+  .card .sched { font-size: 12px; color: #aaa; }
+  .card.queued { opacity: 0.6; border: 1px solid #4caf50; }
   .badge { display: inline-block; padding: 2px 8px; background: #4caf50; color: #fff;
            border-radius: 4px; font-size: 12px; }
   .actions { display: flex; gap: 8px; }
@@ -305,8 +318,9 @@ _PAGE_TMPL = r"""<!DOCTYPE html>
 const INITIAL_MAX_TS = __INITIAL_MAX_TS__;
 const AI_PROVIDER = "__AI_PROVIDER__";
 const AI_MODEL = "__AI_MODEL__";
+const PENDING = __PENDING__; // already-queued entries from publications.json
 
-const queue = []; // [{cardId, path, title, description, price, scheduleTs}]
+const queue = []; // [{cardId, path, title, description, price, scheduleTs, uuid?}]
 
 function nextTuesday8pmUTC(afterTs) {
   const d = new Date(afterTs * 1000);
@@ -415,6 +429,14 @@ function saveCard(cardId, path) {
   refreshCount();
 }
 
+function unqueuePending(cardId) {
+  const i = queue.findIndex(e => e.cardId === cardId);
+  if (i >= 0) queue.splice(i, 1);
+  const el = document.getElementById(cardId);
+  if (el) el.remove();
+  refreshCount();
+}
+
 async function publishQueue() {
   if (queue.length === 0) return;
   const btn = document.getElementById("publish-btn");
@@ -429,6 +451,13 @@ async function publishQueue() {
     ${d.error ? `<pre style="color:#ff8080">${d.error}</pre>` : ""}
     <p>You can close this tab.</p></main>`;
 }
+
+// Pre-queue entries already sitting in publications.json (state=unpublished).
+for (const p of PENDING) {
+  queue.push({cardId: p.cardId, uuid: p.uuid, path: p.path,
+              title: p.title, scheduleTs: p.scheduleTs});
+}
+refreshCount();
 </script>
 </body></html>
 """
@@ -437,6 +466,8 @@ async function publishQueue() {
 class GalleryHandler(BaseHTTPRequestHandler):
     thumb_dir = ""
     thumb_map: dict[str, str] = {}
+    candidate_paths: list[str] = []      # new picks from picked/, add-able
+    pending: list[dict] = []             # already-queued entries from publications.json
     initial_max_ts = 0
     ai_provider = "claude"
     ai_model = "claude-opus-4-7"
@@ -446,7 +477,30 @@ class GalleryHandler(BaseHTTPRequestHandler):
 
     def _build_page(self) -> str:
         cards = []
-        for idx, (orig_path, thumb_path) in enumerate(self.thumb_map.items()):
+        pending_js = []
+        # Pre-queued cards: entries already in publications.json (state=unpublished).
+        for idx, e in enumerate(self.pending):
+            thumb_path = self.thumb_map.get(e["path"], e["path"])
+            rel = os.path.relpath(thumb_path, self.thumb_dir)
+            safe_rel = html.escape(rel, quote=True)
+            safe_title = html.escape(e["title"], quote=True)
+            ts = e.get("scheduleTs")
+            sched = (datetime.fromtimestamp(ts).strftime("%a %d %b %Y %H:%M")
+                     if ts else "no schedule")
+            cid = f"pending_{idx}"
+            cards.append(f"""<div class="card queued" id="{cid}">
+  <img src="/thumbs/{safe_rel}" alt="{safe_title}">
+  <div class="name"><span class="badge">queued</span> {safe_title}</div>
+  <div class="sched">{html.escape(sched)}</div>
+  <div class="actions">
+    <button class="btn-del" onclick="unqueuePending('{cid}')">Remove from queue</button>
+  </div>
+</div>""")
+            pending_js.append({"cardId": cid, "uuid": e["uuid"], "path": e["path"],
+                               "title": e["title"], "scheduleTs": ts})
+        # Add-able cards: new picks from picked/.
+        for idx, orig_path in enumerate(self.candidate_paths):
+            thumb_path = self.thumb_map.get(orig_path, orig_path)
             rel = os.path.relpath(thumb_path, self.thumb_dir)
             filename = os.path.basename(orig_path)
             safe_name = html.escape(filename, quote=True)
@@ -475,6 +529,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
 </div>""")
         page = _PAGE_TMPL
         page = page.replace("__CARDS__", "\n".join(cards))
+        page = page.replace("__PENDING__", json.dumps(pending_js))
         page = page.replace("__INITIAL_MAX_TS__", str(self.initial_max_ts))
         page = page.replace("__AI_PROVIDER__", self.ai_provider)
         page = page.replace("__AI_MODEL__", self.ai_model)
@@ -550,12 +605,20 @@ class GalleryHandler(BaseHTTPRequestHandler):
                 entries = data.get("entries", []) or []
                 if not entries:
                     self._send(400, {"error": "empty queue"}); return
+                # Entries with a uuid are already in publications.json (the
+                # pre-queued pending set) — publish them as-is. The rest are new
+                # picks: append them first, then publish. Existing go first.
+                existing = [e for e in entries if e.get("uuid")]
+                new = [e for e in entries if not e.get("uuid")]
                 try:
-                    new_uuids = write_publications(entries, self.json_path, self.schema_path)
+                    new_uuids = (write_publications(new, self.json_path, self.schema_path)
+                                 if new else [])
                 except Exception as e:
                     self._send(400, {"error": f"schema/write failed: {e}"}); return
 
-                published, failed, err = publish_batch(entries, new_uuids, self.json_path)
+                all_entries = existing + new
+                all_uuids = [e["uuid"] for e in existing] + new_uuids
+                published, failed, err = publish_batch(all_entries, all_uuids, self.json_path)
                 result = {"published": published, "failed": failed}
                 if err:
                     result["error"] = err
@@ -649,16 +712,94 @@ def mark_state(json_path: str, target_uuid: str, state: str) -> None:
 # ---------------------------------------------------------------------------
 # Playwright Chromium: DA submission
 # ---------------------------------------------------------------------------
-# set_checkbox / type_tags / pick_schedule imported from publish_deviantart.py.
+
+TAGS_FILE = PKG / "tags/da.txt"
+# schedule string from `date`: "Tue Jul 28 08:00:00 PM CEST 2026"
+_MONTHS = {m: i + 1 for i, m in enumerate(
+    ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"])}
+
+
+def set_checkbox(page, name: str, want: bool = True) -> None:
+    """DA renders checkboxes as hidden <input>; toggle via JS until state matches.
+    The mature click doesn't always stick on first attempt (racy DOM), so verify."""
+    for _ in range(3):
+        checked = page.evaluate(
+            "n => document.querySelector(`input[name=\"${n}\"]`).checked", name
+        )
+        if checked == want:
+            return
+        page.evaluate(
+            "n => document.querySelector(`input[name=\"${n}\"]`).click()", name
+        )
+        page.wait_for_timeout(300)
+    raise RuntimeError(f"checkbox {name} would not stay {want}")
+
+
+def type_tags(page) -> None:
+    tags = [t.strip() for t in TAGS_FILE.read_text().splitlines() if t.strip()]
+    tag_input = page.locator('input[aria-errormessage$="-error"]').last
+    tag_input.click()
+    for t in tags:
+        tag_input.type(t, delay=10)
+        page.keyboard.press("Enter")
+        page.wait_for_timeout(120)
+
+
+def open_schedule_menu(page) -> None:
+    caret = page.locator('button[aria-haspopup="menu"]').last
+    caret.scroll_into_view_if_needed()
+    caret.click()
+    page.wait_for_timeout(800)
+    page.locator('[role="menuitem"][label="Schedule"]').first.click(force=True)
+
+
+def parse_schedule(s: str) -> tuple[int, int, int, int]:
+    """Return (year, month, day, hour24) from `date`-style string."""
+    m = re.match(r"\w+\s+(\w+)\s+(\d+)\s+(\d+):\d+:\d+\s+(AM|PM)\s+\w+\s+(\d+)", s.strip())
+    if not m:
+        raise ValueError(f"unparseable schedule: {s!r}")
+    mon, day, hr, ampm, year = m.group(1), int(m.group(2)), int(m.group(3)), m.group(4), int(m.group(5))
+    if ampm == "PM" and hr != 12: hr += 12
+    if ampm == "AM" and hr == 12: hr = 0
+    return year, _MONTHS[mon], day, hr
+
+
+def pick_schedule(page, schedule: str) -> None:
+    year, month, day, hour = parse_schedule(schedule)
+    open_schedule_menu(page)
+    # date picker
+    page.locator('#schedule-draft-date-picker [role="button"]').click()
+    page.wait_for_timeout(500)
+    # Advance months until the target day button shows. Calendar opens on
+    # current month; only forward navigation needed (scheduling is future-only).
+    day_label = f'{datetime(year, month, day):%B} {day}'
+    # ponytail: 24 hops = 2y ceiling. Bump if you ever schedule further out.
+    for _ in range(24):
+        if page.locator(f'button[aria-label*="{day_label}"]').count():
+            break
+        page.locator('button[aria-label="Go to the Next Month"]').click()
+        page.wait_for_timeout(200)
+    page.locator(f'button[aria-label*="{day_label}"]').first.click()
+    # time picker is a native <select>, 24h values 0..23
+    page.select_option('#schedule-draft-time-picker', value=str(hour))
+    page.wait_for_timeout(300)
+    page.get_by_text("Confirm Schedule", exact=True).click()
+    page.wait_for_timeout(1500)
 
 
 def _resolve_art(path: str) -> str:
-    """Prefer the client-supplied path; fall back to find_art_path if it's webp."""
+    """Path to a DA-uploadable (non-webp) file. DA rejects webp, so for a webp
+    input prefer an existing non-webp sibling, else convert it to a temp png."""
     p = Path(path)
-    if p.suffix.lower() == ".webp":
-        # ponytail: DA rejects webp; look for a sibling non-webp via existing helper.
+    if p.suffix.lower() != ".webp":
+        return str(p.resolve())
+    try:
         return str(find_art_path(p.name))
-    return str(p.resolve())
+    except SystemExit:
+        # ponytail: no sibling on disk — convert once to /tmp; imagemagick is a dep.
+        png = Path(tempfile.gettempdir()) / f"{p.stem}.png"
+        subprocess.run(["convert", str(p), str(png)], check=True)
+        return str(png)
 
 
 def _da_submit_one(page, art_path: str, title: str, schedule_str: str) -> None:
@@ -681,44 +822,68 @@ def _da_submit_one(page, art_path: str, title: str, schedule_str: str) -> None:
     page.wait_for_timeout(5000)
 
 
-def _wait_for_login(page, timeout_s: int = 120) -> bool:
-    page.goto("https://www.deviantart.com", wait_until="domcontentloaded", timeout=45000)
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        if page.get_by_role("link", name="Submit").count() > 0:
-            return True
-        page.wait_for_timeout(2000)
-        try:
-            page.reload(wait_until="domcontentloaded", timeout=30000)
-        except Exception:
-            pass
+_LOGIN_HINT = ("no valid DeviantArt session — run `nix run <publicator.py>#login`, "
+               "sign in, then publish again")
+
+
+def _prepare_session_from_login() -> None:
+    """Copy the human sign-in profile into a fresh Playwright working copy.
+
+    Login can't happen under Playwright (PerimeterX blocks it), so it's done
+    out-of-band in a real Firefox via #login. Playwright's Firefox is a
+    different build, so we work on a COPY (never the original) and drop the
+    lock/version files that would otherwise make it refuse the profile."""
+    if not LOGIN_DIR.exists() or not any(LOGIN_DIR.iterdir()):
+        raise RuntimeError(_LOGIN_HINT)
+    if SESSION_DIR.exists():
+        shutil.rmtree(SESSION_DIR)
+    # ponytail: skip Firefox caches — cookies/storage carry the session, the
+    # caches are hundreds of MB of dead weight to copy on every run.
+    shutil.copytree(LOGIN_DIR, SESSION_DIR, symlinks=True,
+                    ignore=shutil.ignore_patterns("cache2", "startupCache",
+                                                   "thumbnails", "*.log"))
+    for name in ("lock", ".parentlock", "parent.lock", "compatibility.ini"):
+        (SESSION_DIR / name).unlink(missing_ok=True)
+
+
+def _session_authed(ctx) -> bool:
+    """True if the copied profile carries a live DA auth cookie. Replaces the
+    old interactive login wait: PerimeterX blocks signing in under Playwright,
+    so the session must already exist (established out-of-band via #login)."""
+    now = time.time()
+    for c in ctx.cookies():
+        if c.get("name") in ("auth_secure", "userinfo") and "deviantart" in c.get("domain", ""):
+            exp = c.get("expires", -1)
+            if exp in (-1, None) or exp > now:
+                return True
     return False
 
 
 def publish_batch(entries: list[dict], new_uuids: list[str],
                   json_path: str) -> tuple[int, int, str | None]:
-    """Drive Chromium through DA submission for each entry. Returns (ok, failed, err)."""
+    """Drive Firefox through DA submission for each entry. Returns (ok, failed, err)."""
     from playwright.sync_api import sync_playwright
 
-    SESSION_DIR.mkdir(parents=True, exist_ok=True)
-    has_session = any(SESSION_DIR.iterdir())
-    headless = has_session
-    if not has_session:
-        print("Log in to DeviantArt in the browser window, then leave the tab open — "
-              "publish will proceed once we detect you're signed in.", flush=True)
+    try:
+        _prepare_session_from_login()
+    except RuntimeError as e:
+        return 0, len(entries), str(e)
 
     published = 0
     failed = 0
     err: str | None = None
 
     with sync_playwright() as p:
-        ctx = p.chromium.launch_persistent_context(str(SESSION_DIR), headless=headless)
+        # Headful Firefox on a copy of the pre-signed-in profile. Login is done
+        # out-of-band via #login (PerimeterX blocks it under Playwright); here we
+        # only verify the session carried over. Headful, not headless: headless
+        # is itself a bot-detection signal.
+        ctx = p.firefox.launch_persistent_context(str(SESSION_DIR), headless=False)
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
 
-        if not has_session:
-            if not _wait_for_login(page, timeout_s=120):
-                ctx.close()
-                return 0, len(entries), "login timeout — no Submit link after 120s"
+        if not _session_authed(ctx):
+            ctx.close()
+            return 0, len(entries), _LOGIN_HINT
 
         for entry, u in zip(entries, new_uuids):
             try:
@@ -740,12 +905,60 @@ def publish_batch(entries: list[dict], new_uuids: list[str],
 
 
 # ---------------------------------------------------------------------------
+# Pending queue: entries already in publications.json (state=unpublished)
+# ---------------------------------------------------------------------------
+
+def _pending_art(basename: str) -> Path | None:
+    """Best on-disk file for a stored basename (for thumbnail + upload): prefer a
+    non-webp match, else any match (webp is converted at publish time)."""
+    stem = basename.rsplit(".", 1)[0]
+    matches = [p for p in Path.cwd().rglob(f"*{stem}*") if p.is_file()]
+    if not matches:
+        return None
+    non_webp = [p for p in matches if p.suffix.lower() != ".webp"]
+    return (non_webp[0] if non_webp else matches[0]).resolve()
+
+
+def load_pending_entries(json_path: str) -> list[dict]:
+    """Existing state=unpublished DA entries → gallery queue dicts
+    {uuid, path, title, scheduleTs}. Skips entries whose art can't be found."""
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+    out = []
+    for p in data:
+        if p.get("state") != STATE_UNPUBLISHED:
+            continue
+        try:
+            app = deviantart_apparition(p)
+            art = _pending_art(p["files"][0]["basename"])
+        except (SystemExit, KeyError, IndexError) as e:
+            print(f"skip pending {p.get('uuid')}: {e}", file=sys.stderr)
+            continue
+        if art is None:
+            print(f"skip pending {p.get('uuid')}: art file not found", file=sys.stderr)
+            continue
+        out.append({
+            "uuid": p["uuid"],
+            "path": str(art),
+            "title": app["urlElsePublicationName"],
+            "scheduleTs": app.get("apparitionTimestampIfDifferentThanSubmission"),
+        })
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
-def serve(thumb_dir: str, thumb_map: dict[str, str], args) -> dict | None:
+def serve(thumb_dir: str, thumb_map: dict[str, str], candidate_paths: list[str],
+          pending: list[dict], args) -> dict | None:
     GalleryHandler.thumb_dir = thumb_dir
     GalleryHandler.thumb_map = thumb_map
+    GalleryHandler.candidate_paths = candidate_paths
+    GalleryHandler.pending = pending
     GalleryHandler.initial_max_ts = _max_existing_ts(args.json)
     GalleryHandler.ai_provider = args.ai_provider
     GalleryHandler.ai_model = args.ai_model
@@ -788,14 +1001,18 @@ def main() -> int:
 
     print("Finding unpublished images...")
     candidates = find_candidates(args.picked_dir, args.json, args.n)
-    if not candidates:
-        print("No unpublished images found.")
+    pending = load_pending_entries(args.json)
+    if not candidates and not pending:
+        print("Nothing to publish (no new picks, no pending queue).")
         return 0
 
-    print(f"Found {len(candidates)} candidates. Generating thumbnails...")
+    msg = f"{len(candidates)} new pick(s)"
+    if pending:
+        msg += f", {len(pending)} already queued"
+    print(f"Found {msg}. Generating thumbnails...")
     with tempfile.TemporaryDirectory(prefix="publish-next-") as thumb_dir:
-        thumb_map = generate_thumbnails(candidates, thumb_dir)
-        result = serve(thumb_dir, thumb_map, args)
+        thumb_map = generate_thumbnails(candidates + [e["path"] for e in pending], thumb_dir)
+        result = serve(thumb_dir, thumb_map, candidates, pending, args)
 
     if result is None:
         print("No publish action taken.")

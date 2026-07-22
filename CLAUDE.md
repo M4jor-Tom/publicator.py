@@ -1,0 +1,1 @@
+Deviantart does not accept .webp format for publications

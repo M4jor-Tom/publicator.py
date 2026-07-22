@@ -3,7 +3,7 @@
 
 Replaces echo_first_unstaged_publication_data.sh: source of truth is
 publications.json state field, not git diff --staged.
-Also exposes helpers imported by publish_deviantart.py.
+Also exposes helpers imported by publish_next.py.
 """
 import json
 import subprocess
@@ -43,7 +43,7 @@ def find_art_path(basename: str) -> Path:
 
 
 def format_schedule(ts: int) -> str:
-    # Match `date --date @TS` — parse_schedule in publish_deviantart.py expects it.
+    # Match `date --date @TS` — parse_schedule in publish_next.py expects it.
     return subprocess.check_output(["date", "--date", f"@{ts}"]).decode().strip()
 
 

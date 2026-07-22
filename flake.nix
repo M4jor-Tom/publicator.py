@@ -25,13 +25,32 @@
           '';
         }}/bin/${name}";
       };
+
+      # A real, non-automated Firefox for a one-time DeviantArt sign-in. DA's
+      # PerimeterX wall blocks every Playwright browser at the login page, so
+      # login must happen in a genuine browser (no navigator.webdriver). It
+      # writes the logged-in + cleared session to the repo-local profile that
+      # publish-next then copies. Reproducible: firefox is flake-pinned.
+      login = {
+        type = "app";
+        program = "${pkgs.writeShellApplication {
+          name = "login";
+          runtimeInputs = [ pkgs.firefox ];
+          text = ''
+            profile="$PWD/.deviantart-login"
+            mkdir -p "$profile"
+            echo "Opening Firefox — sign in to DeviantArt, then close the window."
+            echo "(If the page never loads, allow firefox through opensnitch.)"
+            firefox --no-remote --profile "$profile" https://www.deviantart.com/users/login
+          '';
+        }}/bin/login";
+      };
     in {
       apps.${system} = {
         publish-next = app "publish-next" "publish_next.py" [ pkgs.imagemagick browsers ] true;
-        publish-deviantart = app "publish-deviantart" "publish_deviantart.py" [ browsers ] true;
         pw-daemon = app "pw-daemon" "pw_daemon.py" [ browsers ] true;
-        publish = app "publish" "publish.py" [ ] false;
         validate = app "validate" "validate.py" [ ] false;
+        login = login;
       };
       devShells.${system}.default = pkgs.mkShell {
         packages = [ python pkgs.imagemagick pkgs.playwright-driver.browsers ];
