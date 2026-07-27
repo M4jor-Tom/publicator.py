@@ -3,13 +3,16 @@ name: publish-deviantart
 description: Publish or schedule the next unpublished art piece to DeviantArt. Try the automated app first; fall back to driving Chromium manually if it exits non-zero.
 ---
 
-All commands run from the **Art data dir** (the apps read `publications.json` +
-images from the current working directory).
+Every command reads its **publication database** (`publications.json` + images +
+the `.deviantart-session/` profile) from `--data-dir <dir>`, defaulting to the
+current working directory. Run the commands from the Art data dir and omit the
+flag, or run them from anywhere and pass `--data-dir <path-to-art-data-dir>`
+(for nix apps, after `--`: `nix run ... -- --data-dir <dir>`).
 
 ## First: try the automated app
 
 ```sh
-nix run ../publicator.py#publish-deviantart
+nix run ../publicator.py#publish-next
 ```
 
 If it exits 0, the publication is done — stop here.

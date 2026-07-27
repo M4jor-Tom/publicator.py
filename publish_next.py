@@ -39,12 +39,16 @@ from echo_first_unpublished_publication_data import (
     deviantart_apparition,
     find_art_path,
     format_schedule,
+    set_data_dir,
 )
 
 PKG = Path(__file__).resolve().parent  # code assets (schema) travel with the package
-# Runtime state lives in the caller's CWD (the app is invoked from the Art data dir).
-LOGIN_DIR = Path.cwd() / ".deviantart-login"      # human sign-in profile (real Firefox, via #login)
-SESSION_DIR = Path.cwd() / ".deviantart-session"  # Playwright working copy of the login profile
+# Runtime state (publications.json, images, browser session) lives in the
+# publication database dir: --data-dir, defaulting to CWD. main() retargets
+# these once args are parsed.
+DATA_DIR = Path.cwd()
+LOGIN_DIR = DATA_DIR / ".deviantart-login"      # human sign-in profile (real Firefox, via #login)
+SESSION_DIR = DATA_DIR / ".deviantart-session"  # Playwright working copy of the login profile
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tiff", ".mp4"}
 MIME = {
     ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
@@ -912,7 +916,7 @@ def _pending_art(basename: str) -> Path | None:
     """Best on-disk file for a stored basename (for thumbnail + upload): prefer a
     non-webp match, else any match (webp is converted at publish time)."""
     stem = basename.rsplit(".", 1)[0]
-    matches = [p for p in Path.cwd().rglob(f"*{stem}*") if p.is_file()]
+    matches = [p for p in DATA_DIR.rglob(f"*{stem}*") if p.is_file()]
     if not matches:
         return None
     non_webp = [p for p in matches if p.suffix.lower() != ".webp"]
@@ -991,13 +995,22 @@ def serve(thumb_dir: str, thumb_map: dict[str, str], candidate_paths: list[str],
 def main() -> int:
     parser = argparse.ArgumentParser(description="Unified publish workflow (gallery + AI + Chromium DA).")
     parser.add_argument("-n", type=int, default=10)
-    parser.add_argument("--picked-dir", default="picked")
-    parser.add_argument("--json", default="publications.json")
+    parser.add_argument("--data-dir", default=None,
+                        help="publication database dir (publications.json + images + browser session); default: CWD")
+    parser.add_argument("--picked-dir", default=None, help="default: <data-dir>/picked")
+    parser.add_argument("--json", default=None, help="default: <data-dir>/publications.json")
     parser.add_argument("--schema", default=str(PKG / "publicationsSchema.json"))
     parser.add_argument("--ai-provider", default="claude")
     parser.add_argument("--ai-model", default="claude-opus-4-7")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
+
+    global DATA_DIR, LOGIN_DIR, SESSION_DIR
+    DATA_DIR = set_data_dir(args.data_dir)  # also points the echo helpers (find_art_path) at it
+    LOGIN_DIR = DATA_DIR / ".deviantart-login"
+    SESSION_DIR = DATA_DIR / ".deviantart-session"
+    args.json = args.json or str(DATA_DIR / "publications.json")
+    args.picked_dir = args.picked_dir or str(DATA_DIR / "picked")
 
     print("Finding unpublished images...")
     candidates = find_candidates(args.picked_dir, args.json, args.n)

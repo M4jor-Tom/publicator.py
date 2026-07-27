@@ -1,12 +1,14 @@
 """Playwright daemon. Reads Python command chunks from FIFO, execs with `page`,
 `context`, `p` in scope. Writes screenshot + log after each command.
 
-Chromium persistent context in the caller's CWD (`.deviantart-session/`), so it
-shares the logged-in DeviantArt session with publish_next.py.
+Chromium persistent context in the publication database dir (--data-dir, default
+CWD) `.deviantart-session/`, so it shares the logged-in DeviantArt session with
+publish_next.py.
 
 # ponytail: single-page, single-context daemon. Add tab tracking if the
 # publication flow starts spawning multiple tabs we care about.
 """
+import argparse
 import io
 import os
 import traceback
@@ -18,7 +20,11 @@ from playwright.sync_api import sync_playwright
 FIFO = "/tmp/pw.cmd"
 LOG = "/tmp/pw.log"
 SHOT = "/tmp/pw.png"
-SESSION = Path.cwd() / ".deviantart-session"  # shared with publish_next.py
+_ap = argparse.ArgumentParser(description="Playwright daemon for manual DA publishing.")
+_ap.add_argument("--data-dir", default=None,
+                 help="publication database dir holding .deviantart-session/; default: CWD")
+_dd = _ap.parse_args().data_dir
+SESSION = (Path(_dd).resolve() if _dd else Path.cwd()) / ".deviantart-session"  # shared with publish_next.py
 
 if not os.path.exists(FIFO):
     os.mkfifo(FIFO)

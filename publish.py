@@ -10,12 +10,14 @@ from pathlib import Path
 
 parser = argparse.ArgumentParser(description="Add a publication with multiple files")
 parser.add_argument("paths", nargs="+", type=str, help="Paths to files to include")
+parser.add_argument("--data-dir", default=None, help="publication database dir; default: CWD")
 args = parser.parse_args()
 
 paths: list[str] = args.paths
 
+data_dir = Path(args.data_dir).resolve() if args.data_dir else Path.cwd()
 schema_file: str = str(Path(__file__).resolve().parent / "publicationsSchema.json")
-data_file: str = "publications.json"  # CWD-relative: the Art data dir
+data_file: str = str(data_dir / "publications.json")  # publication database
 
 with open(schema_file, "r", encoding="utf-8") as s, open(data_file, "r", encoding="utf-8") as o:
     validate(instance=json.load(o), schema=json.load(s))
