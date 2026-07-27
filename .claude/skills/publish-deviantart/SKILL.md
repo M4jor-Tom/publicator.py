@@ -12,7 +12,7 @@ flag, or run them from anywhere and pass `--data-dir <path-to-art-data-dir>`
 ## First: try the automated app
 
 ```sh
-nix run ../publicator.py#publish-next
+nix run .#publish-next
 ```
 
 If it exits 0, the publication is done — stop here.
@@ -55,5 +55,6 @@ printf '%s' 'page.goto("https://www.deviantart.com")' > /tmp/pw.cmd
 3. Click on "upload your art" and pick file `<pub.path>`
 4. Set as title `<pub.title>`
 5. Tick boxes "Mature" and "Created using AI tools"
-6. Copy the content of `../publicator.py/tags/da.txt` into the "Tags" field
-7. Schedule publication for the `<pub.schedule>`
+6. Drop all the pre-filled tags in the "Tags" field
+7. Copy the content of `../publicator.py/tags/da.txt` into the "Tags" field
+8. Schedule publication for the `<pub.schedule>`
