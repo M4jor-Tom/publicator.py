@@ -16,7 +16,6 @@ it — the submission pages themselves are not bot-walled.
 """
 
 import argparse
-import base64
 import hashlib
 import html
 import json
@@ -28,8 +27,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import urllib.error
-import urllib.request
 import uuid
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -41,6 +38,7 @@ from echo_first_unpublished_publication_data import (
     format_schedule,
     set_data_dir,
 )
+from llm_meta import DEFAULT_MODEL, generate_metadata
 
 PKG = Path(__file__).resolve().parent  # code assets (schema) travel with the package
 # Runtime state (publications.json, images, browser session) lives in the
@@ -56,8 +54,6 @@ MIME = {
 }
 STATE_UNPUBLISHED = "unpublished"
 STATE_PUBLISHED = "published_or_scheduled"
-
-ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 
 
 # ---------------------------------------------------------------------------
@@ -182,90 +178,6 @@ def _selfcheck() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AI: Claude vision → (title, description)
-# ---------------------------------------------------------------------------
-
-_AI_PROMPT = (
-    "Look at this artwork and reply with a strict JSON object, nothing else, "
-    'shape {"title": "...", "description": "..."}. '
-    "Title: <= 50 characters, evocative, no hashtags, no emojis. "
-    "Description: 2-3 sentences, artist voice, no hashtags, no emojis."
-)
-
-
-def _media_type(image_path: str) -> str:
-    return MIME.get(os.path.splitext(image_path)[1].lower(), "image/jpeg")
-
-
-def generate_metadata(image_path: str, provider: str = "claude",
-                      model: str = "claude-opus-4-7") -> tuple[str, str]:
-    if provider != "claude":
-        raise NotImplementedError(f"provider {provider!r} not implemented")
-
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY not set")
-
-    with open(image_path, "rb") as f:
-        b64 = base64.b64encode(f.read()).decode("ascii")
-
-    payload = {
-        "model": model,
-        "max_tokens": 512,
-        "messages": [{
-            "role": "user",
-            "content": [
-                {"type": "image", "source": {
-                    "type": "base64",
-                    "media_type": _media_type(image_path),
-                    "data": b64,
-                }},
-                {"type": "text", "text": _AI_PROMPT},
-            ],
-        }],
-    }
-    req = urllib.request.Request(
-        ANTHROPIC_URL,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=90) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", errors="replace")[:400]
-        raise RuntimeError(f"Anthropic API {e.code}: {detail}") from e
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"Anthropic API unreachable: {e}") from e
-
-    try:
-        text = body["content"][0]["text"]
-    except (KeyError, IndexError, TypeError):
-        raise RuntimeError(f"Unexpected API response shape: {body!r}"[:400])
-
-    # Strip fenced code block if present, then find the JSON object.
-    text = text.strip()
-    m = re.search(r"\{.*\}", text, re.DOTALL)
-    if not m:
-        raise RuntimeError(f"No JSON object in AI reply: {text!r}"[:400])
-    try:
-        parsed = json.loads(m.group(0))
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"AI reply not valid JSON: {e}: {text!r}"[:400]) from e
-
-    title = str(parsed.get("title", "")).strip()
-    description = str(parsed.get("description", "")).strip()
-    if not title or not description:
-        raise RuntimeError(f"AI reply missing title/description: {parsed!r}")
-    return title, description
-
-
-# ---------------------------------------------------------------------------
 # HTTP: gallery + queue endpoints
 # ---------------------------------------------------------------------------
 
@@ -320,7 +232,6 @@ _PAGE_TMPL = r"""<!DOCTYPE html>
 </main>
 <script>
 const INITIAL_MAX_TS = __INITIAL_MAX_TS__;
-const AI_PROVIDER = "__AI_PROVIDER__";
 const AI_MODEL = "__AI_MODEL__";
 const PENDING = __PENDING__; // already-queued entries from publications.json
 
@@ -388,7 +299,7 @@ async function aiGen(cardId, path) {
   btn.disabled = true; btn.textContent = "Generating...";
   try {
     const r = await fetch("/ai", {method:"POST", headers:{"Content-Type":"application/json"},
-                                   body: JSON.stringify({path, provider: AI_PROVIDER, model: AI_MODEL})});
+                                   body: JSON.stringify({path, model: AI_MODEL})});
     const d = await r.json();
     if (!r.ok || d.error) { err.textContent = d.error || ("HTTP " + r.status); return; }
     card.querySelector(".f-title").value = d.title || "";
@@ -473,8 +384,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
     candidate_paths: list[str] = []      # new picks from picked/, add-able
     pending: list[dict] = []             # already-queued entries from publications.json
     initial_max_ts = 0
-    ai_provider = "claude"
-    ai_model = "claude-opus-4-7"
+    ai_model = DEFAULT_MODEL
     json_path = "publications.json"
     schema_path = "publicationsSchema.json"
     publish_done: dict | None = None
@@ -535,7 +445,6 @@ class GalleryHandler(BaseHTTPRequestHandler):
         page = page.replace("__CARDS__", "\n".join(cards))
         page = page.replace("__PENDING__", json.dumps(pending_js))
         page = page.replace("__INITIAL_MAX_TS__", str(self.initial_max_ts))
-        page = page.replace("__AI_PROVIDER__", self.ai_provider)
         page = page.replace("__AI_MODEL__", self.ai_model)
         return page
 
@@ -593,14 +502,13 @@ class GalleryHandler(BaseHTTPRequestHandler):
             elif self.path == "/ai":
                 data = self._json_body()
                 path = data.get("path", "")
-                provider = data.get("provider") or self.ai_provider
                 model = data.get("model") or self.ai_model
                 # Send the thumbnail to Claude, not the full-res original — same
                 # visual info for a fraction of the tokens/latency.
                 image_for_ai = self.thumb_map.get(path, path)
                 try:
-                    title, desc = generate_metadata(image_for_ai, provider, model)
-                except (RuntimeError, NotImplementedError) as e:
+                    title, desc = generate_metadata(image_for_ai, model)
+                except RuntimeError as e:
                     self._send(400, {"error": str(e)}); return
                 self._send(200, {"title": title, "description": desc})
 
@@ -964,7 +872,6 @@ def serve(thumb_dir: str, thumb_map: dict[str, str], candidate_paths: list[str],
     GalleryHandler.candidate_paths = candidate_paths
     GalleryHandler.pending = pending
     GalleryHandler.initial_max_ts = _max_existing_ts(args.json)
-    GalleryHandler.ai_provider = args.ai_provider
     GalleryHandler.ai_model = args.ai_model
     GalleryHandler.json_path = args.json
     GalleryHandler.schema_path = args.schema
@@ -1000,8 +907,7 @@ def main() -> int:
     parser.add_argument("--picked-dir", default=None, help="default: <data-dir>/picked")
     parser.add_argument("--json", default=None, help="default: <data-dir>/publications.json")
     parser.add_argument("--schema", default=str(PKG / "publicationsSchema.json"))
-    parser.add_argument("--ai-provider", default="claude")
-    parser.add_argument("--ai-model", default="claude-opus-4-7")
+    parser.add_argument("--ai-model", default=DEFAULT_MODEL)
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
 
