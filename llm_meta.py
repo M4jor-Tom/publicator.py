@@ -13,8 +13,12 @@ small branch to add when a second provider actually lands, not before (YAGNI).
 """
 import functools
 import json
+import logging
 import os
 import subprocess
+import time
+
+log = logging.getLogger("publicator.llm")
 
 DEFAULT_MODEL = "claude-cli-opus"  # llm-claude-cli's id (scenharnist's default); see `llm models`
 
@@ -38,7 +42,7 @@ def _default_run(argv, stdin, timeout):
     return subprocess.run(argv, input=stdin, capture_output=True, text=True, timeout=timeout)
 
 
-def run_llm(model, prompt, *, schema=None, cwd, run=None, timeout=90):
+def run_llm(model, prompt, *, schema=None, cwd, run=None, timeout=300):
     run = run or functools.partial(_default_run, timeout=timeout)
     # `-o timeout` caps the plugin's own claude-code call to ours; its default
     # (300s) is longer than our subprocess timeout and would otherwise cut off.
@@ -46,13 +50,19 @@ def run_llm(model, prompt, *, schema=None, cwd, run=None, timeout=90):
             "-o", "cwd", str(cwd), "-o", "timeout", str(timeout)]
     if schema is not None:
         argv += ["--schema", json.dumps(schema)]
+    log.debug("llm call (timeout=%ss): %s", timeout, " ".join(argv))
+    log.debug("llm prompt: %s", prompt)
+    started = time.monotonic()
     try:
         cp = run(argv, prompt)
     except subprocess.TimeoutExpired as e:
+        log.debug("llm timed out after %.1fs (limit %ss)", time.monotonic() - started, timeout)
         raise RuntimeError(f"llm timed out after {timeout}s") from e
+    log.debug("llm done in %.1fs rc=%d", time.monotonic() - started, cp.returncode)
     if cp.returncode != 0:
         raise RuntimeError(f"llm failed ({cp.returncode}): {cp.stderr}")
     out = (cp.stdout or "").strip()
+    log.debug("llm output: %s", out)
     if schema is None:
         return out
     try:
@@ -61,11 +71,11 @@ def run_llm(model, prompt, *, schema=None, cwd, run=None, timeout=90):
         raise RuntimeError(f"llm returned non-JSON with schema: {out!r}") from e
 
 
-def generate_metadata(image_path, model=DEFAULT_MODEL, *, run=None):
+def generate_metadata(image_path, model=DEFAULT_MODEL, *, run=None, timeout=300):
     """(title, description) for an artwork, via the key-free `llm` vision path."""
     cwd = os.path.dirname(os.path.abspath(image_path))
     obj = run_llm(model, _PROMPT.format(name=os.path.basename(image_path)),
-                  schema=TITLE_DESC_SCHEMA, cwd=cwd, run=run)
+                  schema=TITLE_DESC_SCHEMA, cwd=cwd, run=run, timeout=timeout)
     title = str(obj.get("title", "")).strip()
     description = str(obj.get("description", "")).strip()
     if not title or not description:

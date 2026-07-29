@@ -18,6 +18,7 @@ pages themselves are not bot-walled.
 
 import argparse
 import json
+import logging
 import os
 import re
 import shutil
@@ -27,6 +28,19 @@ import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
+
+log = logging.getLogger("publicator.da")
+
+
+def setup_logging(verbose: bool) -> None:
+    """App-wide logging. verbose -> DEBUG (llm calls, HTTP, each publish step),
+    else INFO. Shared by both entrypoints; basicConfig is a no-op after the first
+    call, so whichever main() runs first wins (they use the same settings)."""
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
 
 from echo_first_unpublished_publication_data import (
     deviantart_apparition,
@@ -304,7 +318,8 @@ STEPS: list[tuple[str, object]] = [
 
 def submit_entry(page, entry: dict) -> None:
     """Drive DA through every SKILL step for one entry."""
-    for _title, fn in STEPS:
+    for i, (title, fn) in enumerate(STEPS, 1):
+        log.debug("step %d/%d: %s", i, len(STEPS), title)
         fn(page, entry)
 
 
@@ -399,6 +414,7 @@ def publish_batch(entries: list[dict], uuids: list[str],
     """Drive Firefox through DA submission for each entry. Returns (ok, failed, err)."""
     from playwright.sync_api import sync_playwright
 
+    log.debug("preparing Playwright session from %s", LOGIN_DIR)
     try:
         _prepare_session_from_login()
     except RuntimeError as e:
@@ -419,6 +435,8 @@ def publish_batch(entries: list[dict], uuids: list[str],
         if not _session_authed(ctx):
             ctx.close()
             return 0, len(entries), _LOGIN_HINT
+        log.debug("DA session authed; publishing %d entr%s",
+                  len(entries), "y" if len(entries) == 1 else "ies")
 
         for entry, u in zip(entries, uuids):
             try:
@@ -461,7 +479,10 @@ def main() -> int:
     ap.add_argument("--check-steps", action="store_true",
                     help="verify STEPS mirror the skill's steps, then exit")
     ap.add_argument("--selfcheck", action="store_true", help="run offline self-checks, then exit")
+    ap.add_argument("-v", "--verbose", action="store_true", help="debug logging (steps, session, llm)")
     a = ap.parse_args()
+
+    setup_logging(a.verbose)
 
     if a.selfcheck:
         _selfcheck()

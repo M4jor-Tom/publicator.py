@@ -19,6 +19,7 @@ import argparse
 import hashlib
 import html
 import json
+import logging
 import os
 import random
 import shutil
@@ -26,6 +27,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 import uuid
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -37,8 +39,11 @@ from da_publish import (
     configure,
     load_pending_entries,
     publish_batch,
+    setup_logging,
 )
 from llm_meta import DEFAULT_MODEL, generate_metadata
+
+log = logging.getLogger("publicator.gallery")
 
 PKG = Path(__file__).resolve().parent  # code assets (schema) travel with the package
 # Runtime state (publications.json, images, browser session) resolves against the
@@ -169,6 +174,10 @@ def _selfcheck() -> None:
     dt = datetime.fromtimestamp(s0, tz=timezone.utc)
     assert dt.weekday() == 1, f"slot must be Tuesday UTC, got {dt}"
     assert dt.hour == 20, f"slot must be 20:00 UTC, got {dt}"
+    # /original decodes the path arg verbatim, so the allow-list (path in
+    # thumb_map) sees the real path — a non-listed path can't sneak through.
+    q = urllib.parse.parse_qs(urllib.parse.urlparse("/original?path=%2Fetc%2Fpasswd").query)
+    assert q.get("path", [""])[0] == "/etc/passwd", q
     print("selfcheck OK")
 
 
@@ -199,10 +208,12 @@ _PAGE_TMPL = r"""<!DOCTYPE html>
   .badge { display: inline-block; padding: 2px 8px; background: #4caf50; color: #fff;
            border-radius: 4px; font-size: 12px; }
   .actions { display: flex; gap: 8px; }
-  .actions button { flex: 1; padding: 8px; border: none; border-radius: 4px; cursor: pointer;
-                    font-size: 14px; }
+  .actions button, .actions a { flex: 1; padding: 8px; border: none; border-radius: 4px;
+                    cursor: pointer; font-size: 14px; text-align: center; text-decoration: none;
+                    box-sizing: border-box; }
   .btn-add { background: #2196f3; color: white; }
   .btn-del { background: #b03030; color: white; }
+  .btn-view { background: #555; color: white; }
   .form { display: none; flex-direction: column; gap: 6px; }
   .form label { font-size: 12px; color: #aaa; }
   .form input, .form textarea { background: #1a1a1a; color: #eee; border: 1px solid #444;
@@ -380,6 +391,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
     pending: list[dict] = []             # already-queued entries from publications.json
     initial_max_ts = 0
     ai_model = DEFAULT_MODEL
+    ai_timeout = 300
     json_path = "publications.json"
     schema_path = "publicationsSchema.json"
     publish_done: dict | None = None
@@ -393,6 +405,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
             rel = os.path.relpath(thumb_path, self.thumb_dir)
             safe_rel = html.escape(rel, quote=True)
             safe_title = html.escape(e["title"], quote=True)
+            view_href = html.escape("/original?path=" + urllib.parse.quote(e["path"]), quote=True)
             ts = e.get("scheduleTs")
             sched = (datetime.fromtimestamp(ts).strftime("%a %d %b %Y %H:%M")
                      if ts else "no schedule")
@@ -402,6 +415,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
   <div class="name"><span class="badge">queued</span> {safe_title}</div>
   <div class="sched">{html.escape(sched)}</div>
   <div class="actions">
+    <a class="btn-view" href="{view_href}" target="_blank" rel="noopener">View</a>
     <button class="btn-del" onclick="unqueuePending('{cid}')">Remove from queue</button>
   </div>
 </div>""")
@@ -415,11 +429,13 @@ class GalleryHandler(BaseHTTPRequestHandler):
             safe_name = html.escape(filename, quote=True)
             safe_rel = html.escape(rel, quote=True)
             js_path = html.escape(json.dumps(orig_path), quote=True)
+            view_href = html.escape("/original?path=" + urllib.parse.quote(orig_path), quote=True)
             cid = f"card_{idx}"
             cards.append(f"""<div class="card" id="{cid}">
   <img src="/thumbs/{safe_rel}" alt="{safe_name}">
   <div class="name">{safe_name}</div>
   <div class="actions">
+    <a class="btn-view" href="{view_href}" target="_blank" rel="noopener">View</a>
     <button class="btn-add" onclick="openForm('{cid}')">Add</button>
     <button class="btn-del" onclick="delCard('{cid}', {js_path})">Delete</button>
   </div>
@@ -477,6 +493,20 @@ class GalleryHandler(BaseHTTPRequestHandler):
                     self.wfile.write(f.read())
             else:
                 self.send_response(404); self.end_headers()
+        elif self.path.startswith("/original?"):
+            # Full-res original for a card's thumbnail, opened in a new tab.
+            # Allow-list = thumb_map keys (exactly the candidate + pending
+            # originals); anything else 404s, so no arbitrary-path read.
+            qs = urllib.parse.urlparse(self.path).query
+            req_path = urllib.parse.parse_qs(qs).get("path", [""])[0]
+            if req_path in self.thumb_map and os.path.isfile(req_path):
+                self.send_response(200)
+                self.send_header("Content-type", self._guess_mime(req_path))
+                self.end_headers()
+                with open(req_path, "rb") as f:
+                    self.wfile.write(f.read())
+            else:
+                self.send_response(404); self.end_headers()
         else:
             self.send_response(404); self.end_headers()
 
@@ -501,9 +531,12 @@ class GalleryHandler(BaseHTTPRequestHandler):
                 # Send the thumbnail to Claude, not the full-res original — same
                 # visual info for a fraction of the tokens/latency.
                 image_for_ai = self.thumb_map.get(path, path)
+                log.debug("AI metadata: %s (model=%s, timeout=%ss)",
+                          image_for_ai, model, self.ai_timeout)
                 try:
-                    title, desc = generate_metadata(image_for_ai, model)
+                    title, desc = generate_metadata(image_for_ai, model, timeout=self.ai_timeout)
                 except RuntimeError as e:
+                    log.debug("AI metadata failed: %s", e)
                     self._send(400, {"error": str(e)}); return
                 self._send(200, {"title": title, "description": desc})
 
@@ -540,7 +573,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
                 pass
 
     def log_message(self, format, *args):
-        pass
+        log.debug("http %s - %s", self.address_string(), format % args)
 
 
 # ---------------------------------------------------------------------------
@@ -605,6 +638,7 @@ def serve(thumb_dir: str, thumb_map: dict[str, str], candidate_paths: list[str],
     GalleryHandler.pending = pending
     GalleryHandler.initial_max_ts = _max_existing_ts(args.json)
     GalleryHandler.ai_model = args.ai_model
+    GalleryHandler.ai_timeout = args.ai_timeout
     GalleryHandler.json_path = args.json
     GalleryHandler.schema_path = args.schema
     GalleryHandler.publish_done = None
@@ -640,8 +674,14 @@ def main() -> int:
     parser.add_argument("--json", default=None, help="default: <data-dir>/publications.json")
     parser.add_argument("--schema", default=str(PKG / "publicationsSchema.json"))
     parser.add_argument("--ai-model", default=DEFAULT_MODEL)
+    parser.add_argument("--ai-timeout", type=int, default=300,
+                        help="seconds to wait for an AI title/description (default: 300)")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="debug logging (HTTP requests, AI/llm calls, publish steps)")
     args = parser.parse_args()
+
+    setup_logging(args.verbose)
 
     data_dir = configure(args.data_dir)  # points da_publish + echo helpers at the db dir
     args.json = args.json or str(data_dir / "publications.json")
@@ -650,6 +690,7 @@ def main() -> int:
     print("Finding unpublished images...")
     candidates = find_candidates(args.picked_dir, args.json, args.n)
     pending = load_pending_entries(args.json)
+    log.debug("found %d candidate(s), %d pending", len(candidates), len(pending))
     if not candidates and not pending:
         print("Nothing to publish (no new picks, no pending queue).")
         return 0
@@ -660,6 +701,7 @@ def main() -> int:
     print(f"Found {msg}. Generating thumbnails...")
     with tempfile.TemporaryDirectory(prefix="publish-next-") as thumb_dir:
         thumb_map = generate_thumbnails(candidates + [e["path"] for e in pending], thumb_dir)
+        log.debug("generated %d thumbnail(s) in %s", len(thumb_map), thumb_dir)
         result = serve(thumb_dir, thumb_map, candidates, pending, args)
 
     if result is None:
