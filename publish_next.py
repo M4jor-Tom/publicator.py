@@ -21,7 +21,6 @@ import html
 import json
 import os
 import random
-import re
 import shutil
 import subprocess
 import sys
@@ -32,28 +31,24 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from echo_first_unpublished_publication_data import (
-    deviantart_apparition,
-    find_art_path,
-    format_schedule,
-    set_data_dir,
+from da_publish import (
+    STATE_UNPUBLISHED,
+    _atomic_write_json,
+    configure,
+    load_pending_entries,
+    publish_batch,
 )
 from llm_meta import DEFAULT_MODEL, generate_metadata
 
 PKG = Path(__file__).resolve().parent  # code assets (schema) travel with the package
-# Runtime state (publications.json, images, browser session) lives in the
-# publication database dir: --data-dir, defaulting to CWD. main() retargets
-# these once args are parsed.
-DATA_DIR = Path.cwd()
-LOGIN_DIR = DATA_DIR / ".deviantart-login"      # human sign-in profile (real Firefox, via #login)
-SESSION_DIR = DATA_DIR / ".deviantart-session"  # Playwright working copy of the login profile
+# Runtime state (publications.json, images, browser session) resolves against the
+# publication database dir (--data-dir, default CWD). da_publish.configure() owns
+# the DATA_DIR/session paths; main() calls it once args are parsed.
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tiff", ".mp4"}
 MIME = {
     ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
     ".webp": "image/webp", ".gif": "image/gif", ".mp4": "video/mp4",
 }
-STATE_UNPUBLISHED = "unpublished"
-STATE_PUBLISHED = "published_or_scheduled"
 
 
 # ---------------------------------------------------------------------------
@@ -598,269 +593,6 @@ def write_publications(entries: list[dict], json_path: str, schema_path: str) ->
     return new_uuids
 
 
-def _atomic_write_json(path: str, data) -> None:
-    d = os.path.dirname(os.path.abspath(path)) or "."
-    fd, tmp = tempfile.mkstemp(prefix=".pub-", dir=d)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4)
-        os.replace(tmp, path)
-    except Exception:
-        try: os.unlink(tmp)
-        except OSError: pass
-        raise
-
-
-def mark_state(json_path: str, target_uuid: str, state: str) -> None:
-    with open(json_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    for p in data:
-        if p.get("uuid") == target_uuid:
-            p["state"] = state
-            break
-    _atomic_write_json(json_path, data)
-
-
-# ---------------------------------------------------------------------------
-# Playwright Chromium: DA submission
-# ---------------------------------------------------------------------------
-
-TAGS_FILE = PKG / "tags/da.txt"
-# schedule string from `date`: "Tue Jul 28 08:00:00 PM CEST 2026"
-_MONTHS = {m: i + 1 for i, m in enumerate(
-    ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"])}
-
-
-def set_checkbox(page, name: str, want: bool = True) -> None:
-    """DA renders checkboxes as hidden <input>; toggle via JS until state matches.
-    The mature click doesn't always stick on first attempt (racy DOM), so verify."""
-    for _ in range(3):
-        checked = page.evaluate(
-            "n => document.querySelector(`input[name=\"${n}\"]`).checked", name
-        )
-        if checked == want:
-            return
-        page.evaluate(
-            "n => document.querySelector(`input[name=\"${n}\"]`).click()", name
-        )
-        page.wait_for_timeout(300)
-    raise RuntimeError(f"checkbox {name} would not stay {want}")
-
-
-def type_tags(page) -> None:
-    tags = [t.strip() for t in TAGS_FILE.read_text().splitlines() if t.strip()]
-    tag_input = page.locator('input[aria-errormessage$="-error"]').last
-    tag_input.click()
-    for t in tags:
-        tag_input.type(t, delay=10)
-        page.keyboard.press("Enter")
-        page.wait_for_timeout(120)
-
-
-def open_schedule_menu(page) -> None:
-    caret = page.locator('button[aria-haspopup="menu"]').last
-    caret.scroll_into_view_if_needed()
-    caret.click()
-    page.wait_for_timeout(800)
-    page.locator('[role="menuitem"][label="Schedule"]').first.click(force=True)
-
-
-def parse_schedule(s: str) -> tuple[int, int, int, int]:
-    """Return (year, month, day, hour24) from `date`-style string."""
-    m = re.match(r"\w+\s+(\w+)\s+(\d+)\s+(\d+):\d+:\d+\s+(AM|PM)\s+\w+\s+(\d+)", s.strip())
-    if not m:
-        raise ValueError(f"unparseable schedule: {s!r}")
-    mon, day, hr, ampm, year = m.group(1), int(m.group(2)), int(m.group(3)), m.group(4), int(m.group(5))
-    if ampm == "PM" and hr != 12: hr += 12
-    if ampm == "AM" and hr == 12: hr = 0
-    return year, _MONTHS[mon], day, hr
-
-
-def pick_schedule(page, schedule: str) -> None:
-    year, month, day, hour = parse_schedule(schedule)
-    open_schedule_menu(page)
-    # date picker
-    page.locator('#schedule-draft-date-picker [role="button"]').click()
-    page.wait_for_timeout(500)
-    # Advance months until the target day button shows. Calendar opens on
-    # current month; only forward navigation needed (scheduling is future-only).
-    day_label = f'{datetime(year, month, day):%B} {day}'
-    # ponytail: 24 hops = 2y ceiling. Bump if you ever schedule further out.
-    for _ in range(24):
-        if page.locator(f'button[aria-label*="{day_label}"]').count():
-            break
-        page.locator('button[aria-label="Go to the Next Month"]').click()
-        page.wait_for_timeout(200)
-    page.locator(f'button[aria-label*="{day_label}"]').first.click()
-    # time picker is a native <select>, 24h values 0..23
-    page.select_option('#schedule-draft-time-picker', value=str(hour))
-    page.wait_for_timeout(300)
-    page.get_by_text("Confirm Schedule", exact=True).click()
-    page.wait_for_timeout(1500)
-
-
-def _resolve_art(path: str) -> str:
-    """Path to a DA-uploadable (non-webp) file. DA rejects webp, so for a webp
-    input prefer an existing non-webp sibling, else convert it to a temp png."""
-    p = Path(path)
-    if p.suffix.lower() != ".webp":
-        return str(p.resolve())
-    try:
-        return str(find_art_path(p.name))
-    except SystemExit:
-        # ponytail: no sibling on disk — convert once to /tmp; imagemagick is a dep.
-        png = Path(tempfile.gettempdir()) / f"{p.stem}.png"
-        subprocess.run(["convert", str(p), str(png)], check=True)
-        return str(png)
-
-
-def _da_submit_one(page, art_path: str, title: str, schedule_str: str) -> None:
-    page.goto("https://www.deviantart.com", wait_until="domcontentloaded", timeout=45000)
-    page.get_by_role("link", name="Submit").first.click()
-    page.wait_for_load_state("domcontentloaded", timeout=30000)
-
-    with page.expect_file_chooser(timeout=15000) as fc:
-        page.get_by_text("Upload Your Art", exact=True).click()
-    fc.value.set_files(art_path)
-
-    page.get_by_label("Title", exact=False).first.fill(title)
-    set_checkbox(page, "matureContent", True)
-    set_checkbox(page, "isAiGenerated", True)
-    type_tags(page)
-    pick_schedule(page, schedule_str)
-    set_checkbox(page, "matureContent", True)
-
-    page.get_by_text("Schedule", exact=True).last.click()
-    page.wait_for_timeout(5000)
-
-
-_LOGIN_HINT = ("no valid DeviantArt session — run `nix run <publicator.py>#login`, "
-               "sign in, then publish again")
-
-
-def _prepare_session_from_login() -> None:
-    """Copy the human sign-in profile into a fresh Playwright working copy.
-
-    Login can't happen under Playwright (PerimeterX blocks it), so it's done
-    out-of-band in a real Firefox via #login. Playwright's Firefox is a
-    different build, so we work on a COPY (never the original) and drop the
-    lock/version files that would otherwise make it refuse the profile."""
-    if not LOGIN_DIR.exists() or not any(LOGIN_DIR.iterdir()):
-        raise RuntimeError(_LOGIN_HINT)
-    if SESSION_DIR.exists():
-        shutil.rmtree(SESSION_DIR)
-    # ponytail: skip Firefox caches — cookies/storage carry the session, the
-    # caches are hundreds of MB of dead weight to copy on every run.
-    shutil.copytree(LOGIN_DIR, SESSION_DIR, symlinks=True,
-                    ignore=shutil.ignore_patterns("cache2", "startupCache",
-                                                   "thumbnails", "*.log"))
-    for name in ("lock", ".parentlock", "parent.lock", "compatibility.ini"):
-        (SESSION_DIR / name).unlink(missing_ok=True)
-
-
-def _session_authed(ctx) -> bool:
-    """True if the copied profile carries a live DA auth cookie. Replaces the
-    old interactive login wait: PerimeterX blocks signing in under Playwright,
-    so the session must already exist (established out-of-band via #login)."""
-    now = time.time()
-    for c in ctx.cookies():
-        if c.get("name") in ("auth_secure", "userinfo") and "deviantart" in c.get("domain", ""):
-            exp = c.get("expires", -1)
-            if exp in (-1, None) or exp > now:
-                return True
-    return False
-
-
-def publish_batch(entries: list[dict], new_uuids: list[str],
-                  json_path: str) -> tuple[int, int, str | None]:
-    """Drive Firefox through DA submission for each entry. Returns (ok, failed, err)."""
-    from playwright.sync_api import sync_playwright
-
-    try:
-        _prepare_session_from_login()
-    except RuntimeError as e:
-        return 0, len(entries), str(e)
-
-    published = 0
-    failed = 0
-    err: str | None = None
-
-    with sync_playwright() as p:
-        # Headful Firefox on a copy of the pre-signed-in profile. Login is done
-        # out-of-band via #login (PerimeterX blocks it under Playwright); here we
-        # only verify the session carried over. Headful, not headless: headless
-        # is itself a bot-detection signal.
-        ctx = p.firefox.launch_persistent_context(str(SESSION_DIR), headless=False)
-        page = ctx.pages[0] if ctx.pages else ctx.new_page()
-
-        if not _session_authed(ctx):
-            ctx.close()
-            return 0, len(entries), _LOGIN_HINT
-
-        for entry, u in zip(entries, new_uuids):
-            try:
-                art = _resolve_art(entry["path"])
-                schedule_str = format_schedule(int(entry["scheduleTs"]))
-                _da_submit_one(page, art, entry["title"], schedule_str)
-                mark_state(json_path, u, STATE_PUBLISHED)
-                published += 1
-                print(f"published: {entry['title']}", flush=True)
-            except Exception as e:
-                failed += 1
-                err = f"{entry.get('title', entry.get('path'))}: {e}"
-                print(f"AUTOMATION FAILED: {err}", file=sys.stderr, flush=True)
-                break
-
-        ctx.close()
-
-    return published, failed, err
-
-
-# ---------------------------------------------------------------------------
-# Pending queue: entries already in publications.json (state=unpublished)
-# ---------------------------------------------------------------------------
-
-def _pending_art(basename: str) -> Path | None:
-    """Best on-disk file for a stored basename (for thumbnail + upload): prefer a
-    non-webp match, else any match (webp is converted at publish time)."""
-    stem = basename.rsplit(".", 1)[0]
-    matches = [p for p in DATA_DIR.rglob(f"*{stem}*") if p.is_file()]
-    if not matches:
-        return None
-    non_webp = [p for p in matches if p.suffix.lower() != ".webp"]
-    return (non_webp[0] if non_webp else matches[0]).resolve()
-
-
-def load_pending_entries(json_path: str) -> list[dict]:
-    """Existing state=unpublished DA entries → gallery queue dicts
-    {uuid, path, title, scheduleTs}. Skips entries whose art can't be found."""
-    try:
-        with open(json_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return []
-    out = []
-    for p in data:
-        if p.get("state") != STATE_UNPUBLISHED:
-            continue
-        try:
-            app = deviantart_apparition(p)
-            art = _pending_art(p["files"][0]["basename"])
-        except (SystemExit, KeyError, IndexError) as e:
-            print(f"skip pending {p.get('uuid')}: {e}", file=sys.stderr)
-            continue
-        if art is None:
-            print(f"skip pending {p.get('uuid')}: art file not found", file=sys.stderr)
-            continue
-        out.append({
-            "uuid": p["uuid"],
-            "path": str(art),
-            "title": app["urlElsePublicationName"],
-            "scheduleTs": app.get("apparitionTimestampIfDifferentThanSubmission"),
-        })
-    return out
-
-
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -911,12 +643,9 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
 
-    global DATA_DIR, LOGIN_DIR, SESSION_DIR
-    DATA_DIR = set_data_dir(args.data_dir)  # also points the echo helpers (find_art_path) at it
-    LOGIN_DIR = DATA_DIR / ".deviantart-login"
-    SESSION_DIR = DATA_DIR / ".deviantart-session"
-    args.json = args.json or str(DATA_DIR / "publications.json")
-    args.picked_dir = args.picked_dir or str(DATA_DIR / "picked")
+    data_dir = configure(args.data_dir)  # points da_publish + echo helpers at the db dir
+    args.json = args.json or str(data_dir / "publications.json")
+    args.picked_dir = args.picked_dir or str(data_dir / "picked")
 
     print("Finding unpublished images...")
     candidates = find_candidates(args.picked_dir, args.json, args.n)

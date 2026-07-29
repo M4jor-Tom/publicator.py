@@ -85,8 +85,21 @@
         # `claude` on PATH so llm-claude-cli can shell out for AI metadata
         # (uses the logged-in Claude subscription at $HOME/.claude — no API key).
         publish-next = app "publish-next" "publish_next.py" [ pkgs.imagemagick browsers claude ] true;
+        # Publish ONE publications.json entry (the extracted Playwright flow):
+        #   nix run .#da-publish -- --data-dir <dir> [--uuid <id>]
+        da-publish = app "da-publish" "da_publish.py" [ pkgs.imagemagick browsers ] true;
         pw-daemon = app "pw-daemon" "pw_daemon.py" [ browsers ] true;
         validate = app "validate" "validate.py" [ ] false;
+        # Drift guard: fails if the publish-deviantart skill grew a step that
+        # da_publish.py's STEPS doesn't implement. No browser/data deps (cheap CI).
+        check-steps = {
+          type = "app";
+          program = "${pkgs.writeShellApplication {
+            name = "check-steps";
+            runtimeInputs = [ python ];
+            text = ''exec python ${src}/da_publish.py --check-steps "$@"'';
+          }}/bin/check-steps";
+        };
         login = login;
       };
       devShells.${system}.default = pkgs.mkShell {
