@@ -243,31 +243,29 @@ def _step_checkboxes(page, e):
 
 
 def _step_clear_tags(page, e):
-    """Step 6: remove DeviantArt's pre-filled / auto-suggested tags so only
-    tags/da.txt ends up on the deviation. DA renders each tag as a chip with a
-    remove control; click them until none remain, falling back to Backspace in
-    the (now empty) tag input — the standard tag-widget way to delete the
-    trailing chip.
+    """Step 6: remove any tags already in the Tags field so only tags/da.txt
+    ends up on the deviation. DA caps a deviation at 30 tags, so a single
+    leftover tag overflows the field once add_tags types its 30.
 
-    ponytail: the chip/remove selector is best-effort and UNVERIFIED against the
-    current live submit form — if DA reworks the tag markup, this is the one
-    place that breaks. 40-chip ceiling covers any real pre-fill.
+    A freshly-uploaded deviation usually starts empty (the greyed "Suggested
+    tags" below the field are click-to-add hints, NOT filled tags), but a
+    restored draft can arrive pre-tagged. Each committed tag renders as a chip
+    `span[role="button"][data-tag]` whose click removes it (verified against the
+    live submit form); click them until none remain.
+
+    ponytail: 60 = DA's 30-tag cap x2 headroom. `data-tag` marks entered chips
+    apart from the field's "Copy Tags" <button>; if DA reworks that markup this
+    is the one place to update.
     """
-    tag_input = _tag_input(page)
-    tag_input.click()
-    removers = page.locator(
-        '[data-hook="tag"] button, [class*="tag" i] button[aria-label*="remove" i], '
-        'button[aria-label*="remove tag" i]'
-    )
-    for _ in range(40):
-        if removers.count() == 0:
-            tag_input.press("Backspace")  # chip-less fallback / final sweep
-            if removers.count() == 0:
-                break
+    _tag_input(page).click()
+    chips = page.locator('[role="combobox"] span[role="button"][data-tag]')
+    for _ in range(60):
+        if chips.count() == 0:
+            break
         try:
-            removers.first.click()
+            chips.first.click()
         except Exception:
-            tag_input.press("Backspace")
+            pass  # chip list re-rendered mid-iteration; loop re-locates and retries
         page.wait_for_timeout(80)
 
 

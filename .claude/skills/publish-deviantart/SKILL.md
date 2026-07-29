@@ -12,10 +12,12 @@ flag, or run them from anywhere and pass `--data-dir <path-to-art-data-dir>`
 ## First: try the automated app
 
 ```sh
-nix run .#publish-next
+nix run .#da-publish -- --data-dir <path-to-art-data-dir>
 ```
 
-If it exits 0, the publication is done — stop here.
+Publishes ONE entry — the first `state=unpublished` in `publications.json` (add
+`--uuid <id>` to target a specific one). If it exits 0, the publication is done
+— stop here.
 
 If it exits non-zero, it prints `AUTOMATION FAILED: <reason>` to stderr and
 closes the browser cleanly. Fall through to the manual steps below to finish the
