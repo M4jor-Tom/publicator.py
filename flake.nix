@@ -39,7 +39,10 @@
         pythonImportsCheck = [ "llm_claude_cli" ];
         doCheck = false;  # upstream tests drive the real claude CLI
       };
-      python = pyInterp.withPackages (ps: [ ps.jsonschema ps.playwright ps.llm llm-claude-cli ]);
+      # `llm-openrouter` IS in this nixpkgs pin (unlike llm-claude-cli above), so
+      # no vendoring needed. The API key is NOT baked in: it reads $OPENROUTER_KEY
+      # at runtime.
+      python = pyInterp.withPackages (ps: [ ps.jsonschema ps.playwright ps.llm llm-claude-cli ps.llm-openrouter ]);
       src = ./.;
       browsers = pkgs.playwright-driver.browsers;
       # Each script resolves its code assets (schema, tags/) via __file__, so apps
