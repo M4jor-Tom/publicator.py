@@ -60,3 +60,19 @@ def test_generate_metadata_empty_raises():
     with pytest.raises(RuntimeError, match="missing title/description"):
         llm_meta.generate_metadata("/imgs/x.jpg",
                                     run=make_run(stdout='{"title": "", "description": "x"}'))
+
+
+def test_generate_metadata_openrouter_uses_attachment():
+    cap = {}
+    title, desc = llm_meta.generate_metadata(
+        "/imgs/thumb.jpg", model="openrouter/google/gemini-2.0-flash-exp:free",
+        run=make_run(stdout='{"title": "Dawn", "description": "A quiet field."}', capture=cap))
+    assert title == "Dawn" and desc == "A quiet field."
+    argv = cap["argv"]
+    assert argv[:3] == ["llm", "-m", "openrouter/google/gemini-2.0-flash-exp:free"]
+    i = argv.index("-a")
+    assert argv[i + 1].endswith("thumb.jpg")      # image as attachment, absolute path
+    assert "allowedTools" not in argv and "-o" not in argv  # no claude-cli Read path
+    j = argv.index("--schema")
+    assert json.loads(argv[j + 1]) == llm_meta.TITLE_DESC_SCHEMA
+    assert "attached" in cap["stdin"].lower()      # attachment prompt, not "read the file"

@@ -6,10 +6,9 @@ the Read tool (`-o allowedTools Read -o cwd <dir>`) — `llm -a` attachments do 
 work through this plugin. Pattern copied from scenharnist's `llmcli.run_llm`; the
 ~25 lines beat coupling two sibling flakes.  # ponytail: duplication < cross-repo dep
 
-To add an API-key provider later: `llm install llm-anthropic` (or -openai/-gemini),
-set the key (`llm keys set ...` or env var), and pass its `-m` id. Those models have
-no Read tool, so swap the Read-path prompt for a `-a <image>` attachment then — a
-small branch to add when a second provider actually lands, not before (YAGNI).
+A second provider has landed: `openrouter/*` model ids (via `llm-openrouter`,
+API-key based) have no Read tool, so they go through a `-a <image>` attachment
+instead of the Read-path prompt.
 """
 import functools
 import json
@@ -37,17 +36,28 @@ _PROMPT = (
     "sentences, in the artist's voice). No hashtags, no emojis."
 )
 
+_PROMPT_ATTACH = (
+    "Look at the attached artwork. Reply with a title (<= 50 characters, "
+    "evocative) and a description (2-3 sentences, in the artist's voice). "
+    "No hashtags, no emojis."
+)
+
 
 def _default_run(argv, stdin, timeout):
     return subprocess.run(argv, input=stdin, capture_output=True, text=True, timeout=timeout)
 
 
-def run_llm(model, prompt, *, schema=None, cwd, run=None, timeout=300):
+def run_llm(model, prompt, *, schema=None, cwd=None, attach=None, run=None, timeout=300):
     run = run or functools.partial(_default_run, timeout=timeout)
-    # `-o timeout` caps the plugin's own claude-code call to ours; its default
-    # (300s) is longer than our subprocess timeout and would otherwise cut off.
-    argv = ["llm", "-m", model, "-o", "allowedTools", "Read",
-            "-o", "cwd", str(cwd), "-o", "timeout", str(timeout)]
+    if attach is not None:
+        # API-key providers (openrouter/*): vision via -a attachment. The
+        # claude-cli -o options don't exist on these models, so omit them.
+        argv = ["llm", "-m", model, "-a", str(attach)]
+    else:
+        # llm-claude-cli: key-free, vision via the Read tool over cwd.
+        # `-o timeout` caps the plugin's own claude-code call to ours.
+        argv = ["llm", "-m", model, "-o", "allowedTools", "Read",
+                "-o", "cwd", str(cwd), "-o", "timeout", str(timeout)]
     if schema is not None:
         argv += ["--schema", json.dumps(schema)]
     log.debug("llm call (timeout=%ss): %s", timeout, " ".join(argv))
@@ -73,9 +83,14 @@ def run_llm(model, prompt, *, schema=None, cwd, run=None, timeout=300):
 
 def generate_metadata(image_path, model=DEFAULT_MODEL, *, run=None, timeout=300):
     """(title, description) for an artwork, via the key-free `llm` vision path."""
-    cwd = os.path.dirname(os.path.abspath(image_path))
-    obj = run_llm(model, _PROMPT.format(name=os.path.basename(image_path)),
-                  schema=TITLE_DESC_SCHEMA, cwd=cwd, run=run, timeout=timeout)
+    abspath = os.path.abspath(image_path)
+    if model.startswith("openrouter/"):
+        obj = run_llm(model, _PROMPT_ATTACH, schema=TITLE_DESC_SCHEMA,
+                      attach=abspath, run=run, timeout=timeout)
+    else:
+        obj = run_llm(model, _PROMPT.format(name=os.path.basename(image_path)),
+                      schema=TITLE_DESC_SCHEMA, cwd=os.path.dirname(abspath),
+                      run=run, timeout=timeout)
     title = str(obj.get("title", "")).strip()
     description = str(obj.get("description", "")).strip()
     if not title or not description:
