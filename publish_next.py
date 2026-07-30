@@ -231,6 +231,10 @@ _PAGE_TMPL = r"""<!DOCTYPE html>
 <header>
   <h1>Publish next</h1>
   <span id="queue-count">0 queued</span>
+  <select id="ai-model" title="AI model for Generate with AI">
+    <option value="__AI_MODEL__">Claude (subscription)</option>
+    <option value="__OPENROUTER_MODEL__">OpenRouter (free)</option>
+  </select>
   <button id="publish-btn" onclick="publishQueue()" disabled>Publish</button>
 </header>
 <main>
@@ -238,7 +242,6 @@ _PAGE_TMPL = r"""<!DOCTYPE html>
 </main>
 <script>
 const INITIAL_MAX_TS = __INITIAL_MAX_TS__;
-const AI_MODEL = "__AI_MODEL__";
 const PENDING = __PENDING__; // already-queued entries from publications.json
 
 const queue = []; // [{cardId, path, title, description, price, scheduleTs, uuid?}]
@@ -304,8 +307,9 @@ async function aiGen(cardId, path) {
   err.textContent = "";
   btn.disabled = true; btn.textContent = "Generating...";
   try {
+    const model = document.getElementById("ai-model").value;
     const r = await fetch("/ai", {method:"POST", headers:{"Content-Type":"application/json"},
-                                   body: JSON.stringify({path, model: AI_MODEL})});
+                                   body: JSON.stringify({path, model})});
     const d = await r.json();
     if (!r.ok || d.error) { err.textContent = d.error || ("HTTP " + r.status); return; }
     card.querySelector(".f-title").value = d.title || "";
@@ -391,6 +395,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
     pending: list[dict] = []             # already-queued entries from publications.json
     initial_max_ts = 0
     ai_model = DEFAULT_MODEL
+    openrouter_model = ""
     ai_timeout = 300
     json_path = "publications.json"
     schema_path = "publicationsSchema.json"
@@ -456,7 +461,8 @@ class GalleryHandler(BaseHTTPRequestHandler):
         page = page.replace("__CARDS__", "\n".join(cards))
         page = page.replace("__PENDING__", json.dumps(pending_js))
         page = page.replace("__INITIAL_MAX_TS__", str(self.initial_max_ts))
-        page = page.replace("__AI_MODEL__", self.ai_model)
+        page = page.replace("__AI_MODEL__", html.escape(self.ai_model, quote=True))
+        page = page.replace("__OPENROUTER_MODEL__", html.escape(self.openrouter_model, quote=True))
         return page
 
     def _json_body(self) -> dict:
@@ -528,6 +534,8 @@ class GalleryHandler(BaseHTTPRequestHandler):
                 data = self._json_body()
                 path = data.get("path", "")
                 model = data.get("model") or self.ai_model
+                if model not in (self.ai_model, self.openrouter_model):
+                    self._send(400, {"error": f"model not allowed: {model}"}); return
                 # Send the thumbnail to Claude, not the full-res original — same
                 # visual info for a fraction of the tokens/latency.
                 image_for_ai = self.thumb_map.get(path, path)
@@ -638,6 +646,7 @@ def serve(thumb_dir: str, thumb_map: dict[str, str], candidate_paths: list[str],
     GalleryHandler.pending = pending
     GalleryHandler.initial_max_ts = _max_existing_ts(args.json)
     GalleryHandler.ai_model = args.ai_model
+    GalleryHandler.openrouter_model = args.openrouter_model
     GalleryHandler.ai_timeout = args.ai_timeout
     GalleryHandler.json_path = args.json
     GalleryHandler.schema_path = args.schema
@@ -674,6 +683,9 @@ def main() -> int:
     parser.add_argument("--json", default=None, help="default: <data-dir>/publications.json")
     parser.add_argument("--schema", default=str(PKG / "publicationsSchema.json"))
     parser.add_argument("--ai-model", default=DEFAULT_MODEL)
+    parser.add_argument("--openrouter-model",
+                        default="openrouter/google/gemini-2.0-flash-exp:free",
+                        help="free vision model for the OpenRouter option; needs $OPENROUTER_KEY")
     parser.add_argument("--ai-timeout", type=int, default=300,
                         help="seconds to wait for an AI title/description (default: 300)")
     parser.add_argument("--port", type=int, default=8765)
