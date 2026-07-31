@@ -684,7 +684,9 @@ def main() -> int:
     parser.add_argument("--schema", default=str(PKG / "publicationsSchema.json"))
     parser.add_argument("--ai-model", default=DEFAULT_MODEL)
     parser.add_argument("--openrouter-model",
-                        default="openrouter/google/gemini-2.0-flash-exp:free",
+                        # ponytail: free :free ids churn on OpenRouter; this is the current
+                        # free model with both vision and structured_outputs. Override via flag.
+                        default="openrouter/google/gemma-4-26b-a4b-it:free",
                         help="free vision model for the OpenRouter option; needs $OPENROUTER_KEY")
     parser.add_argument("--ai-timeout", type=int, default=300,
                         help="seconds to wait for an AI title/description (default: 300)")
