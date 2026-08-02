@@ -47,8 +47,6 @@ from validate import load_config, validate_publications
 
 log = logging.getLogger("publicator.gallery")
 
-PKG = Path(__file__).resolve().parent  # code assets (schema) travel with the package
-SCHEMA_PATH = PKG / "publicationsSchema.json"  # bundled code asset, not configurable
 # Runtime state (publications.json, images, browser session) resolves against the
 # publication database dir (--data-dir, default CWD). da_publish.configure() owns
 # the DATA_DIR/session paths; main() calls it once args are parsed.
@@ -182,7 +180,7 @@ def _selfcheck() -> None:
     q = urllib.parse.parse_qs(urllib.parse.urlparse("/original?path=%2Fetc%2Fpasswd").query)
     assert q.get("path", [""])[0] == "/etc/passwd", q
     # write_publications: appends state=unpublished, returns one uuid per entry,
-    # validates against the bundled SCHEMA_PATH (no --schema flag).
+    # validates via validate_publications (schema + config allow-list).
     with tempfile.TemporaryDirectory() as _d:
         _jp = os.path.join(_d, "publications.json")
         _img = os.path.join(_d, "pic.png")
@@ -282,8 +280,6 @@ _PAGE_TMPL = r"""<!DOCTYPE html>
 <script>
 const INITIAL_MAX_TS = __INITIAL_MAX_TS__;
 const PENDING = __PENDING__; // already-queued entries from publications.json
-const TIERS = __TIERS__;
-const GALLERIES = __GALLERIES__;
 
 const queue = []; // [{cardId, path, title, description, price, scheduleTs, tier, galleries, uuid?}]
 
@@ -488,6 +484,24 @@ def _tier_gallery_fields(config):
             f'<div class="galleries"><span>Galleries</span>{gals}</div>')
 
 
+def _card_form_html(cid, js_path, tg, save_label):
+    """The shared edit form rendered on every card (candidate + pending). Only the
+    save-button label differs between the two call sites."""
+    return f"""  <div class="form">
+    <label>Title <input type="text" class="f-title" maxlength="50"></label>
+    <label>Description <textarea class="f-description"></textarea></label>
+    <label>Price (optional) <input type="number" class="f-price" min="0" step="0.01"></label>
+    <label>Schedule <input type="datetime-local" class="f-schedule"></label>
+    {tg}
+    <button class="btn-ai" onclick="aiGen('{cid}', {js_path})">Generate with AI</button>
+    <div class="err"></div>
+    <div class="form-actions">
+      <button class="btn-save" onclick="saveCard('{cid}', {js_path})">{save_label}</button>
+      <button class="btn-cancel" onclick="closeForm('{cid}')">Cancel</button>
+    </div>
+  </div>"""
+
+
 class GalleryHandler(BaseHTTPRequestHandler):
     thumb_dir = ""
     thumb_map: dict[str, str] = {}
@@ -525,19 +539,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
     <a class="btn-view" href="{view_href}" target="_blank" rel="noopener">View</a>
     <button class="btn-add" onclick="openForm('{cid}')">Edit</button>
   </div>
-  <div class="form">
-    <label>Title <input type="text" class="f-title" maxlength="50"></label>
-    <label>Description <textarea class="f-description"></textarea></label>
-    <label>Price (optional) <input type="number" class="f-price" min="0" step="0.01"></label>
-    <label>Schedule <input type="datetime-local" class="f-schedule"></label>
-    {tg}
-    <button class="btn-ai" onclick="aiGen('{cid}', {js_pathp})">Generate with AI</button>
-    <div class="err"></div>
-    <div class="form-actions">
-      <button class="btn-save" onclick="saveCard('{cid}', {js_pathp})">Save changes</button>
-      <button class="btn-cancel" onclick="closeForm('{cid}')">Cancel</button>
-    </div>
-  </div>
+{_card_form_html(cid, js_pathp, tg, "Save changes")}
 </div>""")
             pending_js.append({"cardId": cid, "uuid": e["uuid"], "path": e["path"],
                                "title": e["title"], "description": e.get("description"),
@@ -561,19 +563,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
     <button class="btn-add" onclick="openForm('{cid}')">Add</button>
     <button class="btn-del" onclick="delCard('{cid}', {js_path})">Delete</button>
   </div>
-  <div class="form">
-    <label>Title <input type="text" class="f-title" maxlength="50"></label>
-    <label>Description <textarea class="f-description"></textarea></label>
-    <label>Price (optional) <input type="number" class="f-price" min="0" step="0.01"></label>
-    <label>Schedule <input type="datetime-local" class="f-schedule"></label>
-    {tg}
-    <button class="btn-ai" onclick="aiGen('{cid}', {js_path})">Generate with AI</button>
-    <div class="err"></div>
-    <div class="form-actions">
-      <button class="btn-save" onclick="saveCard('{cid}', {js_path})">Save to queue</button>
-      <button class="btn-cancel" onclick="closeForm('{cid}')">Cancel</button>
-    </div>
-  </div>
+{_card_form_html(cid, js_path, tg, "Save to queue")}
 </div>""")
         page = _PAGE_TMPL
         page = page.replace("__CARDS__", "\n".join(cards))
@@ -581,8 +571,6 @@ class GalleryHandler(BaseHTTPRequestHandler):
         page = page.replace("__INITIAL_MAX_TS__", str(self.initial_max_ts))
         page = page.replace("__AI_MODEL__", html.escape(self.ai_model, quote=True))
         page = page.replace("__OPENROUTER_MODEL__", html.escape(self.openrouter_model, quote=True))
-        page = page.replace("__TIERS__", json.dumps(self.config.get("tiers", [])))
-        page = page.replace("__GALLERIES__", json.dumps(self.config.get("galleries", [])))
         return page
 
     def _json_body(self) -> dict:
@@ -679,7 +667,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
                 existing = [e for e in entries if e.get("uuid")]
                 new = [e for e in entries if not e.get("uuid")]
                 try:
-                    new_uuids = (write_publications(new, self.json_path)
+                    new_uuids = (write_publications(new, self.json_path, self.config)
                                  if new else [])
                 except Exception as e:
                     self._send(400, {"error": f"schema/write failed: {e}"}); return
@@ -699,7 +687,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
                 if not entries:
                     self._send(400, {"error": "nothing to stage"}); return
                 try:
-                    uuids = write_publications(entries, self.json_path)
+                    uuids = write_publications(entries, self.json_path, self.config)
                 except Exception as e:
                     self._send(400, {"error": f"schema/write failed: {e}"}); return
                 # No publish_done set → serve loop keeps running, session stays alive.
@@ -738,8 +726,9 @@ class GalleryHandler(BaseHTTPRequestHandler):
 # Publications.json write
 # ---------------------------------------------------------------------------
 
-def write_publications(entries: list[dict], json_path: str) -> list[str]:
-    """Append entries as state=unpublished, validate, atomic write. Returns their UUIDs in order."""
+def write_publications(entries: list[dict], json_path: str, config: dict | None = None) -> list[str]:
+    """Append entries as state=unpublished, validate, atomic write. Returns their UUIDs in order.
+    config: tier/gallery allow-list; defaults to a fresh load_config(cwd) for standalone callers."""
     try:
         with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -760,12 +749,10 @@ def write_publications(entries: list[dict], json_path: str) -> list[str]:
             "urlElsePublicationName": e["title"],
             "apparitionTimestampIfDifferentThanSubmission": ts,
         }
-        if "price" in e and e["price"] is not None:
-            apparition["priceIfNotFree"] = float(e["price"])
-        if e.get("tier"):
-            apparition["tier"] = e["tier"]
-        if e.get("galleries"):
-            apparition["galleries"] = list(e["galleries"])
+        price = e.get("price")
+        _set_or_pop(apparition, "priceIfNotFree", float(price) if price not in (None, "") else None)
+        _set_or_pop(apparition, "tier", e.get("tier") or None)
+        _set_or_pop(apparition, "galleries", list(e["galleries"]) if e.get("galleries") else None)
         u = str(uuid.uuid4())
         new_uuids.append(u)
         data.append({
@@ -779,7 +766,7 @@ def write_publications(entries: list[dict], json_path: str) -> list[str]:
             "apparitions": [apparition],
         })
 
-    validate_publications(data, load_config(Path.cwd()))
+    validate_publications(data, config if config is not None else load_config(Path.cwd()))
     _atomic_write_json(json_path, data)
     return new_uuids
 

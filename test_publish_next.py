@@ -24,4 +24,3 @@ def test_page_renders_config_tiers_galleries():
     page = publish_next.GalleryHandler._build_page(H)
     assert 'class="f-tier"' in page and '>gold<' in page
     assert 'class="f-gallery"' in page and 'value="Art"' in page
-    assert 'const TIERS = ["gold"]' in page
