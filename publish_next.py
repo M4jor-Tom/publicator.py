@@ -46,6 +46,7 @@ from llm_meta import DEFAULT_MODEL, generate_metadata
 log = logging.getLogger("publicator.gallery")
 
 PKG = Path(__file__).resolve().parent  # code assets (schema) travel with the package
+SCHEMA_PATH = PKG / "publicationsSchema.json"  # bundled code asset, not configurable
 # Runtime state (publications.json, images, browser session) resolves against the
 # publication database dir (--data-dir, default CWD). da_publish.configure() owns
 # the DATA_DIR/session paths; main() calls it once args are parsed.
@@ -178,6 +179,22 @@ def _selfcheck() -> None:
     # thumb_map) sees the real path — a non-listed path can't sneak through.
     q = urllib.parse.parse_qs(urllib.parse.urlparse("/original?path=%2Fetc%2Fpasswd").query)
     assert q.get("path", [""])[0] == "/etc/passwd", q
+    # write_publications: appends state=unpublished, returns one uuid per entry,
+    # validates against the bundled SCHEMA_PATH (no --schema flag).
+    with tempfile.TemporaryDirectory() as _d:
+        _jp = os.path.join(_d, "publications.json")
+        _img = os.path.join(_d, "pic.png")
+        with open(_img, "wb") as _f:
+            _f.write(b"\x89PNG\r\n\x1a\n")  # bytes are enough for sha512
+        _uuids = write_publications(
+            [{"path": _img, "title": "t", "description": "d", "scheduleTs": s0}],
+            _jp,
+        )
+        assert len(_uuids) == 1, _uuids
+        with open(_jp) as _f:
+            _rows = json.load(_f)
+        assert len(_rows) == 1 and _rows[0]["uuid"] == _uuids[0], _rows
+        assert _rows[0]["state"] == STATE_UNPUBLISHED, _rows[0]
     print("selfcheck OK")
 
 
@@ -398,7 +415,6 @@ class GalleryHandler(BaseHTTPRequestHandler):
     openrouter_model = ""
     ai_timeout = 300
     json_path = "publications.json"
-    schema_path = "publicationsSchema.json"
     publish_done: dict | None = None
 
     def _build_page(self) -> str:
@@ -559,7 +575,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
                 existing = [e for e in entries if e.get("uuid")]
                 new = [e for e in entries if not e.get("uuid")]
                 try:
-                    new_uuids = (write_publications(new, self.json_path, self.schema_path)
+                    new_uuids = (write_publications(new, self.json_path)
                                  if new else [])
                 except Exception as e:
                     self._send(400, {"error": f"schema/write failed: {e}"}); return
@@ -588,7 +604,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
 # Publications.json write
 # ---------------------------------------------------------------------------
 
-def write_publications(entries: list[dict], json_path: str, schema_path: str) -> list[str]:
+def write_publications(entries: list[dict], json_path: str) -> list[str]:
     """Append entries as state=unpublished, validate, atomic write. Returns their UUIDs in order."""
     try:
         with open(json_path, "r", encoding="utf-8") as f:
@@ -626,7 +642,7 @@ def write_publications(entries: list[dict], json_path: str, schema_path: str) ->
         })
 
     from jsonschema import validate
-    with open(schema_path, "r", encoding="utf-8") as s:
+    with open(SCHEMA_PATH, "r", encoding="utf-8") as s:
         schema = json.load(s)
     validate(instance=data, schema=schema)
 
@@ -649,7 +665,6 @@ def serve(thumb_dir: str, thumb_map: dict[str, str], candidate_paths: list[str],
     GalleryHandler.openrouter_model = args.openrouter_model
     GalleryHandler.ai_timeout = args.ai_timeout
     GalleryHandler.json_path = args.json
-    GalleryHandler.schema_path = args.schema
     GalleryHandler.publish_done = None
 
     server = ThreadingHTTPServer(("127.0.0.1", args.port), GalleryHandler)
@@ -681,7 +696,6 @@ def main() -> int:
                         help="publication database dir (publications.json + images + browser session); default: CWD")
     parser.add_argument("--picked-dir", default=None, help="default: <data-dir>/picked")
     parser.add_argument("--json", default=None, help="default: <data-dir>/publications.json")
-    parser.add_argument("--schema", default=str(PKG / "publicationsSchema.json"))
     parser.add_argument("--ai-model", default=DEFAULT_MODEL)
     parser.add_argument("--openrouter-model",
                         # ponytail: free :free ids churn on OpenRouter; this is the current
