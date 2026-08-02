@@ -147,6 +147,8 @@ def load_pending_entries(json_path: str) -> list[dict]:
             "description": p.get("description", ""),
             "scheduleTs": app.get("apparitionTimestampIfDifferentThanSubmission"),
             "price": app.get("priceIfNotFree"),
+            "tier": app.get("tier"),
+            "galleries": app.get("galleries", []),
         })
     return out
 
@@ -316,6 +318,25 @@ def _step_premium(page, e):
     page.locator(PREMIUM_PRICE_SELECTOR).fill(f"{float(price):g}")
 
 
+TIER_SELECTOR = 'select[name="premiumFolderTier"]'
+GALLERY_ADD_BUTTON = 'button[aria-label="Add to Gallery"]'
+
+
+def _step_tier(page, e):
+    tier = e.get("tier")
+    if not tier:
+        return
+    page.select_option(TIER_SELECTOR, label=tier)
+
+
+def _step_galleries(page, e):
+    for g in e.get("galleries") or []:
+        page.locator(GALLERY_ADD_BUTTON).first.click()
+        page.wait_for_timeout(300)
+        page.get_by_text(g, exact=True).first.click()
+        page.wait_for_timeout(200)
+
+
 def _step_schedule(page, e):
     pick_schedule(page, format_schedule(int(e["scheduleTs"])))
     set_checkbox(page, "matureContent", True)  # re-assert: racy, can drop after the schedule dialog
@@ -336,6 +357,8 @@ STEPS: list[tuple[str, object]] = [
     ('Drop all the pre-filled tags in the "Tags" field', _step_clear_tags),
     ('Copy the content of ../publicator.py/tags/da.txt into the "Tags" field', _step_add_tags),
     ('If the piece has a price, tick "Submit as Premium Download" and set the price', _step_premium),
+    ("Set the subscription tier <pub.tier>", _step_tier),
+    ("Add to galleries <pub.galleries>", _step_galleries),
     ("Schedule publication for the <pub.schedule>", _step_schedule),
 ]
 
@@ -493,6 +516,8 @@ def _selfcheck() -> None:
     class _NoPage:
         def __getattr__(self, _n): raise AssertionError("premium step touched page for a free entry")
     _step_premium(_NoPage(), {"price": None})
+    _step_tier(_NoPage(), {})        # no tier -> no-op
+    _step_galleries(_NoPage(), {})   # no galleries -> no-op
     print("selfcheck OK")
 
 
