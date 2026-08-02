@@ -290,9 +290,11 @@ function localInputToTs(s) {
 }
 
 function refreshCount() {
+  const onPad = queue.filter(e => e.uuid).length; // entries persisted to publications.json
   document.getElementById("queue-count").textContent = queue.length + " queued";
   document.getElementById("publish-btn").disabled = queue.length === 0;
-  document.getElementById("stage-btn").disabled = queue.filter(e => !e.uuid).length === 0;
+  document.getElementById("stage-btn").disabled = queue.length === onPad; // nothing fresh to stage
+  document.getElementById("stage-status").textContent = onPad ? onPad + " on pad" : "";
 }
 
 function openForm(cardId) {
@@ -395,17 +397,14 @@ async function stageQueue() {
   btn.textContent = "Add to publish pad";
   if (!r.ok || d.error) { alert("Add to pad failed: " + (d.error || ("HTTP " + r.status))); btn.disabled = false; return; }
   fresh.forEach((e, i) => {
-    e.uuid = d.uuids[i]; // promote to "existing" so a later Publish won't re-write it
+    e.uuid = d.uuids[i]; // now indistinguishable from a pre-loaded pending entry
+    // Converge to the pending-card model: its Delete (os.remove) becomes a
+    // RAM-only "Remove from queue", so a persisted row can't be orphaned.
     const card = document.getElementById(e.cardId);
-    if (!card) return;
-    const badge = card.querySelector(".badge");
-    if (badge) badge.textContent = "on pad";
-    const del = card.querySelector(".btn-del");
-    if (del) del.disabled = true; // persisted row must not be deletable from disk here
+    const del = card && card.querySelector(".btn-del");
+    if (del) { del.textContent = "Remove from queue"; del.onclick = () => unqueuePending(e.cardId); }
   });
-  const staged = queue.filter(e => e.uuid).length;
-  document.getElementById("stage-status").textContent = staged + " on pad";
-  refreshCount(); // fresh count now 0 → button disables itself
+  refreshCount(); // recomputes "N on pad" and disables stage-btn (nothing fresh left)
 }
 
 async function publishQueue() {
