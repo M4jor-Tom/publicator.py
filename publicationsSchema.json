@@ -37,17 +37,16 @@
             "type": "object",
             "required": ["platformName", "urlElsePublicationName", "state"],
             "properties": {
-                "platformName": {
-                    "type": "string",
-                    "enum": ["deviantart", "pixiv"]
-                },
-                "state": { "type": "string", "enum": ["unpublished", "published_or_scheduled"]},
+                "platformName": { "type": "string", "enum": ["deviantart", "pixiv"] },
+                "state": { "type": "string", "enum": ["unpublished", "published_or_scheduled"] },
                 "urlElsePublicationName": { "type": "string" },
-                "apparitionTimestampIfDifferentThanSubmission": {
-                    "type": "integer"
-                },
-                "priceIfNotFree": { "type": "number", "minimum": 0 }
-            }
+                "apparitionTimestampIfDifferentThanSubmission": { "type": "integer" },
+                "priceIfNotFree": { "type": "number", "minimum": 0 },
+                "tier": { "type": "string" },
+                "galleries": { "type": "array", "items": { "type": "string" } }
+            },
+            "if": { "properties": { "platformName": { "const": "deviantart" } } },
+            "else": { "properties": { "tier": false, "galleries": false } }
         }
     }
 }
