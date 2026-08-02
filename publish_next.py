@@ -194,7 +194,7 @@ def _selfcheck() -> None:
         with open(_jp) as _f:
             _rows = json.load(_f)
         assert len(_rows) == 1 and _rows[0]["uuid"] == _uuids[0], _rows
-        assert _rows[0]["state"] == STATE_UNPUBLISHED, _rows[0]
+        assert _rows[0]["apparitions"][0]["state"] == STATE_UNPUBLISHED, _rows[0]
     print("selfcheck OK")
 
 
@@ -425,7 +425,7 @@ async function publishQueue() {
 // Pre-queue entries already sitting in publications.json (state=unpublished).
 for (const p of PENDING) {
   queue.push({cardId: p.cardId, uuid: p.uuid, path: p.path,
-              title: p.title, scheduleTs: p.scheduleTs});
+              title: p.title, scheduleTs: p.scheduleTs, price: p.price});
 }
 refreshCount();
 </script>
@@ -469,7 +469,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
   </div>
 </div>""")
             pending_js.append({"cardId": cid, "uuid": e["uuid"], "path": e["path"],
-                               "title": e["title"], "scheduleTs": ts})
+                               "title": e["title"], "scheduleTs": ts, "price": e.get("price")})
         # Add-able cards: new picks from picked/.
         for idx, orig_path in enumerate(self.candidate_paths):
             thumb_path = self.thumb_map.get(orig_path, orig_path)
@@ -662,6 +662,7 @@ def write_publications(entries: list[dict], json_path: str) -> list[str]:
         ts = int(e.get("scheduleTs") or compute_next_slot(max_ts, i))
         apparition = {
             "platformName": "deviantart",
+            "state": STATE_UNPUBLISHED,
             "urlElsePublicationName": e["title"],
             "apparitionTimestampIfDifferentThanSubmission": ts,
         }
@@ -671,7 +672,6 @@ def write_publications(entries: list[dict], json_path: str) -> list[str]:
         new_uuids.append(u)
         data.append({
             "uuid": u,
-            "state": STATE_UNPUBLISHED,
             "submissionTimestamp": now,
             "description": e.get("description", ""),
             "files": [{

@@ -59,4 +59,5 @@ printf '%s' 'page.goto("https://www.deviantart.com")' > /tmp/pw.cmd
 5. Tick boxes "Mature" and "Created using AI tools"
 6. Drop all the pre-filled tags in the "Tags" field
 7. Copy the content of `../publicator.py/tags/da.txt` into the "Tags" field
-8. Schedule publication for the `<pub.schedule>`
+8. If the piece has a price, tick "Submit as Premium Download" and set the price
+9. Schedule publication for the `<pub.schedule>`
