@@ -6,6 +6,7 @@ from pathlib import Path
 from jsonschema import validate as _js_validate
 
 SCHEMA = Path(__file__).resolve().parent / "publicationsSchema.json"
+_SCHEMA = json.loads(SCHEMA.read_text())  # static bundled asset; load once, not per call
 
 
 def load_config(cwd="."):
@@ -21,8 +22,7 @@ def load_config(cwd="."):
 def validate_publications(data, config):
     """JSON-Schema validate, then enforce DA apparition tier/gallery values
     against config (the schema already forbids these fields on non-DA)."""
-    with open(SCHEMA) as s:
-        _js_validate(instance=data, schema=json.load(s))
+    _js_validate(instance=data, schema=_SCHEMA)
     tiers, galleries = set(config.get("tiers", [])), set(config.get("galleries", []))
     for p in data:
         for a in p.get("apparitions", []):
