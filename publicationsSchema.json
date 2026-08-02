@@ -5,10 +5,9 @@
     "$defs": {
         "Publication": {
             "type": "object",
-            "required": ["files", "submissionTimestamp", "description", "uuid", "state"],
+            "required": ["files", "submissionTimestamp", "description", "uuid"],
             "properties": {
                 "uuid": { "type": "string", "minLength": 36, "maxLength": 36},
-                "state": { "type": "string", "enum": ["unpublished", "published_or_scheduled"]},
                 "submissionTimestamp": { "type": "integer" },
                 "description": { "type": "string" },
                 "files": {
@@ -36,12 +35,13 @@
         },
         "Apparition": {
             "type": "object",
-            "required": ["platformName", "urlElsePublicationName"],
+            "required": ["platformName", "urlElsePublicationName", "state"],
             "properties": {
                 "platformName": {
                     "type": "string",
                     "enum": ["deviantart", "pixiv"]
                 },
+                "state": { "type": "string", "enum": ["unpublished", "published_or_scheduled"]},
                 "urlElsePublicationName": { "type": "string" },
                 "apparitionTimestampIfDifferentThanSubmission": {
                     "type": "integer"

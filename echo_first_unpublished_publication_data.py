@@ -35,8 +35,9 @@ def load_pubs() -> list[dict]:
 
 def first_unpublished() -> dict:
     for p in load_pubs():
-        if p.get("state") == "unpublished":
-            return p
+        for a in p.get("apparitions", []):
+            if a.get("state") == "unpublished":
+                return p
     raise SystemExit("no unpublished publication")
 
 
@@ -59,16 +60,6 @@ def find_art_path(basename: str) -> Path:
 def format_schedule(ts: int) -> str:
     # Match `date --date @TS` — parse_schedule in publish_next.py expects it.
     return subprocess.check_output(["date", "--date", f"@{ts}"]).decode().strip()
-
-
-def mark_published_or_scheduled(uuid: str) -> None:
-    pubs = load_pubs()
-    for p in pubs:
-        if p.get("uuid") == uuid:
-            p["state"] = "published_or_scheduled"
-            pubs_file().write_text(json.dumps(pubs, indent=4))
-            return
-    raise SystemExit(f"uuid not found: {uuid}")
 
 
 def main() -> int:

@@ -99,7 +99,7 @@ def mark_state(json_path: str, target_uuid: str, state: str) -> None:
         data = json.load(f)
     for p in data:
         if p.get("uuid") == target_uuid:
-            p["state"] = state
+            deviantart_apparition(p)["state"] = state
             break
     _atomic_write_json(json_path, data)
 
@@ -129,10 +129,10 @@ def load_pending_entries(json_path: str) -> list[dict]:
         return []
     out = []
     for p in data:
-        if p.get("state") != STATE_UNPUBLISHED:
-            continue
         try:
             app = deviantart_apparition(p)
+            if app.get("state") != STATE_UNPUBLISHED:
+                continue
             art = _pending_art(p["files"][0]["basename"])
         except (SystemExit, KeyError, IndexError) as e:
             print(f"skip pending {p.get('uuid')}: {e}", file=sys.stderr)
@@ -145,6 +145,7 @@ def load_pending_entries(json_path: str) -> list[dict]:
             "path": str(art),
             "title": app["urlElsePublicationName"],
             "scheduleTs": app.get("apparitionTimestampIfDifferentThanSubmission"),
+            "price": app.get("priceIfNotFree"),
         })
     return out
 
@@ -294,6 +295,19 @@ def _step_add_tags(page, e):
         page.wait_for_timeout(120)
 
 
+PREMIUM_CHECKBOX = "isPremiumDownload"
+PREMIUM_PRICE_SELECTOR = 'input[name="premiumDownloadPrice"]'
+
+
+def _step_premium(page, e):
+    price = e.get("price")
+    if price is None:
+        return
+    set_checkbox(page, PREMIUM_CHECKBOX, True)
+    page.wait_for_timeout(300)
+    page.locator(PREMIUM_PRICE_SELECTOR).fill(f"{float(price):g}")
+
+
 def _step_schedule(page, e):
     pick_schedule(page, format_schedule(int(e["scheduleTs"])))
     set_checkbox(page, "matureContent", True)  # re-assert: racy, can drop after the schedule dialog
@@ -312,6 +326,7 @@ STEPS: list[tuple[str, object]] = [
     ('Tick boxes "Mature" and "Created using AI tools"', _step_checkboxes),
     ('Drop all the pre-filled tags in the "Tags" field', _step_clear_tags),
     ('Copy the content of ../publicator.py/tags/da.txt into the "Tags" field', _step_add_tags),
+    ('If the piece has a price, tick "Submit as Premium Download" and set the price', _step_premium),
     ("Schedule publication for the <pub.schedule>", _step_schedule),
 ]
 
@@ -465,6 +480,10 @@ def _selfcheck() -> None:
     assert parse_schedule("Wed Jan 1 12:00:00 PM UTC 2025") == (2025, 1, 1, 12)
     assert [fn for _, fn in STEPS], "STEPS must map to callables"
     assert check_steps(), "STEPS drifted from the skill"
+
+    class _NoPage:
+        def __getattr__(self, _n): raise AssertionError("premium step touched page for a free entry")
+    _step_premium(_NoPage(), {"price": None})
     print("selfcheck OK")
 
 
