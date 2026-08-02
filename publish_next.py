@@ -425,7 +425,7 @@ async function publishQueue() {
 // Pre-queue entries already sitting in publications.json (state=unpublished).
 for (const p of PENDING) {
   queue.push({cardId: p.cardId, uuid: p.uuid, path: p.path,
-              title: p.title, scheduleTs: p.scheduleTs, price: p.price});
+              title: p.title, description: p.description, scheduleTs: p.scheduleTs, price: p.price});
 }
 refreshCount();
 </script>
@@ -469,7 +469,8 @@ class GalleryHandler(BaseHTTPRequestHandler):
   </div>
 </div>""")
             pending_js.append({"cardId": cid, "uuid": e["uuid"], "path": e["path"],
-                               "title": e["title"], "scheduleTs": ts, "price": e.get("price")})
+                               "title": e["title"], "description": e.get("description"),
+                               "scheduleTs": ts, "price": e.get("price")})
         # Add-able cards: new picks from picked/.
         for idx, orig_path in enumerate(self.candidate_paths):
             thumb_path = self.thumb_map.get(orig_path, orig_path)
