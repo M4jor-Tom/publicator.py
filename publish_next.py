@@ -282,8 +282,10 @@ _PAGE_TMPL = r"""<!DOCTYPE html>
 <script>
 const INITIAL_MAX_TS = __INITIAL_MAX_TS__;
 const PENDING = __PENDING__; // already-queued entries from publications.json
+const TIERS = __TIERS__;
+const GALLERIES = __GALLERIES__;
 
-const queue = []; // [{cardId, path, title, description, price, scheduleTs, uuid?}]
+const queue = []; // [{cardId, path, title, description, price, scheduleTs, tier, galleries, uuid?}]
 
 function nextTuesday8pmUTC(afterTs) {
   const d = new Date(afterTs * 1000);
@@ -318,11 +320,20 @@ function refreshCount() {
 function openForm(cardId) {
   const card = document.getElementById(cardId);
   const form = card.querySelector(".form");
-  const actions = card.querySelector(".actions");
-  const dt = form.querySelector(".f-schedule");
-  dt.value = tsToLocalInput(slotForIndex(INITIAL_MAX_TS, queue.length));
+  const entry = queue.find(e => e.cardId === cardId);
+  const q = sel => form.querySelector(sel);
+  if (entry) {
+    q(".f-title").value = entry.title || "";
+    q(".f-description").value = entry.description || "";
+    q(".f-price").value = (entry.price == null) ? "" : entry.price;
+    q(".f-schedule").value = entry.scheduleTs ? tsToLocalInput(entry.scheduleTs) : "";
+    if (q(".f-tier")) q(".f-tier").value = entry.tier || "";
+    form.querySelectorAll(".f-gallery").forEach(cb => cb.checked = (entry.galleries || []).includes(cb.value));
+  } else {
+    q(".f-schedule").value = tsToLocalInput(slotForIndex(INITIAL_MAX_TS, queue.length));
+  }
   form.style.display = "flex";
-  actions.style.display = "none";
+  card.querySelector(".actions").style.display = "none";
 }
 function closeForm(cardId) {
   const card = document.getElementById(cardId);
@@ -363,44 +374,58 @@ async function aiGen(cardId, path) {
   }
 }
 
-function saveCard(cardId, path) {
-  const card = document.getElementById(cardId);
-  const title = card.querySelector(".f-title").value.trim();
-  const desc = card.querySelector(".f-description").value.trim();
-  const priceRaw = card.querySelector(".f-price").value.trim();
-  const sched = card.querySelector(".f-schedule").value;
-  const err = card.querySelector(".err");
-  if (!title) { err.textContent = "title required"; return; }
-  if (!desc) { err.textContent = "description required"; return; }
-  if (!sched) { err.textContent = "schedule required"; return; }
-  const entry = {cardId, path, title, description: desc,
-                 scheduleTs: localInputToTs(sched)};
+function readForm(card) {
+  const g = sel => card.querySelector(sel);
+  const title = g(".f-title").value.trim();
+  const desc = g(".f-description").value.trim();
+  const priceRaw = g(".f-price").value.trim();
+  const sched = g(".f-schedule").value;
+  const err = g(".err");
+  if (!title) { err.textContent = "title required"; return null; }
+  if (!desc) { err.textContent = "description required"; return null; }
+  if (!sched) { err.textContent = "schedule required"; return null; }
+  const out = {title, description: desc, scheduleTs: localInputToTs(sched)};
   if (priceRaw !== "") {
     const p = parseFloat(priceRaw);
-    if (isNaN(p) || p < 0) { err.textContent = "price must be >= 0"; return; }
-    entry.price = p;
+    if (isNaN(p) || p < 0) { err.textContent = "price must be >= 0"; return null; }
+    out.price = p;
   }
-  queue.push(entry);
-  card.classList.add("queued");
-  card.querySelector(".form").style.display = "none";
-  const actions = card.querySelector(".actions");
-  actions.style.display = "flex";
-  actions.querySelector(".btn-add").textContent = "Queued";
-  actions.querySelector(".btn-add").disabled = true;
-  const nameEl = card.querySelector(".name");
-  if (!card.querySelector(".badge")) {
-    const b = document.createElement("span");
-    b.className = "badge"; b.textContent = "queued";
-    nameEl.prepend(b, " ");
-  }
-  refreshCount();
+  const tierEl = g(".f-tier");
+  if (tierEl && tierEl.value) out.tier = tierEl.value;
+  const gals = [...card.querySelectorAll(".f-gallery:checked")].map(cb => cb.value);
+  if (gals.length) out.galleries = gals;
+  return out;
 }
 
-function unqueuePending(cardId) {
-  const i = queue.findIndex(e => e.cardId === cardId);
-  if (i >= 0) queue.splice(i, 1);
-  const el = document.getElementById(cardId);
-  if (el) el.remove();
+async function saveCard(cardId, path) {
+  const card = document.getElementById(cardId);
+  const fields = readForm(card);
+  if (!fields) return;
+  const entry = queue.find(e => e.cardId === cardId);
+  if (entry) {                       // re-edit
+    Object.assign(entry, {price: undefined, tier: undefined, galleries: undefined}, fields);
+    if (entry.uuid) {
+      const btn = card.querySelector(".btn-save");
+      btn.disabled = true; btn.textContent = "Saving...";
+      const r = await fetch("/update", {method:"POST", headers:{"Content-Type":"application/json"},
+                                        body: JSON.stringify({uuid: entry.uuid, ...fields})});
+      const d = await r.json();
+      btn.disabled = false; btn.textContent = "Save changes";
+      if (!r.ok || d.error) { card.querySelector(".err").textContent = d.error || ("HTTP " + r.status); return; }
+    }
+    card.querySelector(".name").lastChild.textContent = " " + fields.title;
+  } else {                           // first save of a candidate
+    queue.push({cardId, path, ...fields});
+    card.classList.add("queued");
+    const add = card.querySelector(".btn-add");
+    add.textContent = "Edit"; add.disabled = false; add.onclick = () => openForm(cardId);
+    if (!card.querySelector(".badge")) {
+      const b = document.createElement("span"); b.className = "badge"; b.textContent = "queued";
+      card.querySelector(".name").prepend(b, " ");
+    }
+  }
+  card.querySelector(".form").style.display = "none";
+  card.querySelector(".actions").style.display = "flex";
   refreshCount();
 }
 
@@ -416,11 +441,10 @@ async function stageQueue() {
   if (!r.ok || d.error) { alert("Add to pad failed: " + (d.error || ("HTTP " + r.status))); btn.disabled = false; return; }
   fresh.forEach((e, i) => {
     e.uuid = d.uuids[i]; // now indistinguishable from a pre-loaded pending entry
-    // Converge to the pending-card model: its Delete (os.remove) becomes a
-    // RAM-only "Remove from queue", so a persisted row can't be orphaned.
+    // Persisted in publications.json now -> no RAM-only remove; drop Delete.
     const card = document.getElementById(e.cardId);
     const del = card && card.querySelector(".btn-del");
-    if (del) { del.textContent = "Remove from queue"; del.onclick = () => unqueuePending(e.cardId); }
+    if (del) del.remove();
   });
   refreshCount(); // recomputes "N on pad" and disables stage-btn (nothing fresh left)
 }
@@ -443,12 +467,25 @@ async function publishQueue() {
 // Pre-queue entries already sitting in publications.json (state=unpublished).
 for (const p of PENDING) {
   queue.push({cardId: p.cardId, uuid: p.uuid, path: p.path,
-              title: p.title, description: p.description, scheduleTs: p.scheduleTs, price: p.price});
+              title: p.title, description: p.description, scheduleTs: p.scheduleTs, price: p.price,
+              tier: p.tier, galleries: p.galleries});
 }
 refreshCount();
 </script>
 </body></html>
 """
+
+
+def _tier_gallery_fields(config):
+    if not config.get("tiers") and not config.get("galleries"):
+        return ""
+    tiers = "".join(f'<option value="{html.escape(t, quote=True)}">{html.escape(t)}</option>'
+                    for t in config.get("tiers", []))
+    gals = "".join(f'<label><input type="checkbox" class="f-gallery" '
+                   f'value="{html.escape(g, quote=True)}"> {html.escape(g)}</label>'
+                   for g in config.get("galleries", []))
+    return (f'<label>Tier <select class="f-tier"><option value="">(none)</option>{tiers}</select></label>'
+            f'<div class="galleries"><span>Galleries</span>{gals}</div>')
 
 
 class GalleryHandler(BaseHTTPRequestHandler):
@@ -467,6 +504,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
     def _build_page(self) -> str:
         cards = []
         pending_js = []
+        tg = _tier_gallery_fields(self.config)
         # Pre-queued cards: entries already in publications.json (state=unpublished).
         for idx, e in enumerate(self.pending):
             thumb_path = self.thumb_map.get(e["path"], e["path"])
@@ -478,18 +516,33 @@ class GalleryHandler(BaseHTTPRequestHandler):
             sched = (datetime.fromtimestamp(ts).strftime("%a %d %b %Y %H:%M")
                      if ts else "no schedule")
             cid = f"pending_{idx}"
+            js_pathp = html.escape(json.dumps(e["path"]), quote=True)
             cards.append(f"""<div class="card queued" id="{cid}">
   <img src="/thumbs/{safe_rel}" alt="{safe_title}">
   <div class="name"><span class="badge">queued</span> {safe_title}</div>
   <div class="sched">{html.escape(sched)}</div>
   <div class="actions">
     <a class="btn-view" href="{view_href}" target="_blank" rel="noopener">View</a>
-    <button class="btn-del" onclick="unqueuePending('{cid}')">Remove from queue</button>
+    <button class="btn-add" onclick="openForm('{cid}')">Edit</button>
+  </div>
+  <div class="form">
+    <label>Title <input type="text" class="f-title" maxlength="50"></label>
+    <label>Description <textarea class="f-description"></textarea></label>
+    <label>Price (optional) <input type="number" class="f-price" min="0" step="0.01"></label>
+    <label>Schedule <input type="datetime-local" class="f-schedule"></label>
+    {tg}
+    <button class="btn-ai" onclick="aiGen('{cid}', {js_pathp})">Generate with AI</button>
+    <div class="err"></div>
+    <div class="form-actions">
+      <button class="btn-save" onclick="saveCard('{cid}', {js_pathp})">Save changes</button>
+      <button class="btn-cancel" onclick="closeForm('{cid}')">Cancel</button>
+    </div>
   </div>
 </div>""")
             pending_js.append({"cardId": cid, "uuid": e["uuid"], "path": e["path"],
                                "title": e["title"], "description": e.get("description"),
-                               "scheduleTs": ts, "price": e.get("price")})
+                               "scheduleTs": ts, "price": e.get("price"),
+                               "tier": e.get("tier"), "galleries": e.get("galleries", [])})
         # Add-able cards: new picks from picked/.
         for idx, orig_path in enumerate(self.candidate_paths):
             thumb_path = self.thumb_map.get(orig_path, orig_path)
@@ -513,6 +566,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
     <label>Description <textarea class="f-description"></textarea></label>
     <label>Price (optional) <input type="number" class="f-price" min="0" step="0.01"></label>
     <label>Schedule <input type="datetime-local" class="f-schedule"></label>
+    {tg}
     <button class="btn-ai" onclick="aiGen('{cid}', {js_path})">Generate with AI</button>
     <div class="err"></div>
     <div class="form-actions">
@@ -527,6 +581,8 @@ class GalleryHandler(BaseHTTPRequestHandler):
         page = page.replace("__INITIAL_MAX_TS__", str(self.initial_max_ts))
         page = page.replace("__AI_MODEL__", html.escape(self.ai_model, quote=True))
         page = page.replace("__OPENROUTER_MODEL__", html.escape(self.openrouter_model, quote=True))
+        page = page.replace("__TIERS__", json.dumps(self.config.get("tiers", [])))
+        page = page.replace("__GALLERIES__", json.dumps(self.config.get("galleries", [])))
         return page
 
     def _json_body(self) -> dict:
