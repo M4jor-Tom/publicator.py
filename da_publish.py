@@ -144,6 +144,7 @@ def load_pending_entries(json_path: str) -> list[dict]:
             "uuid": p["uuid"],
             "path": str(art),
             "title": app["urlElsePublicationName"],
+            "description": p.get("description", ""),
             "scheduleTs": app.get("apparitionTimestampIfDifferentThanSubmission"),
             "price": app.get("priceIfNotFree"),
         })
@@ -252,6 +253,13 @@ def _step_title(page, e):
     page.get_by_label("Title", exact=False).first.fill(e["title"])
 
 
+DESCRIPTION_SELECTOR = '[aria-label="Description"]'
+
+
+def _step_description(page, e):
+    page.locator(DESCRIPTION_SELECTOR).first.fill(e.get("description", ""))
+
+
 def _step_checkboxes(page, e):
     set_checkbox(page, "matureContent", True)
     set_checkbox(page, "isAiGenerated", True)
@@ -323,6 +331,7 @@ STEPS: list[tuple[str, object]] = [
     ("Click on submit", _step_submit),
     ('Click on "upload your art" and pick file <pub.path>', _step_upload),
     ("Set as title <pub.title>", _step_title),
+    ("Set as description <pub.description>", _step_description),
     ('Tick boxes "Mature" and "Created using AI tools"', _step_checkboxes),
     ('Drop all the pre-filled tags in the "Tags" field', _step_clear_tags),
     ('Copy the content of ../publicator.py/tags/da.txt into the "Tags" field', _step_add_tags),
