@@ -41,7 +41,9 @@ from da_publish import (
     publish_batch,
     setup_logging,
 )
+from echo_first_unpublished_publication_data import deviantart_apparition
 from llm_meta import DEFAULT_MODEL, generate_metadata
+from validate import load_config, validate_publications
 
 log = logging.getLogger("publicator.gallery")
 
@@ -195,6 +197,22 @@ def _selfcheck() -> None:
             _rows = json.load(_f)
         assert len(_rows) == 1 and _rows[0]["uuid"] == _uuids[0], _rows
         assert _rows[0]["apparitions"][0]["state"] == STATE_UNPUBLISHED, _rows[0]
+        import copy
+        ok = copy.deepcopy(_rows)
+        ok[0]["apparitions"][0]["tier"] = "gold"; ok[0]["apparitions"][0]["galleries"] = ["Art"]
+        validate_publications(ok, {"tiers": ["gold"], "galleries": ["Art"]})
+        try:
+            validate_publications(ok, {"tiers": [], "galleries": []}); assert False, "tier not rejected"
+        except ValueError:
+            pass
+        apply_update(_rows, _uuids[0], {"title": "T2", "description": "D2", "scheduleTs": s1,
+                                        "price": 3, "tier": "gold", "galleries": ["Art"]})
+        a = _rows[0]["apparitions"][0]
+        assert a["urlElsePublicationName"] == "T2" and a["priceIfNotFree"] == 3.0
+        assert a["tier"] == "gold" and a["galleries"] == ["Art"], a
+        apply_update(_rows, _uuids[0], {"title": "T3", "description": "D3", "scheduleTs": s1})
+        a = _rows[0]["apparitions"][0]
+        assert "priceIfNotFree" not in a and "tier" not in a and "galleries" not in a, a
     print("selfcheck OK")
 
 
@@ -443,6 +461,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
     openrouter_model = ""
     ai_timeout = 300
     json_path = "publications.json"
+    config: dict = {"tiers": [], "galleries": []}
     publish_done: dict | None = None
 
     def _build_page(self) -> str:
@@ -629,6 +648,24 @@ class GalleryHandler(BaseHTTPRequestHandler):
                     self._send(400, {"error": f"schema/write failed: {e}"}); return
                 # No publish_done set → serve loop keeps running, session stays alive.
                 self._send(200, {"staged": len(uuids), "uuids": uuids})
+
+            elif self.path == "/update":
+                data = self._json_body()
+                u = data.get("uuid")
+                if not u:
+                    self._send(400, {"error": "missing uuid"}); return
+                with open(self.json_path) as f:
+                    pubs = json.load(f)
+                try:
+                    apply_update(pubs, u, data)
+                except KeyError:
+                    self._send(404, {"error": f"uuid not found: {u}"}); return
+                try:
+                    validate_publications(pubs, self.config)
+                except Exception as e:
+                    self._send(400, {"error": f"invalid: {e}"}); return
+                _atomic_write_json(self.json_path, pubs)
+                self._send(200, {"ok": True})
             else:
                 self.send_response(404); self.end_headers()
         except Exception as e:
@@ -669,6 +706,10 @@ def write_publications(entries: list[dict], json_path: str) -> list[str]:
         }
         if "price" in e and e["price"] is not None:
             apparition["priceIfNotFree"] = float(e["price"])
+        if e.get("tier"):
+            apparition["tier"] = e["tier"]
+        if e.get("galleries"):
+            apparition["galleries"] = list(e["galleries"])
         u = str(uuid.uuid4())
         new_uuids.append(u)
         data.append({
@@ -682,13 +723,34 @@ def write_publications(entries: list[dict], json_path: str) -> list[str]:
             "apparitions": [apparition],
         })
 
-    from jsonschema import validate
-    with open(SCHEMA_PATH, "r", encoding="utf-8") as s:
-        schema = json.load(s)
-    validate(instance=data, schema=schema)
-
+    validate_publications(data, load_config(Path.cwd()))
     _atomic_write_json(json_path, data)
     return new_uuids
+
+
+def _set_or_pop(d, k, v):
+    if v in (None, [], ""):
+        d.pop(k, None)
+    else:
+        d[k] = v
+
+
+def apply_update(pubs, uuid_, fields):
+    """Patch the publication (and its DA apparition) with uuid_ in place.
+    Cleared price/tier/galleries are removed. Raises KeyError if not found."""
+    for p in pubs:
+        if p.get("uuid") == uuid_:
+            break
+    else:
+        raise KeyError(uuid_)
+    p["description"] = fields.get("description", p.get("description", ""))
+    app = deviantart_apparition(p)
+    app["urlElsePublicationName"] = fields["title"]
+    app["apparitionTimestampIfDifferentThanSubmission"] = int(fields["scheduleTs"])
+    price = fields.get("price")
+    _set_or_pop(app, "priceIfNotFree", float(price) if price not in (None, "") else None)
+    _set_or_pop(app, "tier", fields.get("tier") or None)
+    _set_or_pop(app, "galleries", list(fields["galleries"]) if fields.get("galleries") else None)
 
 
 # ---------------------------------------------------------------------------
@@ -706,6 +768,7 @@ def serve(thumb_dir: str, thumb_map: dict[str, str], candidate_paths: list[str],
     GalleryHandler.openrouter_model = args.openrouter_model
     GalleryHandler.ai_timeout = args.ai_timeout
     GalleryHandler.json_path = args.json
+    GalleryHandler.config = load_config(Path.cwd())
     GalleryHandler.publish_done = None
 
     server = ThreadingHTTPServer(("127.0.0.1", args.port), GalleryHandler)
