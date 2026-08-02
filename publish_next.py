@@ -211,9 +211,11 @@ _PAGE_TMPL = r"""<!DOCTYPE html>
   header { position: sticky; top: 0; background: #111; padding: 12px 20px; z-index: 10;
            display: flex; align-items: center; gap: 16px; border-bottom: 1px solid #333; }
   header h1 { margin: 0; font-size: 18px; }
-  #publish-btn { padding: 10px 24px; font-size: 16px; background: #4caf50; color: white;
+  #publish-btn, #stage-btn { padding: 10px 24px; font-size: 16px; background: #4caf50; color: white;
                  border: none; border-radius: 6px; cursor: pointer; }
-  #publish-btn:disabled { background: #444; color: #888; cursor: not-allowed; }
+  #stage-btn { background: #2196f3; }
+  #publish-btn:disabled, #stage-btn:disabled { background: #444; color: #888; cursor: not-allowed; }
+  #stage-status { font-size: 13px; color: #8ac; }
   #queue-count { font-size: 15px; color: #aaa; }
   main { padding: 20px; }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
@@ -252,6 +254,8 @@ _PAGE_TMPL = r"""<!DOCTYPE html>
     <option value="__AI_MODEL__">Claude (subscription)</option>
     <option value="__OPENROUTER_MODEL__">OpenRouter (free)</option>
   </select>
+  <span id="stage-status"></span>
+  <button id="stage-btn" onclick="stageQueue()" disabled>Add to publish pad</button>
   <button id="publish-btn" onclick="publishQueue()" disabled>Publish</button>
 </header>
 <main>
@@ -288,6 +292,7 @@ function localInputToTs(s) {
 function refreshCount() {
   document.getElementById("queue-count").textContent = queue.length + " queued";
   document.getElementById("publish-btn").disabled = queue.length === 0;
+  document.getElementById("stage-btn").disabled = queue.filter(e => !e.uuid).length === 0;
 }
 
 function openForm(cardId) {
@@ -377,6 +382,30 @@ function unqueuePending(cardId) {
   const el = document.getElementById(cardId);
   if (el) el.remove();
   refreshCount();
+}
+
+async function stageQueue() {
+  const fresh = queue.filter(e => !e.uuid); // uuid-carrying ones are already persisted
+  if (fresh.length === 0) return;
+  const btn = document.getElementById("stage-btn");
+  btn.disabled = true; btn.textContent = "Adding...";
+  const r = await fetch("/stage", {method:"POST", headers:{"Content-Type":"application/json"},
+                                    body: JSON.stringify({entries: fresh.map(({cardId, ...rest}) => rest)})});
+  const d = await r.json();
+  btn.textContent = "Add to publish pad";
+  if (!r.ok || d.error) { alert("Add to pad failed: " + (d.error || ("HTTP " + r.status))); btn.disabled = false; return; }
+  fresh.forEach((e, i) => {
+    e.uuid = d.uuids[i]; // promote to "existing" so a later Publish won't re-write it
+    const card = document.getElementById(e.cardId);
+    if (!card) return;
+    const badge = card.querySelector(".badge");
+    if (badge) badge.textContent = "on pad";
+    const del = card.querySelector(".btn-del");
+    if (del) del.disabled = true; // persisted row must not be deletable from disk here
+  });
+  const staged = queue.filter(e => e.uuid).length;
+  document.getElementById("stage-status").textContent = staged + " on pad";
+  refreshCount(); // fresh count now 0 → button disables itself
 }
 
 async function publishQueue() {
@@ -588,6 +617,18 @@ class GalleryHandler(BaseHTTPRequestHandler):
                     result["error"] = err
                 self.__class__.publish_done = result
                 self._send(200, result)
+
+            elif self.path == "/stage":
+                data = self._json_body()
+                entries = data.get("entries", []) or []
+                if not entries:
+                    self._send(400, {"error": "nothing to stage"}); return
+                try:
+                    uuids = write_publications(entries, self.json_path)
+                except Exception as e:
+                    self._send(400, {"error": f"schema/write failed: {e}"}); return
+                # No publish_done set → serve loop keeps running, session stays alive.
+                self._send(200, {"staged": len(uuids), "uuids": uuids})
             else:
                 self.send_response(404); self.end_headers()
         except Exception as e:
