@@ -50,14 +50,14 @@ def _selfcheck():
         }, load_config(d)
         (Path(d) / "publicator.toml").write_text(
             'publicable = ["picked"]\n'
-            'tags = "tags/da.txt"\n'
+            'tags = "sub/tags.txt"\n'
             '[deviantart]\ntiers = ["T"]\ngalleries = ["G"]\n'
             '[schedule]\nfrequency = "weekly"\nday = "tuesday"\nhour = 20\nper_slot = 2\n'
         )
         c = load_config(d)
         assert c["tiers"] == ["T"] and c["galleries"] == ["G"], c
         assert c["publicable"] == ["picked"], c
-        assert c["tags"] == "tags/da.txt", c
+        assert c["tags"] == "sub/tags.txt", c
         assert c["schedule"] == {
             "frequency": "weekly", "day": "tuesday", "hour": 20, "per_slot": 2
         }, c

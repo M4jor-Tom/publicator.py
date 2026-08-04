@@ -59,7 +59,7 @@ printf '%s' 'page.goto("https://www.deviantart.com")' > /tmp/pw.cmd
 5. Set as description `<pub.description>`
 6. Tick boxes "Mature" and "Created using AI tools"
 7. Drop all the pre-filled tags in the "Tags" field
-8. Copy the content of the tags file (`<data-dir>/tags/da.txt`, per publicator.toml [tags]) into the "Tags" field
+8. Copy the content of the tags file (`<data-dir>/<"tags" path>`, per publicator.toml [tags]) into the "Tags" field
 9. If the piece has a price, tick "Submit as Premium Download" and set the price
 10. Set the subscription tier `<pub.tier>`
 11. Add to galleries `<pub.galleries>`
