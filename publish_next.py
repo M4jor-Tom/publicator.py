@@ -29,7 +29,7 @@ import tempfile
 import time
 import urllib.parse
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -129,25 +129,24 @@ def generate_thumbnails(image_paths: list[str], thumb_dir: str) -> dict[str, str
 
 
 # ---------------------------------------------------------------------------
-# Slot computation (mirrors client-side JS)
+# Schedule cadence — consumed by the browser client only (see _build_page).
 # ---------------------------------------------------------------------------
 
-def _next_tuesday_8pm_after(timestamp: int) -> datetime:
-    dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
-    days_ahead = (1 - dt.weekday()) % 7  # Python: Mon=0, Tue=1
-    if days_ahead == 0:
-        days_ahead = 7
-    nxt = dt + timedelta(days=days_ahead)
-    return nxt.replace(hour=20, minute=0, second=0, microsecond=0)
+_JS_DAY = {"sunday": 0, "monday": 1, "tuesday": 2, "wednesday": 3,
+           "thursday": 4, "friday": 5, "saturday": 6}
 
 
-def compute_next_slot(max_existing_ts: int, added_count: int) -> int:
-    """Slot timestamp (UTC) for the `added_count`-th (0-indexed) new entry.
-    Packing: 2 per Tuesday 20:00 UTC, starting the Tuesday after max_existing_ts."""
-    base = _next_tuesday_8pm_after(max_existing_ts)
-    weeks = added_count // 2
-    slot = base + timedelta(days=7 * weeks)
-    return int(slot.timestamp())
+def _schedule_js(schedule: dict) -> dict:
+    """Cadence for the gallery client: {day: <JS getUTCDay index>, hour, per_slot}.
+    Only frequency='weekly' is implemented."""
+    freq = schedule.get("frequency", "weekly")
+    if freq != "weekly":
+        raise NotImplementedError(f"schedule.frequency {freq!r} not implemented (only 'weekly')")
+    day = str(schedule.get("day", "tuesday")).lower()
+    if day not in _JS_DAY:
+        raise ValueError(f"schedule.day {day!r} invalid")
+    return {"day": _JS_DAY[day], "hour": int(schedule.get("hour", 20)),
+            "per_slot": int(schedule.get("per_slot", 2))}
 
 
 def _max_existing_ts(json_path: str) -> int:
@@ -166,23 +165,20 @@ def _max_existing_ts(json_path: str) -> int:
 
 
 def _selfcheck() -> None:
-    anchor = int(datetime(2026, 1, 4, tzinfo=timezone.utc).timestamp())
-    s0 = compute_next_slot(anchor, 0)
-    s1 = compute_next_slot(anchor, 1)
-    s2 = compute_next_slot(anchor, 2)
-    s3 = compute_next_slot(anchor, 3)
-    assert s0 == s1, f"first two share slot, got {s0} vs {s1}"
-    assert s2 == s0 + 7 * 24 * 3600, f"third rolls a week, got {s2 - s0}"
-    assert s3 == s2, f"fourth pairs with third, got {s3} vs {s2}"
-    dt = datetime.fromtimestamp(s0, tz=timezone.utc)
-    assert dt.weekday() == 1, f"slot must be Tuesday UTC, got {dt}"
-    assert dt.hour == 20, f"slot must be 20:00 UTC, got {dt}"
+    # schedule cadence for the client: weekly maps a day-name -> JS getUTCDay index
+    sj = _schedule_js({"frequency": "weekly", "day": "tuesday", "hour": 20, "per_slot": 2})
+    assert sj == {"day": 2, "hour": 20, "per_slot": 2}, sj
+    try:
+        _schedule_js({"frequency": "monthly"}); assert False, "monthly not rejected"
+    except NotImplementedError:
+        pass
+    # literal Tuesday 20:00 UTC anchors for the write_publications round-trip
+    s0 = int(datetime(2026, 1, 6, 20, tzinfo=timezone.utc).timestamp())  # 2026-01-06 is a Tue
+    s1 = s0 + 7 * 24 * 3600
     # /original decodes the path arg verbatim, so the allow-list (path in
     # thumb_map) sees the real path — a non-listed path can't sneak through.
     q = urllib.parse.parse_qs(urllib.parse.urlparse("/original?path=%2Fetc%2Fpasswd").query)
     assert q.get("path", [""])[0] == "/etc/passwd", q
-    # write_publications: appends state=unpublished, returns one uuid per entry,
-    # validates via validate_publications (schema + config allow-list).
     with tempfile.TemporaryDirectory() as _d:
         _jp = os.path.join(_d, "publications.json")
         _img = os.path.join(_d, "pic.png")
@@ -193,6 +189,12 @@ def _selfcheck() -> None:
             _jp,
         )
         assert len(_uuids) == 1, _uuids
+        # scheduleTs is now required — a missing one must raise, no write
+        try:
+            write_publications([{"path": _img, "title": "t", "description": "d"}], _jp)
+            assert False, "missing scheduleTs not rejected"
+        except ValueError:
+            pass
         with open(_jp) as _f:
             _rows = json.load(_f)
         assert len(_rows) == 1 and _rows[0]["uuid"] == _uuids[0], _rows
@@ -213,7 +215,7 @@ def _selfcheck() -> None:
         apply_update(_rows, _uuids[0], {"title": "T3", "description": "D3", "scheduleTs": s1})
         a = _rows[0]["apparitions"][0]
         assert "priceIfNotFree" not in a and "tier" not in a and "galleries" not in a, a
-    print("selfcheck OK")
+    print("publish_next selfcheck OK")
 
 
 # ---------------------------------------------------------------------------
@@ -281,21 +283,22 @@ _PAGE_TMPL = r"""<!DOCTYPE html>
 </main>
 <script>
 const INITIAL_MAX_TS = __INITIAL_MAX_TS__;
+const SCHEDULE = __SCHEDULE__;
 const PENDING = __PENDING__; // already-queued entries from publications.json
 
 const queue = []; // [{cardId, path, title, description, price, scheduleTs, tier, galleries, uuid?}]
 
-function nextTuesday8pmUTC(afterTs) {
+function nextSlotBase(afterTs) {
   const d = new Date(afterTs * 1000);
-  let days = (2 - d.getUTCDay() + 7) % 7; // JS: Sun=0, Tue=2
+  let days = (SCHEDULE.day - d.getUTCDay() + 7) % 7;
   if (days === 0) days = 7;
   d.setUTCDate(d.getUTCDate() + days);
-  d.setUTCHours(20, 0, 0, 0);
+  d.setUTCHours(SCHEDULE.hour, 0, 0, 0);
   return Math.floor(d.getTime() / 1000);
 }
 function slotForIndex(maxTs, idx) {
-  const base = nextTuesday8pmUTC(maxTs);
-  return base + Math.floor(idx / 2) * 7 * 24 * 3600;
+  const base = nextSlotBase(maxTs);
+  return base + Math.floor(idx / SCHEDULE.per_slot) * 7 * 24 * 3600;
 }
 function tsToLocalInput(ts) {
   // datetime-local wants local wall time as YYYY-MM-DDTHH:MM
@@ -515,6 +518,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
     ai_timeout = 300
     json_path = "publications.json"
     config: dict = {"tiers": [], "galleries": []}
+    schedule: dict = {"day": 2, "hour": 20, "per_slot": 2}
     publish_done: dict | None = None
 
     def _build_page(self) -> str:
@@ -571,6 +575,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
         page = page.replace("__CARDS__", "\n".join(cards))
         page = page.replace("__PENDING__", json.dumps(pending_js))
         page = page.replace("__INITIAL_MAX_TS__", str(self.initial_max_ts))
+        page = page.replace("__SCHEDULE__", json.dumps(self.schedule))
         page = page.replace("__AI_MODEL__", html.escape(self.ai_model, quote=True))
         page = page.replace("__OPENROUTER_MODEL__", html.escape(self.openrouter_model, quote=True))
         return page
@@ -737,14 +742,14 @@ def write_publications(entries: list[dict], json_path: str, config: dict | None 
     except FileNotFoundError:
         data = []
 
-    max_ts = _max_existing_ts(json_path)
-
     new_uuids = []
     now = int(time.time())
     for i, e in enumerate(entries):
         path = e["path"]
         sha = compute_sha512(path)
-        ts = int(e.get("scheduleTs") or compute_next_slot(max_ts, i))
+        if not e.get("scheduleTs"):
+            raise ValueError("scheduleTs required")
+        ts = int(e["scheduleTs"])
         apparition = {
             "platformName": "deviantart",
             "state": STATE_UNPUBLISHED,
@@ -814,6 +819,7 @@ def serve(thumb_dir: str, thumb_map: dict[str, str], candidate_paths: list[str],
     GalleryHandler.ai_timeout = args.ai_timeout
     GalleryHandler.json_path = args.json
     GalleryHandler.config = config          # was: load_config(Path.cwd())
+    GalleryHandler.schedule = _schedule_js(config["schedule"])
     GalleryHandler.publish_done = None
 
     server = ThreadingHTTPServer(("127.0.0.1", args.port), GalleryHandler)
