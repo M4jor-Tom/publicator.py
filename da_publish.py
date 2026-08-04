@@ -525,10 +525,9 @@ def _selfcheck() -> None:
     _step_galleries(_NoPage(), {})   # no galleries -> no-op
 
     # TAGS_FILE is resolved from publicator.toml [tags], under DATA_DIR
-    import tempfile, os as _os
-    _cwd0 = _os.getcwd()
+    _cwd0 = os.getcwd()
     with tempfile.TemporaryDirectory() as _d:
-        _os.chdir(_d)
+        os.chdir(_d)
         try:
             (Path(_d) / "publicator.toml").write_text('tags = "tags/da.txt"\n')
             configure(_d)
@@ -537,7 +536,7 @@ def _selfcheck() -> None:
             configure(_d)
             assert TAGS_FILE is None, TAGS_FILE
         finally:
-            _os.chdir(_cwd0)
+            os.chdir(_cwd0)
     print("da_publish selfcheck OK")
 
 
