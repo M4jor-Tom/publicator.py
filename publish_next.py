@@ -145,8 +145,11 @@ def _schedule_js(schedule: dict) -> dict:
     day = str(schedule.get("day", "tuesday")).lower()
     if day not in _JS_DAY:
         raise ValueError(f"schedule.day {day!r} invalid")
+    per_slot = int(schedule.get("per_slot", 2))
+    if per_slot < 1:
+        raise ValueError(f"schedule.per_slot must be >= 1, got {per_slot}")
     return {"day": _JS_DAY[day], "hour": int(schedule.get("hour", 20)),
-            "per_slot": int(schedule.get("per_slot", 2))}
+            "per_slot": per_slot}
 
 
 def _max_existing_ts(json_path: str) -> int:
@@ -171,6 +174,10 @@ def _selfcheck() -> None:
     try:
         _schedule_js({"frequency": "monthly"}); assert False, "monthly not rejected"
     except NotImplementedError:
+        pass
+    try:
+        _schedule_js({"frequency": "weekly", "per_slot": 0}); assert False, "per_slot=0 not rejected"
+    except ValueError:
         pass
     # literal Tuesday 20:00 UTC anchors for the write_publications round-trip
     s0 = int(datetime(2026, 1, 6, 20, tzinfo=timezone.utc).timestamp())  # 2026-01-06 is a Tue
