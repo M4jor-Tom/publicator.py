@@ -361,7 +361,7 @@ STEPS: list[tuple[str, object]] = [
     ("Set as description <pub.description>", _step_description),
     ('Tick boxes "Mature" and "Created using AI tools"', _step_checkboxes),
     ('Drop all the pre-filled tags in the "Tags" field', _step_clear_tags),
-    ('Copy the content of the tags file (per publicator.toml [tags]) into the "Tags" field', _step_add_tags),
+    ('Copy the content of the tags file (<data-dir>/tags/da.txt, per publicator.toml [tags]) into the "Tags" field', _step_add_tags),
     ('If the piece has a price, tick "Submit as Premium Download" and set the price', _step_premium),
     ("Set the subscription tier <pub.tier>", _step_tier),
     ("Add to galleries <pub.galleries>", _step_galleries),
