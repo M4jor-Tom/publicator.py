@@ -48,9 +48,10 @@ from echo_first_unpublished_publication_data import (
     format_schedule,
     set_data_dir,
 )
+from validate import load_config
 
-PKG = Path(__file__).resolve().parent  # code assets (tags/, SKILL.md) travel with the package
-TAGS_FILE = PKG / "tags/da.txt"
+PKG = Path(__file__).resolve().parent  # code assets (SKILL.md) travel with the package
+TAGS_FILE = None                       # resolved by configure() from publicator.toml [tags], under DATA_DIR
 SKILL_MD = PKG / ".claude/skills/publish-deviantart/SKILL.md"
 
 STATE_UNPUBLISHED = "unpublished"
@@ -70,10 +71,12 @@ _MONTHS = {m: i + 1 for i, m in enumerate(
 def configure(data_dir) -> Path:
     """Point this module (and the echo helpers) at a publication database dir.
     Returns the resolved DATA_DIR."""
-    global DATA_DIR, LOGIN_DIR, SESSION_DIR
+    global DATA_DIR, LOGIN_DIR, SESSION_DIR, TAGS_FILE
     DATA_DIR = set_data_dir(data_dir)  # also points the echo helpers (find_art_path) at it
     LOGIN_DIR = DATA_DIR / ".deviantart-login"
     SESSION_DIR = DATA_DIR / ".deviantart-session"
+    tags = load_config(Path.cwd()).get("tags")
+    TAGS_FILE = DATA_DIR / tags if tags else None
     return DATA_DIR
 
 
@@ -296,6 +299,8 @@ def _step_clear_tags(page, e):
 
 def _step_add_tags(page, e):
     """Step 7: type each tag from tags/da.txt into the Tags field."""
+    if TAGS_FILE is None:
+        raise RuntimeError("no 'tags' path configured in publicator.toml")
     tags = [t.strip() for t in TAGS_FILE.read_text().splitlines() if t.strip()]
     tag_input = _tag_input(page)
     tag_input.click()
@@ -518,7 +523,22 @@ def _selfcheck() -> None:
     _step_premium(_NoPage(), {"price": None})
     _step_tier(_NoPage(), {})        # no tier -> no-op
     _step_galleries(_NoPage(), {})   # no galleries -> no-op
-    print("selfcheck OK")
+
+    # TAGS_FILE is resolved from publicator.toml [tags], under DATA_DIR
+    import tempfile, os as _os
+    _cwd0 = _os.getcwd()
+    with tempfile.TemporaryDirectory() as _d:
+        _os.chdir(_d)
+        try:
+            (Path(_d) / "publicator.toml").write_text('tags = "tags/da.txt"\n')
+            configure(_d)
+            assert TAGS_FILE == Path(_d) / "tags/da.txt", TAGS_FILE
+            (Path(_d) / "publicator.toml").write_text("")   # no [tags] key
+            configure(_d)
+            assert TAGS_FILE is None, TAGS_FILE
+        finally:
+            _os.chdir(_cwd0)
+    print("da_publish selfcheck OK")
 
 
 def main() -> int:
