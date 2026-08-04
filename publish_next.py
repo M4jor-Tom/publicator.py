@@ -524,8 +524,8 @@ class GalleryHandler(BaseHTTPRequestHandler):
     openrouter_model = ""
     ai_timeout = 300
     json_path = "publications.json"
-    config: dict = {"tiers": [], "galleries": []}
-    schedule: dict = {"day": 2, "hour": 20, "per_slot": 2}
+    config: dict = {}
+    schedule: dict = _schedule_js({})
     publish_done: dict | None = None
 
     def _build_page(self) -> str:
@@ -872,9 +872,9 @@ def main() -> int:
 
     setup_logging(args.verbose)
 
-    data_dir = configure(args.data_dir)  # points da_publish + echo helpers at the db dir
-    args.json = args.json or str(data_dir / "publications.json")
     config = load_config(Path.cwd())
+    data_dir = configure(args.data_dir, config)  # points da_publish + echo helpers at the db dir
+    args.json = args.json or str(data_dir / "publications.json")
     publicable_dirs = [str(data_dir / d) for d in config["publicable"]]
 
     print("Finding unpublished images...")

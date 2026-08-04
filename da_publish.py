@@ -68,14 +68,15 @@ _MONTHS = {m: i + 1 for i, m in enumerate(
     ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"])}
 
 
-def configure(data_dir) -> Path:
+def configure(data_dir, config=None) -> Path:
     """Point this module (and the echo helpers) at a publication database dir.
-    Returns the resolved DATA_DIR."""
+    `config` is a pre-loaded publicator.toml dict; None -> load it here (for
+    standalone callers). Returns the resolved DATA_DIR."""
     global DATA_DIR, LOGIN_DIR, SESSION_DIR, TAGS_FILE
     DATA_DIR = set_data_dir(data_dir)  # also points the echo helpers (find_art_path) at it
     LOGIN_DIR = DATA_DIR / ".deviantart-login"
     SESSION_DIR = DATA_DIR / ".deviantart-session"
-    tags = load_config(Path.cwd()).get("tags")
+    tags = (config if config is not None else load_config(Path.cwd())).get("tags")
     TAGS_FILE = DATA_DIR / tags if tags else None
     return DATA_DIR
 
@@ -524,19 +525,12 @@ def _selfcheck() -> None:
     _step_tier(_NoPage(), {})        # no tier -> no-op
     _step_galleries(_NoPage(), {})   # no galleries -> no-op
 
-    # TAGS_FILE is resolved from publicator.toml [tags], under DATA_DIR
-    _cwd0 = os.getcwd()
+    # TAGS_FILE resolves config["tags"] under DATA_DIR; None when unset
     with tempfile.TemporaryDirectory() as _d:
-        os.chdir(_d)
-        try:
-            (Path(_d) / "publicator.toml").write_text('tags = "tags/da.txt"\n')
-            configure(_d)
-            assert TAGS_FILE == Path(_d) / "tags/da.txt", TAGS_FILE
-            (Path(_d) / "publicator.toml").write_text("")   # no [tags] key
-            configure(_d)
-            assert TAGS_FILE is None, TAGS_FILE
-        finally:
-            os.chdir(_cwd0)
+        configure(_d, {"tags": "tags/da.txt"})
+        assert TAGS_FILE == Path(_d) / "tags/da.txt", TAGS_FILE
+        configure(_d, {})   # no [tags] key
+        assert TAGS_FILE is None, TAGS_FILE
     print("da_publish selfcheck OK")
 
 
