@@ -1,0 +1,7 @@
+- config.toml
+    - Rename to publicator.toml
+    - ctrl + f "picked"
+    - ctrl + f "tags/da.txt"
+- pw maintainance w/ skill
+    - description
+    - price
