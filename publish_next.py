@@ -93,9 +93,11 @@ def collect_images(directory: str) -> list[str]:
     return images
 
 
-def find_candidates(directory: str, json_path: str, limit: int) -> list[str]:
+def find_candidates(directories: list[str], json_path: str, limit: int) -> list[str]:
     publicated = load_publicated_hashes(json_path)
-    images = collect_images(directory)
+    images = []
+    for d in directories:
+        images.extend(collect_images(d))   # os.walk on a missing dir yields nothing
     random.shuffle(images)
     candidates = []
     for path in images:
@@ -801,7 +803,7 @@ def apply_update(pubs, uuid_, fields):
 # ---------------------------------------------------------------------------
 
 def serve(thumb_dir: str, thumb_map: dict[str, str], candidate_paths: list[str],
-          pending: list[dict], args) -> dict | None:
+          pending: list[dict], args, config: dict) -> dict | None:
     GalleryHandler.thumb_dir = thumb_dir
     GalleryHandler.thumb_map = thumb_map
     GalleryHandler.candidate_paths = candidate_paths
@@ -811,7 +813,7 @@ def serve(thumb_dir: str, thumb_map: dict[str, str], candidate_paths: list[str],
     GalleryHandler.openrouter_model = args.openrouter_model
     GalleryHandler.ai_timeout = args.ai_timeout
     GalleryHandler.json_path = args.json
-    GalleryHandler.config = load_config(Path.cwd())
+    GalleryHandler.config = config          # was: load_config(Path.cwd())
     GalleryHandler.publish_done = None
 
     server = ThreadingHTTPServer(("127.0.0.1", args.port), GalleryHandler)
@@ -841,7 +843,6 @@ def main() -> int:
     parser.add_argument("-n", type=int, default=10)
     parser.add_argument("--data-dir", default=None,
                         help="publication database dir (publications.json + images + browser session); default: CWD")
-    parser.add_argument("--picked-dir", default=None, help="default: <data-dir>/picked")
     parser.add_argument("--json", default=None, help="default: <data-dir>/publications.json")
     parser.add_argument("--ai-model", default=DEFAULT_MODEL)
     parser.add_argument("--openrouter-model",
@@ -860,10 +861,11 @@ def main() -> int:
 
     data_dir = configure(args.data_dir)  # points da_publish + echo helpers at the db dir
     args.json = args.json or str(data_dir / "publications.json")
-    args.picked_dir = args.picked_dir or str(data_dir / "picked")
+    config = load_config(Path.cwd())
+    publicable_dirs = [str(data_dir / d) for d in config["publicable"]]
 
     print("Finding unpublished images...")
-    candidates = find_candidates(args.picked_dir, args.json, args.n)
+    candidates = find_candidates(publicable_dirs, args.json, args.n)
     pending = load_pending_entries(args.json)
     log.debug("found %d candidate(s), %d pending", len(candidates), len(pending))
     if not candidates and not pending:
@@ -877,7 +879,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="publish-next-") as thumb_dir:
         thumb_map = generate_thumbnails(candidates + [e["path"] for e in pending], thumb_dir)
         log.debug("generated %d thumbnail(s) in %s", len(thumb_map), thumb_dir)
-        result = serve(thumb_dir, thumb_map, candidates, pending, args)
+        result = serve(thumb_dir, thumb_map, candidates, pending, args, config)
 
     if result is None:
         print("No publish action taken.")
