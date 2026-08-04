@@ -872,8 +872,9 @@ def main() -> int:
 
     setup_logging(args.verbose)
 
-    config = load_config(Path.cwd())
-    data_dir = configure(args.data_dir, config)  # points da_publish + echo helpers at the db dir
+    data_dir = Path(args.data_dir).resolve() if args.data_dir else Path.cwd()
+    config = load_config(data_dir)
+    configure(args.data_dir, config)  # points da_publish + echo helpers at the db dir
     args.json = args.json or str(data_dir / "publications.json")
     publicable_dirs = [str(data_dir / d) for d in config["publicable"]]
 

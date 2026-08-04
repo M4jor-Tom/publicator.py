@@ -73,7 +73,7 @@ def main():
         _selfcheck(); return
     data_dir = Path(args.data_dir).resolve() if args.data_dir else Path.cwd()
     data = json.loads((data_dir / "publications.json").read_text())
-    validate_publications(data, load_config(Path.cwd()))
+    validate_publications(data, load_config(data_dir))
     print("Valid")
 
 

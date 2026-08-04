@@ -76,7 +76,7 @@ def configure(data_dir, config=None) -> Path:
     DATA_DIR = set_data_dir(data_dir)  # also points the echo helpers (find_art_path) at it
     LOGIN_DIR = DATA_DIR / ".deviantart-login"
     SESSION_DIR = DATA_DIR / ".deviantart-session"
-    tags = (config if config is not None else load_config(Path.cwd())).get("tags")
+    tags = (config if config is not None else load_config(DATA_DIR)).get("tags")
     TAGS_FILE = DATA_DIR / tags if tags else None
     return DATA_DIR
 
