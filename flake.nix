@@ -42,7 +42,10 @@
       # `llm-openrouter` IS in this nixpkgs pin (unlike llm-claude-cli above), so
       # no vendoring needed. The API key is NOT baked in: it reads $OPENROUTER_KEY
       # at runtime.
-      python = pyInterp.withPackages (ps: [ ps.jsonschema ps.playwright ps.llm llm-claude-cli ps.llm-openrouter ]);
+      pyPkgs = ps: [ ps.jsonschema ps.playwright ps.llm llm-claude-cli ps.llm-openrouter ];
+      python = pyInterp.withPackages pyPkgs;
+      # devShell adds pytest so `nix develop -c pytest` runs the suite; apps don't ship it.
+      devPython = pyInterp.withPackages (ps: pyPkgs ps ++ [ ps.pytest ]);
       src = ./.;
       browsers = pkgs.playwright-driver.browsers;
       # Each script resolves its code assets (schema, tags/) via __file__, so apps
@@ -106,7 +109,7 @@
         login = login;
       };
       devShells.${system}.default = pkgs.mkShell {
-        packages = [ python pkgs.imagemagick pkgs.playwright-driver.browsers claude ];
+        packages = [ devPython pkgs.imagemagick pkgs.playwright-driver.browsers claude ];
         shellHook = ''
           export PLAYWRIGHT_BROWSERS_PATH=${pkgs.playwright-driver.browsers}
           export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=true
