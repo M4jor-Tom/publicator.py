@@ -30,13 +30,13 @@ tripped it (so the next run doesn't fall through).
 `state=unpublished` entry in `publications.json` (stdlib-only, no app needed):
 
 ```sh
-python ../publicator.py/echo_first_unpublished_publication_data.py
+python ./echo_first_unpublished_publication_data.py
 ```
 
 ## Manual fallback: drive Chromium via the daemon
 
 ```sh
-nix run ../publicator.py#pw-daemon
+nix run .#pw-daemon
 ```
 
 Chromium persistent context in `.deviantart-session/` (the same logged-in
