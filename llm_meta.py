@@ -25,7 +25,7 @@ TITLE_DESC_SCHEMA = {
     "type": "object",
     "properties": {
         "title": {"type": "string", "description": "<= 50 chars, evocative"},
-        "description": {"type": "string", "description": "2-3 sentences, artist voice"},
+        "description": {"type": "string", "description": "2-3 sentences, invented story of what could be happening in the scene"},
     },
     "required": ["title", "description"],
 }
@@ -33,12 +33,14 @@ TITLE_DESC_SCHEMA = {
 _PROMPT = (
     "Read the image file {name} in the current directory and look at the artwork. "
     "Reply with a title (<= 50 characters, evocative) and a description (2-3 "
-    "sentences, in the artist's voice). No hashtags, no emojis."
+    "sentences) that invents a short backstory for the scene — imagine what could "
+    "be happening in it and narrate that. No hashtags, no emojis."
 )
 
 _PROMPT_ATTACH = (
     "Look at the attached artwork. Reply with a title (<= 50 characters, "
-    "evocative) and a description (2-3 sentences, in the artist's voice). "
+    "evocative) and a description (2-3 sentences) that invents a short backstory "
+    "for the scene — imagine what could be happening in it and narrate that. "
     "No hashtags, no emojis."
 )
 
