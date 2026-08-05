@@ -278,8 +278,8 @@ _PAGE_TMPL = r"""<!DOCTYPE html>
   <h1>Publish next</h1>
   <span id="queue-count">0 queued</span>
   <select id="ai-model" title="AI model for Generate with AI">
-    <option value="__AI_MODEL__">Claude (subscription)</option>
     <option value="__OPENROUTER_MODEL__">OpenRouter (free)</option>
+    <option value="__AI_MODEL__">Claude (subscription)</option>
   </select>
   <span id="stage-status"></span>
   <button id="stage-btn" onclick="stageQueue()" disabled>Add to publish pad</button>
