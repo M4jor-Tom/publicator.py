@@ -22,10 +22,10 @@ import logging
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
-import time
 from datetime import datetime
 from pathlib import Path
 
@@ -259,7 +259,7 @@ def _step_title(page, e):
     page.get_by_label("Title", exact=False).first.fill(e["title"])
 
 
-DESCRIPTION_SELECTOR = '[aria-label="Description"]'
+DESCRIPTION_SELECTOR = '[contenteditable="true"]'  # rich-text editor; the only contenteditable on the form
 
 
 def _step_description(page, e):
@@ -311,36 +311,49 @@ def _step_add_tags(page, e):
         page.wait_for_timeout(120)
 
 
-PREMIUM_CHECKBOX = "isPremiumDownload"
-PREMIUM_PRICE_SELECTOR = 'input[name="premiumDownloadPrice"]'
+PREMIUM_TOGGLE_LABEL = "Submit as Premium Download"          # a <button> linked to this label
+PREMIUM_PRICE_SELECTOR = 'input[name="downloadDollarPrice"]'  # appears once the toggle is on
 
 
 def _step_premium(page, e):
     price = e.get("price")
     if price is None:
         return
-    set_checkbox(page, PREMIUM_CHECKBOX, True)
-    page.wait_for_timeout(300)
+    # ponytail: fresh upload starts with the toggle off, so one click turns it on.
+    page.get_by_label(PREMIUM_TOGGLE_LABEL).click()
+    page.wait_for_timeout(500)
     page.locator(PREMIUM_PRICE_SELECTOR).fill(f"{float(price):g}")
 
 
-TIER_SELECTOR = 'select[name="premiumFolderTier"]'
-GALLERY_ADD_BUTTON = 'button[aria-label="Add to Gallery"]'
+# Tier and gallery are role=combobox checkbox dropdowns with dynamic ids, so each
+# is anchored to its stable section heading (first following combobox).
+def _pick_in_combo(page, combo, text) -> None:
+    """Open a role=combobox dropdown, tick the option whose text is `text`, then
+    close it so it can't overlay later steps."""
+    combo.click()
+    page.wait_for_timeout(500)
+    page.get_by_text(text, exact=True).first.click()
+    combo.click()
+    page.wait_for_timeout(200)
 
 
 def _step_tier(page, e):
     tier = e.get("tier")
     if not tier:
         return
-    page.select_option(TIER_SELECTOR, label=tier)
+    combo = page.locator('xpath=//*[normalize-space(text())="Submit to your Subscribers"]/following::*[@role="combobox"][1]')
+    combo.scroll_into_view_if_needed()
+    _pick_in_combo(page, combo, tier)
 
 
 def _step_galleries(page, e):
     for g in e.get("galleries") or []:
-        page.locator(GALLERY_ADD_BUTTON).first.click()
-        page.wait_for_timeout(300)
-        page.get_by_text(g, exact=True).first.click()
-        page.wait_for_timeout(200)
+        combo = page.locator('xpath=//*[normalize-space(text())="Gallery"]/following::*[@role="combobox"][1]')
+        combo.scroll_into_view_if_needed()
+        # The combobox lists its selected folders as text; skip if already ticked
+        # (blindly clicking would UNtick the default "Featured").
+        if g not in combo.inner_text():
+            _pick_in_combo(page, combo, g)
 
 
 def _step_schedule(page, e):
@@ -449,17 +462,38 @@ def _prepare_session_from_login() -> None:
         (SESSION_DIR / name).unlink(missing_ok=True)
 
 
-def _session_authed(ctx) -> bool:
-    """True if the copied profile carries a live DA auth cookie. Replaces the
-    old interactive login wait: PerimeterX blocks signing in under Playwright,
-    so the session must already exist (established out-of-band via #login)."""
-    now = time.time()
-    for c in ctx.cookies():
-        if c.get("name") in ("auth_secure", "userinfo") and "deviantart" in c.get("domain", ""):
-            exp = c.get("expires", -1)
-            if exp in (-1, None) or exp > now:
-                return True
-    return False
+def _da_login_cookies() -> list[dict]:
+    """DeviantArt cookies from the human login profile's cookies.sqlite, shaped
+    for context.add_cookies. Firefox reloads a copied profile but drops its
+    httpOnly cookies (auth/auth_secure) on load, so we re-inject those from the
+    source DB — without them the session reads as logged-out.
+    ponytail: session cookies (no expires) — they outlive one publish run."""
+    db = LOGIN_DIR / "cookies.sqlite"
+    if not db.exists():
+        return []
+    con = sqlite3.connect(f"file:{db}?immutable=1", uri=True)
+    try:
+        rows = con.execute(
+            "select name, value, host, path, isSecure, isHttpOnly "
+            "from moz_cookies where host like '%deviantart%'").fetchall()
+    finally:
+        con.close()
+    return [{"name": n, "value": v, "domain": h, "path": p or "/",
+             "secure": bool(s), "httpOnly": bool(ho)}
+            for n, v, h, p, s, ho in rows]
+
+
+def _session_authed(page) -> bool:
+    """True if the session reaches the submit studio without a bounce to the
+    login page. Cookie presence lies: a stale `userinfo` cookie (30-day life)
+    outlives the real `auth_secure` session token, so the old jar check
+    green-lit dead sessions and only failed pages deep into the flow. Ask the
+    site instead — this also catches a server-expired token, not just a missing
+    cookie."""
+    page.goto("https://www.deviantart.com/studio?new=1",
+              wait_until="domcontentloaded", timeout=45000)
+    page.wait_for_timeout(2000)
+    return "/users/login" not in page.url
 
 
 def publish_batch(entries: list[dict], uuids: list[str],
@@ -484,8 +518,11 @@ def publish_batch(entries: list[dict], uuids: list[str],
         # is itself a bot-detection signal.
         ctx = p.firefox.launch_persistent_context(str(SESSION_DIR), headless=False)
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
+        # The copied Firefox profile drops its httpOnly auth cookies on load;
+        # re-inject them from the login DB before checking the session.
+        ctx.add_cookies(_da_login_cookies())
 
-        if not _session_authed(ctx):
+        if not _session_authed(page):
             ctx.close()
             return 0, len(entries), _LOGIN_HINT
         log.debug("DA session authed; publishing %d entr%s",
@@ -531,6 +568,7 @@ def _selfcheck() -> None:
         assert TAGS_FILE == Path(_d) / "sub/tags.txt", TAGS_FILE
         configure(_d, {})   # no [tags] key
         assert TAGS_FILE is None, TAGS_FILE
+        assert _da_login_cookies() == [], "no login DB -> no cookies to inject"
     print("da_publish selfcheck OK")
 
 
