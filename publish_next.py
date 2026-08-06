@@ -136,19 +136,14 @@ _JS_DAY = {"sunday": 0, "monday": 1, "tuesday": 2, "wednesday": 3,
            "thursday": 4, "friday": 5, "saturday": 6}
 
 
-_DEFAULT_PROFILE = {"name": "default", "day": "tuesday", "hour": 20, "per_slot": 2}
-
-
 def _schedules_js(schedule: dict) -> list[dict]:
     """Cadence list for the gallery client: [{name, day: <JS getUTCDay index>,
     hour, per_slot}, ...]. Reads schedule['profiles']; a flat day/hour/per_slot
     config becomes one 'default' profile, an empty dict the built-in default.
     Only frequency='weekly' is implemented; profiles need distinct (day, hour)."""
     raw = schedule.get("profiles")
-    if raw is None:
-        overrides = {k: schedule[k] for k in ("day", "hour", "per_slot", "frequency")
-                     if k in schedule}
-        raw = [{**_DEFAULT_PROFILE, **overrides}]
+    if raw is None:               # flat day/hour/per_slot config, or {} -> one 'default' profile
+        raw = [schedule]
     out, seen = [], set()
     for p in raw:
         freq = p.get("frequency", "weekly")
@@ -173,19 +168,22 @@ def _schedules_js(schedule: dict) -> list[dict]:
 
 
 def _existing_ts(json_path: str) -> list[int]:
-    """Timestamps of already-scheduled apparitions (state != unpublished) — the
-    occupancy background the client packs new slots around. Unpublished (pending)
-    entries are excluded; they ride in the client queue instead."""
+    """Future timestamps of already-scheduled apparitions (state != unpublished) —
+    the occupancy background the client packs new slots around. Unpublished
+    (pending) entries are excluded; they ride in the client queue instead.
+    Past timestamps are dropped: nextSlotForProfile only compares against slots
+    >= now, so they can never occupy a candidate slot, and this keeps the
+    embedded __EXISTING_TS__ payload from growing without bound over the years."""
     try:
         with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return []
-    out = []
+    out, now = [], time.time()
     for entry in data:
         for app in entry.get("apparitions", []):
             ts = app.get("apparitionTimestampIfDifferentThanSubmission")
-            if ts and app.get("state") != STATE_UNPUBLISHED:
+            if ts and ts >= now and app.get("state") != STATE_UNPUBLISHED:
                 out.append(int(ts))
     return out
 
@@ -327,14 +325,16 @@ const PENDING = __PENDING__;           // already-queued entries from publicatio
 
 const queue = []; // [{cardId, path, title, description, price, scheduleTs, tier, galleries, uuid?}]
 
+function profileForTs(ts) {             // profile a scheduled ts belongs to (distinct day+hour), or undefined
+  const d = new Date(ts * 1000);
+  return SCHEDULES.find(s => s.day === d.getUTCDay() && s.hour === d.getUTCHours());
+}
 function profileByName(name) {
   return SCHEDULES.find(s => s.name === name) || SCHEDULES[0];
 }
-function presetForTs(ts) {              // profile whose (day, hour) matches ts, else custom
+function presetForTs(ts) {              // profile-name whose (day, hour) matches ts, else custom
   if (!ts) return SCHEDULES[0].name;
-  const d = new Date(ts * 1000);
-  const m = SCHEDULES.find(s => s.day === d.getUTCDay() && s.hour === d.getUTCHours());
-  return m ? m.name : "__custom__";
+  return profileForTs(ts)?.name ?? "__custom__";
 }
 function nextWeekday(afterTs, day, hour) {
   const d = new Date(afterTs * 1000);
@@ -345,12 +345,9 @@ function nextWeekday(afterTs, day, hour) {
   if (slot <= afterTs) slot += 7 * 24 * 3600;   // today's slot already passed -> next week
   return slot;
 }
-function occupancyTs(p) {                // background + queue, restricted to p's (weekday, hour)
+function occupancyTs(p) {                // background + queue timestamps belonging to profile p
   const all = EXISTING_TS.concat(queue.map(e => e.scheduleTs).filter(Boolean));
-  return all.filter(ts => {
-    const d = new Date(ts * 1000);
-    return d.getUTCDay() === p.day && d.getUTCHours() === p.hour;
-  });
+  return all.filter(ts => profileForTs(ts) === p);   // p is a SCHEDULES element -> identity holds
 }
 function nextSlotForProfile(p) {         // earliest FUTURE slot with room (< per_slot)
   const taken = occupancyTs(p);
