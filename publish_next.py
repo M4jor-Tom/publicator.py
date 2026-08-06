@@ -167,6 +167,8 @@ def _schedules_js(schedule: dict) -> list[dict]:
         seen.add(key)
         out.append({"name": str(p.get("name", "default")),
                     "day": _JS_DAY[day], "hour": hour, "per_slot": per_slot})
+    if not out:
+        raise ValueError("schedule.profiles is empty")
     return out
 
 
@@ -203,6 +205,7 @@ def _selfcheck() -> None:
         ({"profiles": [{"day": "tuesday", "per_slot": 0}]}, ValueError),
         ({"profiles": [{"name": "a", "day": "tuesday", "hour": 20},
                        {"name": "b", "day": "tuesday", "hour": 20}]}, ValueError),
+        ({"profiles": []}, ValueError),
     ]:
         try:
             _schedules_js(bad); assert False, f"{bad} not rejected"
