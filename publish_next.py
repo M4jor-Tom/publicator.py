@@ -335,11 +335,12 @@ function presetForTs(ts) {              // profile whose (day, hour) matches ts,
 }
 function nextWeekday(afterTs, day, hour) {
   const d = new Date(afterTs * 1000);
-  let days = (day - d.getUTCDay() + 7) % 7;
-  if (days === 0) days = 7;             // ponytail: skip same-day; hand-edit if you want today
+  const days = (day - d.getUTCDay() + 7) % 7;   // 0 = today is the target weekday
   d.setUTCDate(d.getUTCDate() + days);
   d.setUTCHours(hour, 0, 0, 0);
-  return Math.floor(d.getTime() / 1000);
+  let slot = Math.floor(d.getTime() / 1000);
+  if (slot <= afterTs) slot += 7 * 24 * 3600;   // today's slot already passed -> next week
+  return slot;
 }
 function occupancyTs(p) {                // background + queue, restricted to p's (weekday, hour)
   const all = EXISTING_TS.concat(queue.map(e => e.scheduleTs).filter(Boolean));
