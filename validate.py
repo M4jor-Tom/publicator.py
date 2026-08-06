@@ -61,6 +61,15 @@ def _selfcheck():
         assert c["schedule"] == {
             "frequency": "weekly", "day": "tuesday", "hour": 20, "per_slot": 2
         }, c
+        (Path(d) / "publicator.toml").write_text(
+            '[[schedule.profiles]]\nname = "free"\nday = "tuesday"\nhour = 20\nper_slot = 2\n'
+            '[[schedule.profiles]]\nname = "paid"\nday = "friday"\nhour = 20\nper_slot = 1\n'
+        )
+        c = load_config(d)
+        assert c["schedule"] == {"profiles": [
+            {"name": "free", "day": "tuesday", "hour": 20, "per_slot": 2},
+            {"name": "paid", "day": "friday", "hour": 20, "per_slot": 1},
+        ]}, c
     print("validate selfcheck OK")
 
 

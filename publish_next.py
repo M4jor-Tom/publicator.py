@@ -136,49 +136,78 @@ _JS_DAY = {"sunday": 0, "monday": 1, "tuesday": 2, "wednesday": 3,
            "thursday": 4, "friday": 5, "saturday": 6}
 
 
-def _schedule_js(schedule: dict) -> dict:
-    """Cadence for the gallery client: {day: <JS getUTCDay index>, hour, per_slot}.
-    Only frequency='weekly' is implemented."""
-    freq = schedule.get("frequency", "weekly")
-    if freq != "weekly":
-        raise NotImplementedError(f"schedule.frequency {freq!r} not implemented (only 'weekly')")
-    day = str(schedule.get("day", "tuesday")).lower()
-    if day not in _JS_DAY:
-        raise ValueError(f"schedule.day {day!r} invalid")
-    per_slot = int(schedule.get("per_slot", 2))
-    if per_slot < 1:
-        raise ValueError(f"schedule.per_slot must be >= 1, got {per_slot}")
-    return {"day": _JS_DAY[day], "hour": int(schedule.get("hour", 20)),
-            "per_slot": per_slot}
+_DEFAULT_PROFILE = {"name": "default", "day": "tuesday", "hour": 20, "per_slot": 2}
 
 
-def _max_existing_ts(json_path: str) -> int:
+def _schedules_js(schedule: dict) -> list[dict]:
+    """Cadence list for the gallery client: [{name, day: <JS getUTCDay index>,
+    hour, per_slot}, ...]. Reads schedule['profiles']; a flat day/hour/per_slot
+    config becomes one 'default' profile, an empty dict the built-in default.
+    Only frequency='weekly' is implemented; profiles need distinct (day, hour)."""
+    raw = schedule.get("profiles")
+    if raw is None:
+        overrides = {k: schedule[k] for k in ("day", "hour", "per_slot", "frequency")
+                     if k in schedule}
+        raw = [{**_DEFAULT_PROFILE, **overrides}]
+    out, seen = [], set()
+    for p in raw:
+        freq = p.get("frequency", "weekly")
+        if freq != "weekly":
+            raise NotImplementedError(f"schedule.frequency {freq!r} not implemented (only 'weekly')")
+        day = str(p.get("day", "tuesday")).lower()
+        if day not in _JS_DAY:
+            raise ValueError(f"schedule.day {day!r} invalid")
+        hour = int(p.get("hour", 20))
+        per_slot = int(p.get("per_slot", 2))
+        if per_slot < 1:
+            raise ValueError(f"schedule.per_slot must be >= 1, got {per_slot}")
+        key = (_JS_DAY[day], hour)
+        if key in seen:
+            raise ValueError(f"schedule profiles collide on (day={day}, hour={hour})")
+        seen.add(key)
+        out.append({"name": str(p.get("name", "default")),
+                    "day": _JS_DAY[day], "hour": hour, "per_slot": per_slot})
+    return out
+
+
+def _existing_ts(json_path: str) -> list[int]:
+    """Timestamps of already-scheduled apparitions (state != unpublished) — the
+    occupancy background the client packs new slots around. Unpublished (pending)
+    entries are excluded; they ride in the client queue instead."""
     try:
         with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
-        return int(time.time())
-    max_ts = 0
+        return []
+    out = []
     for entry in data:
         for app in entry.get("apparitions", []):
             ts = app.get("apparitionTimestampIfDifferentThanSubmission")
-            if ts and ts > max_ts:
-                max_ts = ts
-    return max_ts or int(time.time())
+            if ts and app.get("state") != STATE_UNPUBLISHED:
+                out.append(int(ts))
+    return out
 
 
 def _selfcheck() -> None:
-    # schedule cadence for the client: weekly maps a day-name -> JS getUTCDay index
-    sj = _schedule_js({"frequency": "weekly", "day": "tuesday", "hour": 20, "per_slot": 2})
-    assert sj == {"day": 2, "hour": 20, "per_slot": 2}, sj
-    try:
-        _schedule_js({"frequency": "monthly"}); assert False, "monthly not rejected"
-    except NotImplementedError:
-        pass
-    try:
-        _schedule_js({"frequency": "weekly", "per_slot": 0}); assert False, "per_slot=0 not rejected"
-    except ValueError:
-        pass
+    # schedule cadence: profiles -> client list; weekly day-name -> JS getUTCDay index
+    assert _schedules_js({"profiles": [
+        {"name": "free", "day": "tuesday", "hour": 20, "per_slot": 2}]}) == \
+        [{"name": "free", "day": 2, "hour": 20, "per_slot": 2}]
+    # flat keys -> single "default" profile
+    assert _schedules_js({"day": "friday", "hour": 18, "per_slot": 1}) == \
+        [{"name": "default", "day": 5, "hour": 18, "per_slot": 1}]
+    # empty -> built-in default (Tuesday 20:00, per_slot 2)
+    assert _schedules_js({}) == [{"name": "default", "day": 2, "hour": 20, "per_slot": 2}]
+    for bad, exc in [
+        ({"profiles": [{"frequency": "monthly"}]}, NotImplementedError),
+        ({"profiles": [{"day": "tuesday", "per_slot": 0}]}, ValueError),
+        ({"profiles": [{"name": "a", "day": "tuesday", "hour": 20},
+                       {"name": "b", "day": "tuesday", "hour": 20}]}, ValueError),
+    ]:
+        try:
+            _schedules_js(bad); assert False, f"{bad} not rejected"
+        except exc:
+            pass
     # literal Tuesday 20:00 UTC anchors for the write_publications round-trip
     s0 = int(datetime(2026, 1, 6, 20, tzinfo=timezone.utc).timestamp())  # 2026-01-06 is a Tue
     s1 = s0 + 7 * 24 * 3600
@@ -289,32 +318,54 @@ _PAGE_TMPL = r"""<!DOCTYPE html>
   <div class="grid" id="gallery">__CARDS__</div>
 </main>
 <script>
-const INITIAL_MAX_TS = __INITIAL_MAX_TS__;
-const SCHEDULE = __SCHEDULE__;
-const PENDING = __PENDING__; // already-queued entries from publications.json
+const EXISTING_TS = __EXISTING_TS__;   // already-scheduled background timestamps
+const SCHEDULES = __SCHEDULES__;       // [{name, day, hour, per_slot}, ...]
+const PENDING = __PENDING__;           // already-queued entries from publications.json
 
 const queue = []; // [{cardId, path, title, description, price, scheduleTs, tier, galleries, uuid?}]
 
-function nextSlotBase(afterTs) {
+function profileByName(name) {
+  return SCHEDULES.find(s => s.name === name) || SCHEDULES[0];
+}
+function presetForTs(ts) {              // profile whose (day, hour) matches ts, else custom
+  if (!ts) return SCHEDULES[0].name;
+  const d = new Date(ts * 1000);
+  const m = SCHEDULES.find(s => s.day === d.getUTCDay() && s.hour === d.getUTCHours());
+  return m ? m.name : "__custom__";
+}
+function nextWeekday(afterTs, day, hour) {
   const d = new Date(afterTs * 1000);
-  let days = (SCHEDULE.day - d.getUTCDay() + 7) % 7;
-  if (days === 0) days = 7;
+  let days = (day - d.getUTCDay() + 7) % 7;
+  if (days === 0) days = 7;             // ponytail: skip same-day; hand-edit if you want today
   d.setUTCDate(d.getUTCDate() + days);
-  d.setUTCHours(SCHEDULE.hour, 0, 0, 0);
+  d.setUTCHours(hour, 0, 0, 0);
   return Math.floor(d.getTime() / 1000);
 }
-function slotForIndex(maxTs, idx) {
-  const base = nextSlotBase(maxTs);
-  return base + Math.floor(idx / SCHEDULE.per_slot) * 7 * 24 * 3600;
+function occupancyTs(p) {                // background + queue, restricted to p's (weekday, hour)
+  const all = EXISTING_TS.concat(queue.map(e => e.scheduleTs).filter(Boolean));
+  return all.filter(ts => {
+    const d = new Date(ts * 1000);
+    return d.getUTCDay() === p.day && d.getUTCHours() === p.hour;
+  });
+}
+function nextSlotForProfile(p) {         // earliest FUTURE slot with room (< per_slot)
+  const taken = occupancyTs(p);
+  let slot = nextWeekday(Math.floor(Date.now() / 1000), p.day, p.hour);
+  while (taken.filter(ts => ts === slot).length >= p.per_slot) slot += 7 * 24 * 3600;
+  return slot;
 }
 function tsToLocalInput(ts) {
-  // datetime-local wants local wall time as YYYY-MM-DDTHH:MM
   const d = new Date(ts * 1000);
   const pad = n => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 function localInputToTs(s) {
   return Math.floor(new Date(s).getTime() / 1000);
+}
+function applyPreset(sel, cardId) {      // preset change -> refill the picker
+  if (sel.value === "__custom__") return;
+  const card = document.getElementById(cardId);
+  card.querySelector(".f-schedule").value = tsToLocalInput(nextSlotForProfile(profileByName(sel.value)));
 }
 
 function refreshCount() {
@@ -330,15 +381,19 @@ function openForm(cardId) {
   const form = card.querySelector(".form");
   const entry = queue.find(e => e.cardId === cardId);
   const q = sel => form.querySelector(sel);
+  const presetEl = q(".f-preset");
   if (entry) {
     q(".f-title").value = entry.title || "";
     q(".f-description").value = entry.description || "";
     q(".f-price").value = (entry.price == null) ? "" : entry.price;
     q(".f-schedule").value = entry.scheduleTs ? tsToLocalInput(entry.scheduleTs) : "";
+    if (presetEl) presetEl.value = presetForTs(entry.scheduleTs);
     if (q(".f-tier")) q(".f-tier").value = entry.tier || "";
     form.querySelectorAll(".f-gallery").forEach(cb => cb.checked = (entry.galleries || []).includes(cb.value));
   } else {
-    q(".f-schedule").value = tsToLocalInput(slotForIndex(INITIAL_MAX_TS, queue.length));
+    const p = SCHEDULES[0];
+    if (presetEl) presetEl.value = p.name;
+    q(".f-schedule").value = tsToLocalInput(nextSlotForProfile(p));
   }
   form.style.display = "flex";
   card.querySelector(".actions").style.display = "none";
@@ -496,13 +551,20 @@ def _tier_gallery_fields(config):
             f'<div class="galleries"><span>Galleries</span>{gals}</div>')
 
 
-def _card_form_html(cid, js_path, tg, save_label):
+def _preset_options(schedules):
+    opts = "".join(f'<option value="{html.escape(s["name"], quote=True)}">'
+                   f'{html.escape(s["name"])}</option>' for s in schedules)
+    return opts + '<option value="__custom__">(custom)</option>'
+
+
+def _card_form_html(cid, js_path, tg, save_label, preset_opts):
     """The shared edit form rendered on every card (candidate + pending). Only the
     save-button label differs between the two call sites."""
     return f"""  <div class="form">
     <label>Title <input type="text" class="f-title" maxlength="50"></label>
     <label>Description <textarea class="f-description"></textarea></label>
     <label>Price (optional) <input type="number" class="f-price" min="0" step="0.01"></label>
+    <label>Schedule preset <select class="f-preset" onchange="applyPreset(this, '{cid}')">{preset_opts}</select></label>
     <label>Schedule <input type="datetime-local" class="f-schedule"></label>
     {tg}
     <button class="btn-ai" onclick="aiGen('{cid}', {js_path})">Generate with AI</button>
@@ -519,19 +581,20 @@ class GalleryHandler(BaseHTTPRequestHandler):
     thumb_map: dict[str, str] = {}
     candidate_paths: list[str] = []      # new picks from picked/, add-able
     pending: list[dict] = []             # already-queued entries from publications.json
-    initial_max_ts = 0
+    existing_ts: list[int] = []
     ai_model = DEFAULT_MODEL
     openrouter_model = ""
     ai_timeout = 300
     json_path = "publications.json"
     config: dict = {}
-    schedule: dict = _schedule_js({})
+    schedules: list = _schedules_js({})
     publish_done: dict | None = None
 
     def _build_page(self) -> str:
         cards = []
         pending_js = []
         tg = _tier_gallery_fields(self.config)
+        preset_opts = _preset_options(self.schedules)
         # Pre-queued cards: entries already in publications.json (state=unpublished).
         for idx, e in enumerate(self.pending):
             thumb_path = self.thumb_map.get(e["path"], e["path"])
@@ -552,7 +615,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
     <a class="btn-view" href="{view_href}" target="_blank" rel="noopener">View</a>
     <button class="btn-add" onclick="openForm('{cid}')">Edit</button>
   </div>
-{_card_form_html(cid, js_pathp, tg, "Save changes")}
+{_card_form_html(cid, js_pathp, tg, "Save changes", preset_opts)}
 </div>""")
             pending_js.append({"cardId": cid, "uuid": e["uuid"], "path": e["path"],
                                "title": e["title"], "description": e.get("description"),
@@ -576,13 +639,13 @@ class GalleryHandler(BaseHTTPRequestHandler):
     <button class="btn-add" onclick="openForm('{cid}')">Add</button>
     <button class="btn-del" onclick="delCard('{cid}', {js_path})">Delete</button>
   </div>
-{_card_form_html(cid, js_path, tg, "Save to queue")}
+{_card_form_html(cid, js_path, tg, "Save to queue", preset_opts)}
 </div>""")
         page = _PAGE_TMPL
         page = page.replace("__CARDS__", "\n".join(cards))
         page = page.replace("__PENDING__", json.dumps(pending_js))
-        page = page.replace("__INITIAL_MAX_TS__", str(self.initial_max_ts))
-        page = page.replace("__SCHEDULE__", json.dumps(self.schedule))
+        page = page.replace("__EXISTING_TS__", json.dumps(self.existing_ts))
+        page = page.replace("__SCHEDULES__", json.dumps(self.schedules))
         page = page.replace("__AI_MODEL__", html.escape(self.ai_model, quote=True))
         page = page.replace("__OPENROUTER_MODEL__", html.escape(self.openrouter_model, quote=True))
         return page
@@ -820,13 +883,13 @@ def serve(thumb_dir: str, thumb_map: dict[str, str], candidate_paths: list[str],
     GalleryHandler.thumb_map = thumb_map
     GalleryHandler.candidate_paths = candidate_paths
     GalleryHandler.pending = pending
-    GalleryHandler.initial_max_ts = _max_existing_ts(args.json)
+    GalleryHandler.existing_ts = _existing_ts(args.json)
     GalleryHandler.ai_model = args.ai_model
     GalleryHandler.openrouter_model = args.openrouter_model
     GalleryHandler.ai_timeout = args.ai_timeout
     GalleryHandler.json_path = args.json
     GalleryHandler.config = config          # was: load_config(Path.cwd())
-    GalleryHandler.schedule = _schedule_js(config["schedule"])
+    GalleryHandler.schedules = _schedules_js(config["schedule"])
     GalleryHandler.publish_done = None
 
     server = ThreadingHTTPServer(("127.0.0.1", args.port), GalleryHandler)
