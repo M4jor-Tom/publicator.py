@@ -1,3 +1,9 @@
-- pw maintainance w/ skill
-    - description
-    - price
+- ~~pw maintainance w/ skill~~
+    - ~~description~~
+    - ~~price~~
+- Schedule:
+    - Instead of 1 unique schedule (ex: 2 every tuesday), several profiles (ex: 2 free every tuesdays, 1 paid every friday)
+    - Propose creation of schedules from the UI
+- Non Premium DA:
+    - Schedule publicator execution from a github actions workflow
+- publih_next.py: Split-refactor
