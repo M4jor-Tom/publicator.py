@@ -137,7 +137,7 @@ _JS_DAY = {"sunday": 0, "monday": 1, "tuesday": 2, "wednesday": 3,
 
 
 def _schedules_js(schedule: dict) -> list[dict]:
-    """Cadence list for the gallery client: [{name, day: <JS getUTCDay index>,
+    """Cadence list for the gallery client: [{name, day: <JS weekday index, 0=Sun>,
     hour, per_slot}, ...]. Reads schedule['profiles']; a flat day/hour/per_slot
     config becomes one 'default' profile, an empty dict the built-in default.
     Only frequency='weekly' is implemented; profiles need distinct (day, hour)."""
@@ -189,7 +189,7 @@ def _existing_ts(json_path: str) -> list[int]:
 
 
 def _selfcheck() -> None:
-    # schedule cadence: profiles -> client list; weekly day-name -> JS getUTCDay index
+    # schedule cadence: profiles -> client list; weekly day-name -> JS weekday index (0=Sun)
     assert _schedules_js({"profiles": [
         {"name": "free", "day": "tuesday", "hour": 20, "per_slot": 2}]}) == \
         [{"name": "free", "day": 2, "hour": 20, "per_slot": 2}]
@@ -326,8 +326,8 @@ const PENDING = __PENDING__;           // already-queued entries from publicatio
 const queue = []; // [{cardId, path, title, description, price, scheduleTs, tier, galleries, uuid?}]
 
 function profileForTs(ts) {             // profile a scheduled ts belongs to (distinct day+hour), or undefined
-  const d = new Date(ts * 1000);
-  return SCHEDULES.find(s => s.day === d.getUTCDay() && s.hour === d.getUTCHours());
+  const d = new Date(ts * 1000);        // LOCAL day/hour: "Tuesday 20:00" means the user's wall clock
+  return SCHEDULES.find(s => s.day === d.getDay() && s.hour === d.getHours());
 }
 function profileByName(name) {
   return SCHEDULES.find(s => s.name === name) || SCHEDULES[0];
@@ -336,23 +336,21 @@ function presetForTs(ts) {              // profile-name whose (day, hour) matche
   if (!ts) return SCHEDULES[0].name;
   return profileForTs(ts)?.name ?? "__custom__";
 }
-function nextWeekday(afterTs, day, hour) {
-  const d = new Date(afterTs * 1000);
-  const days = (day - d.getUTCDay() + 7) % 7;   // 0 = today is the target weekday
-  d.setUTCDate(d.getUTCDate() + days);
-  d.setUTCHours(hour, 0, 0, 0);
-  let slot = Math.floor(d.getTime() / 1000);
-  if (slot <= afterTs) slot += 7 * 24 * 3600;   // today's slot already passed -> next week
-  return slot;
-}
 function occupancyTs(p) {                // background + queue timestamps belonging to profile p
   const all = EXISTING_TS.concat(queue.map(e => e.scheduleTs).filter(Boolean));
   return all.filter(ts => profileForTs(ts) === p);   // p is a SCHEDULES element -> identity holds
 }
 function nextSlotForProfile(p) {         // earliest FUTURE slot with room (< per_slot)
-  const taken = occupancyTs(p);
-  let slot = nextWeekday(Math.floor(Date.now() / 1000), p.day, p.hour);
-  while (taken.filter(ts => ts === slot).length >= p.per_slot) slot += 7 * 24 * 3600;
+  const taken = occupancyTs(p);         // LOCAL wall clock, stepped by whole days so DST can't drift
+  const now = Math.floor(Date.now() / 1000);
+  const d = new Date();
+  d.setDate(d.getDate() + ((p.day - d.getDay() + 7) % 7));
+  d.setHours(p.hour, 0, 0, 0);
+  let slot = Math.floor(d.getTime() / 1000);
+  while (slot <= now || taken.filter(ts => ts === slot).length >= p.per_slot) {
+    d.setDate(d.getDate() + 7);         // skip this week if it's already past or full
+    slot = Math.floor(d.getTime() / 1000);
+  }
   return slot;
 }
 function tsToLocalInput(ts) {
