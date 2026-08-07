@@ -124,6 +124,30 @@ def test_schedule_slots_stay_2000_paris_across_dst():
     assert len(offsets) == 2, offsets
 
 
+def test_custom_schedule_resolves_in_config_timezone(tmp_path):
+    """A custom-typed wall-clock string persists as the schedule-TZ instant, not
+    whatever the browser's timezone makes of it. A UTC-spoofed private window sends
+    a scheduleTs 2h early; the naive 'schedule' string must win on both write paths."""
+    img = tmp_path / "a.png"; img.write_bytes(b"\x89PNG\r\n\x1a\n")
+    jp = tmp_path / "publications.json"
+    cfg = {"schedule": {"timezone": _TZ}}
+    intended = int(datetime(2026, 10, 15, 20, tzinfo=_PARIS).timestamp())      # 20:00 Paris
+    wrong = int(datetime(2026, 10, 15, 20, tzinfo=ZoneInfo("UTC")).timestamp())  # 20:00 UTC = 22:00 Paris
+
+    uuids = publish_next.write_publications(
+        [{"path": str(img), "title": "t", "description": "d",
+          "schedule": "2026-10-15T20:00", "scheduleTs": wrong}], str(jp), cfg)
+    stored = json.loads(jp.read_text())[0]["apparitions"][0]["apparitionTimestampIfDifferentThanSubmission"]
+    assert stored == intended, (stored, intended)
+
+    pubs = json.loads(jp.read_text())
+    publish_next.apply_update(pubs, uuids[0],
+        {"title": "t2", "description": "d", "schedule": "2026-10-20T20:00", "scheduleTs": wrong},
+        publish_next._zone(cfg["schedule"]))
+    got = pubs[0]["apparitions"][0]["apparitionTimestampIfDifferentThanSubmission"]
+    assert got == int(datetime(2026, 10, 20, 20, tzinfo=_PARIS).timestamp()), got
+
+
 def test_page_offers_both_models():
     H = publish_next.GalleryHandler
     H.thumb_dir = "/t"; H.thumb_map = {}; H.candidate_paths = []; H.pending = []
