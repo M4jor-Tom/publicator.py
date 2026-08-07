@@ -294,14 +294,18 @@ def _selfcheck() -> None:
             validate_publications(ok, {"tiers": [], "galleries": []}); assert False, "tier not rejected"
         except ValueError:
             pass
+        _pz = ZoneInfo(_DEFAULT_TZ)
         apply_update(_rows, _uuids[0], {"title": "T2", "description": "D2", "scheduleTs": s1,
-                                        "price": 3, "tier": "gold", "galleries": ["Art"]})
+                                        "price": 3, "tier": "gold", "galleries": ["Art"]}, _pz)
         a = _rows[0]["apparitions"][0]
         assert a["urlElsePublicationName"] == "T2" and a["priceIfNotFree"] == 3.0
         assert a["tier"] == "gold" and a["galleries"] == ["Art"], a
-        apply_update(_rows, _uuids[0], {"title": "T3", "description": "D3", "scheduleTs": s1})
+        apply_update(_rows, _uuids[0], {"title": "T3", "description": "D3", "scheduleTs": s1}, _pz)
         a = _rows[0]["apparitions"][0]
         assert "priceIfNotFree" not in a and "tier" not in a and "galleries" not in a, a
+    # resolve-on-save: a naive 'schedule' string is read in the schedule TZ, not UTC
+    assert _resolve_ts({"schedule": "2026-10-15T20:00"}, _pz) == \
+        int(datetime(2026, 10, 15, 20, tzinfo=_pz).timestamp())
     print("publish_next selfcheck OK")
 
 
@@ -489,7 +493,10 @@ function readForm(card) {
   if (!title) { err.textContent = "title required"; return null; }
   if (!desc) { err.textContent = "description required"; return null; }
   if (!sched) { err.textContent = "schedule required"; return null; }
-  const out = {title, description: desc, scheduleTs: localInputToTs(sched)};
+  // scheduleTs drives local occupancy/display; `schedule` (the naive wall clock)
+  // is what the server persists, resolved in the schedule TZ — so a custom time
+  // typed in a UTC-spoofed private window still lands on the intended Paris hour.
+  const out = {title, description: desc, schedule: sched, scheduleTs: localInputToTs(sched)};
   if (priceRaw !== "") {
     const p = parseFloat(priceRaw);
     if (isNaN(p) || p < 0) { err.textContent = "price must be >= 0"; return null; }
@@ -829,7 +836,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
                 with open(self.json_path) as f:
                     pubs = json.load(f)
                 try:
-                    apply_update(pubs, u, data)
+                    apply_update(pubs, u, data, _zone(self.config.get("schedule", {})))
                 except KeyError:
                     self._send(404, {"error": f"uuid not found: {u}"}); return
                 try:
@@ -854,6 +861,19 @@ class GalleryHandler(BaseHTTPRequestHandler):
 # Publications.json write
 # ---------------------------------------------------------------------------
 
+def _resolve_ts(fields: dict, zone: ZoneInfo) -> int:
+    """Epoch for a save. Prefer the naive 'schedule' wall-clock string resolved in
+    the schedule timezone (browser-TZ-proof — a private window spoofs Date to UTC,
+    so the client can't be trusted to convert it); fall back to a raw 'scheduleTs'
+    epoch (non-UI callers). One of the two must be present."""
+    s = fields.get("schedule")
+    if s:
+        return int(datetime.fromisoformat(s).replace(tzinfo=zone).timestamp())
+    if fields.get("scheduleTs"):
+        return int(fields["scheduleTs"])
+    raise ValueError("schedule required")
+
+
 def write_publications(entries: list[dict], json_path: str, config: dict | None = None) -> list[str]:
     """Append entries as state=unpublished, validate, atomic write. Returns their UUIDs in order.
     config: tier/gallery allow-list; defaults to a fresh load_config(cwd) for standalone callers."""
@@ -863,14 +883,13 @@ def write_publications(entries: list[dict], json_path: str, config: dict | None 
     except FileNotFoundError:
         data = []
 
+    zone = _zone((config or {}).get("schedule", {}))
     new_uuids = []
     now = int(time.time())
     for i, e in enumerate(entries):
         path = e["path"]
         sha = compute_sha512(path)
-        if not e.get("scheduleTs"):
-            raise ValueError("scheduleTs required")
-        ts = int(e["scheduleTs"])
+        ts = _resolve_ts(e, zone)
         apparition = {
             "platformName": "deviantart",
             "state": STATE_UNPUBLISHED,
@@ -906,9 +925,10 @@ def _set_or_pop(d, k, v):
         d[k] = v
 
 
-def apply_update(pubs, uuid_, fields):
+def apply_update(pubs, uuid_, fields, zone: ZoneInfo):
     """Patch the publication (and its DA apparition) with uuid_ in place.
-    Cleared price/tier/galleries are removed. Raises KeyError if not found."""
+    Cleared price/tier/galleries are removed. Raises KeyError if not found.
+    `zone` resolves the naive 'schedule' string (see _resolve_ts)."""
     for p in pubs:
         if p.get("uuid") == uuid_:
             break
@@ -917,7 +937,7 @@ def apply_update(pubs, uuid_, fields):
     p["description"] = fields.get("description", p.get("description", ""))
     app = deviantart_apparition(p)
     app["urlElsePublicationName"] = fields["title"]
-    app["apparitionTimestampIfDifferentThanSubmission"] = int(fields["scheduleTs"])
+    app["apparitionTimestampIfDifferentThanSubmission"] = _resolve_ts(fields, zone)
     price = fields.get("price")
     _set_or_pop(app, "priceIfNotFree", float(price) if price not in (None, "") else None)
     _set_or_pop(app, "tier", fields.get("tier") or None)
