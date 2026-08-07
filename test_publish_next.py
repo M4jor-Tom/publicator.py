@@ -50,7 +50,7 @@ def _next_slot_for(schedules, existing_ts, profile_name):
         f"const EXISTING_TS = {json.dumps(existing_ts)};\n"
         "const queue = [];\n"
         f"{_schedule_core_js()}\n"
-        "console.log(nextSlotForProfile(profileByName(" + json.dumps(profile_name) + ")));\n"
+        f"console.log(nextSlotForProfile(profileByName({json.dumps(profile_name)})));\n"
     )
     out = subprocess.run(
         ["node", "-e", harness], check=True, capture_output=True, text=True,
