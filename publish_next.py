@@ -29,9 +29,10 @@ import tempfile
 import time
 import urllib.parse
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from da_publish import (
     STATE_UNPUBLISHED,
@@ -129,18 +130,26 @@ def generate_thumbnails(image_paths: list[str], thumb_dir: str) -> dict[str, str
 
 
 # ---------------------------------------------------------------------------
-# Schedule cadence — consumed by the browser client only (see _build_page).
+# Schedule cadence — all weekday/hour/timezone math is done here server-side and
+# shipped to the browser as absolute slot instants (see _build_page).
 # ---------------------------------------------------------------------------
 
-_JS_DAY = {"sunday": 0, "monday": 1, "tuesday": 2, "wednesday": 3,
-           "thursday": 4, "friday": 5, "saturday": 6}
+_DEFAULT_TZ = "Europe/Paris"       # the wall clock "20:00" is anchored to; overridable via schedule.timezone
+_SLOT_HORIZON_WEEKS = 52           # ponytail: 1y of weekly slots embedded; bump if you ever queue further out
+_WEEKDAY = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+            "friday": 4, "saturday": 5, "sunday": 6}   # Python date.weekday()
 
 
-def _schedules_js(schedule: dict) -> list[dict]:
-    """Cadence list for the gallery client: [{name, day: <JS weekday index, 0=Sun>,
-    hour, per_slot}, ...]. Reads schedule['profiles']; a flat day/hour/per_slot
-    config becomes one 'default' profile, an empty dict the built-in default.
-    Only frequency='weekly' is implemented; profiles need distinct (day, hour)."""
+def _zone(schedule: dict) -> ZoneInfo:
+    return ZoneInfo(schedule.get("timezone", _DEFAULT_TZ))
+
+
+def _schedule_profiles(schedule: dict) -> list[dict]:
+    """Validated cadence: [{name, day: <Python weekday, 0=Mon>, hour, per_slot}, ...].
+    Reads schedule['profiles']; a flat day/hour/per_slot config becomes one 'default'
+    profile, an empty dict the built-in default. Only frequency='weekly' is
+    implemented; profiles need distinct (day, hour). Internal to _schedule_data —
+    the browser never sees day/hour, only the generated slot instants."""
     raw = schedule.get("profiles")
     if raw is None:               # flat day/hour/per_slot config, or {} -> one 'default' profile
         raw = [schedule]
@@ -150,21 +159,57 @@ def _schedules_js(schedule: dict) -> list[dict]:
         if freq != "weekly":
             raise NotImplementedError(f"schedule.frequency {freq!r} not implemented (only 'weekly')")
         day = str(p.get("day", "tuesday")).lower()
-        if day not in _JS_DAY:
+        if day not in _WEEKDAY:
             raise ValueError(f"schedule.day {day!r} invalid")
         hour = int(p.get("hour", 20))
         per_slot = int(p.get("per_slot", 2))
         if per_slot < 1:
             raise ValueError(f"schedule.per_slot must be >= 1, got {per_slot}")
-        key = (_JS_DAY[day], hour)
+        key = (_WEEKDAY[day], hour)
         if key in seen:
             raise ValueError(f"schedule profiles collide on (day={day}, hour={hour})")
         seen.add(key)
         out.append({"name": str(p.get("name", "default")),
-                    "day": _JS_DAY[day], "hour": hour, "per_slot": per_slot})
+                    "day": _WEEKDAY[day], "hour": hour, "per_slot": per_slot})
     if not out:
         raise ValueError("schedule.profiles is empty")
     return out
+
+
+def _profile_slots(profile: dict, zone: ZoneInfo, start: int) -> list[int]:
+    """Ascending epochs of the next _SLOT_HORIZON_WEEKS weekly slots for `profile`,
+    each at its (weekday, hour) wall-clock in `zone`. Built date-by-date in the zone
+    so a slot stays 20:00 local across DST (never a fixed UTC offset). First slot is
+    the earliest matching instant strictly after `start`."""
+    hour = profile["hour"]
+    day = datetime.fromtimestamp(start, zone).date()
+    day += timedelta(days=(profile["day"] - day.weekday()) % 7)   # this week's (or today's) weekday
+    if datetime(day.year, day.month, day.day, hour, tzinfo=zone).timestamp() <= start:
+        day += timedelta(days=7)                                  # today's slot already passed
+    slots = []
+    for _ in range(_SLOT_HORIZON_WEEKS):
+        slots.append(int(datetime(day.year, day.month, day.day, hour, tzinfo=zone).timestamp()))
+        day += timedelta(days=7)
+    return slots
+
+
+def _schedule_data(schedule: dict, now: int | None = None) -> list[dict]:
+    """Client scheduling payload: per profile, its upcoming canonical slot
+    instants. ALL weekday/hour/timezone math lives here (Python zoneinfo) so the
+    browser never reads a clock — it only counts occupancy by exact-timestamp
+    equality, immune to the private-window UTC spoof."""
+    zone = _zone(schedule)
+    start = int(now if now is not None else time.time())
+    return [{"name": p["name"], "per_slot": p["per_slot"],
+             "slots": _profile_slots(p, zone, start)}
+            for p in _schedule_profiles(schedule)]
+
+
+def _ts_labels(zone: ZoneInfo, tss) -> dict[int, str]:
+    """{ts: 'YYYY-MM-DDTHH:MM'} in the schedule timezone, so datetime-local inputs
+    show the intended wall clock regardless of the browser's timezone."""
+    return {ts: datetime.fromtimestamp(ts, zone).strftime("%Y-%m-%dT%H:%M")
+            for ts in set(tss)}
 
 
 def _existing_ts(json_path: str) -> list[int]:
@@ -189,15 +234,15 @@ def _existing_ts(json_path: str) -> list[int]:
 
 
 def _selfcheck() -> None:
-    # schedule cadence: profiles -> client list; weekly day-name -> JS weekday index (0=Sun)
-    assert _schedules_js({"profiles": [
+    # schedule cadence: profiles -> validated list; weekly day-name -> Python weekday (0=Mon)
+    assert _schedule_profiles({"profiles": [
         {"name": "free", "day": "tuesday", "hour": 20, "per_slot": 2}]}) == \
-        [{"name": "free", "day": 2, "hour": 20, "per_slot": 2}]
+        [{"name": "free", "day": 1, "hour": 20, "per_slot": 2}]
     # flat keys -> single "default" profile
-    assert _schedules_js({"day": "friday", "hour": 18, "per_slot": 1}) == \
-        [{"name": "default", "day": 5, "hour": 18, "per_slot": 1}]
+    assert _schedule_profiles({"day": "friday", "hour": 18, "per_slot": 1}) == \
+        [{"name": "default", "day": 4, "hour": 18, "per_slot": 1}]
     # empty -> built-in default (Tuesday 20:00, per_slot 2)
-    assert _schedules_js({}) == [{"name": "default", "day": 2, "hour": 20, "per_slot": 2}]
+    assert _schedule_profiles({}) == [{"name": "default", "day": 1, "hour": 20, "per_slot": 2}]
     for bad, exc in [
         ({"profiles": [{"frequency": "monthly"}]}, NotImplementedError),
         ({"profiles": [{"day": "tuesday", "per_slot": 0}]}, ValueError),
@@ -206,9 +251,14 @@ def _selfcheck() -> None:
         ({"profiles": []}, ValueError),
     ]:
         try:
-            _schedules_js(bad); assert False, f"{bad} not rejected"
+            _schedule_profiles(bad); assert False, f"{bad} not rejected"
         except exc:
             pass
+    # slots stay on the profile's wall clock: 52 future Tuesday-20:00 Europe/Paris
+    _slots = _schedule_data({"timezone": "Europe/Paris", "profiles": [
+        {"name": "t", "day": "tuesday", "hour": 20, "per_slot": 2}]})[0]["slots"]
+    assert len(_slots) == 52 and all(datetime.fromtimestamp(s, ZoneInfo("Europe/Paris")).hour == 20
+                                     for s in _slots), _slots
     # literal Tuesday 20:00 UTC anchors for the write_publications round-trip
     s0 = int(datetime(2026, 1, 6, 20, tzinfo=timezone.utc).timestamp())  # 2026-01-06 is a Tue
     s1 = s0 + 7 * 24 * 3600
@@ -319,48 +369,41 @@ _PAGE_TMPL = r"""<!DOCTYPE html>
   <div class="grid" id="gallery">__CARDS__</div>
 </main>
 <script>
-const EXISTING_TS = __EXISTING_TS__;   // already-scheduled background timestamps
-const SCHEDULES = __SCHEDULES__;       // [{name, day, hour, per_slot}, ...]
+const EXISTING_TS = __EXISTING_TS__;   // already-scheduled background instants (occupancy)
+const SCHEDULES = __SCHEDULES__;       // [{name, per_slot, slots:[ts,...]}]  slots: upcoming canonical instants, ascending
+const LABELS = __LABELS__;             // {ts: "YYYY-MM-DDTHH:MM"} wall clock in the schedule TZ, browser-TZ-proof
 const PENDING = __PENDING__;           // already-queued entries from publications.json
 
 const queue = []; // [{cardId, path, title, description, price, scheduleTs, tier, galleries, uuid?}]
 
-function profileForTs(ts) {             // profile a scheduled ts belongs to (distinct day+hour), or undefined
-  const d = new Date(ts * 1000);        // LOCAL day/hour: "Tuesday 20:00" means the user's wall clock
-  return SCHEDULES.find(s => s.day === d.getDay() && s.hour === d.getHours());
-}
+// >>> scheduler core (sliced verbatim by test_publish_next.py) >>>
+// Slots are absolute instants generated server-side in the schedule's timezone,
+// so nothing here reads the browser clock — `firefox --private-window` spoofing
+// Date to UTC can no longer make a taken slot look free (the bug this replaced).
+const LABEL_TO_TS = Object.fromEntries(Object.entries(LABELS).map(([ts, s]) => [s, +ts]));
+
 function profileByName(name) {
   return SCHEDULES.find(s => s.name === name) || SCHEDULES[0];
 }
-function presetForTs(ts) {              // profile-name whose (day, hour) matches ts, else custom
+function presetForTs(ts) {               // profile whose slot list holds ts, else custom
   if (!ts) return SCHEDULES[0].name;
-  return profileForTs(ts)?.name ?? "__custom__";
+  return SCHEDULES.find(s => s.slots.includes(ts))?.name ?? "__custom__";
 }
-function occupancyTs(p) {                // background + queue timestamps belonging to profile p
-  const all = EXISTING_TS.concat(queue.map(e => e.scheduleTs).filter(Boolean));
-  return all.filter(ts => profileForTs(ts) === p);   // p is a SCHEDULES element -> identity holds
+function nextSlotForProfile(p) {         // earliest upcoming slot with room (< per_slot)
+  const taken = EXISTING_TS.concat(queue.map(e => e.scheduleTs).filter(Boolean));  // background + queue
+  const slot = p.slots.find(s => taken.filter(t => t === s).length < p.per_slot);
+  return slot ?? p.slots[p.slots.length - 1];  // ponytail: horizon full -> reuse last; widen _SLOT_HORIZON_WEEKS
 }
-function nextSlotForProfile(p) {         // earliest FUTURE slot with room (< per_slot)
-  const taken = occupancyTs(p);         // LOCAL wall clock, stepped by whole days so DST can't drift
-  const now = Math.floor(Date.now() / 1000);
-  const d = new Date();
-  d.setDate(d.getDate() + ((p.day - d.getDay() + 7) % 7));
-  d.setHours(p.hour, 0, 0, 0);
-  let slot = Math.floor(d.getTime() / 1000);
-  while (slot <= now || taken.filter(ts => ts === slot).length >= p.per_slot) {
-    d.setDate(d.getDate() + 7);         // skip this week if it's already past or full
-    slot = Math.floor(d.getTime() / 1000);
-  }
-  return slot;
-}
-function tsToLocalInput(ts) {
-  const d = new Date(ts * 1000);
-  const pad = n => String(n).padStart(2, "0");
+function tsToLocalInput(ts) {            // schedule-TZ label; browser-local only for an unlabeled custom instant
+  if (LABELS[ts]) return LABELS[ts];
+  const d = new Date(ts * 1000), pad = n => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
-function localInputToTs(s) {
-  return Math.floor(new Date(s).getTime() / 1000);
+function localInputToTs(s) {             // known slot -> exact instant (TZ-proof); else read as browser-local
+  return (s in LABEL_TO_TS) ? LABEL_TO_TS[s]
+                            : Math.floor(new Date(s).getTime() / 1000);  // ponytail: custom time assumes browser TZ
 }
+// <<< scheduler core <<<
 function applyPreset(sel, cardId) {      // preset change -> refill the picker
   if (sel.value === "__custom__") return;
   const card = document.getElementById(cardId);
@@ -586,7 +629,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
     ai_timeout = 300
     json_path = "publications.json"
     config: dict = {}
-    schedules: list = _schedules_js({})
+    schedules: list = _schedule_data({})
     publish_done: dict | None = None
 
     def _build_page(self) -> str:
@@ -594,6 +637,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
         pending_js = []
         tg = _tier_gallery_fields(self.config)
         preset_opts = _preset_options(self.schedules)
+        zone = _zone(self.config.get("schedule", {}))
         # Pre-queued cards: entries already in publications.json (state=unpublished).
         for idx, e in enumerate(self.pending):
             thumb_path = self.thumb_map.get(e["path"], e["path"])
@@ -602,7 +646,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
             safe_title = html.escape(e["title"], quote=True)
             view_href = html.escape("/original?path=" + urllib.parse.quote(e["path"]), quote=True)
             ts = e.get("scheduleTs")
-            sched = (datetime.fromtimestamp(ts).strftime("%a %d %b %Y %H:%M")
+            sched = (datetime.fromtimestamp(ts, zone).strftime("%a %d %b %Y %H:%M")
                      if ts else "no schedule")
             cid = f"pending_{idx}"
             js_pathp = html.escape(json.dumps(e["path"]), quote=True)
@@ -640,11 +684,19 @@ class GalleryHandler(BaseHTTPRequestHandler):
   </div>
 {_card_form_html(cid, js_path, tg, "Save to queue", preset_opts)}
 </div>""")
+        # Labels for every instant that can land in a datetime-local input: slot
+        # presets and pending scheduleTs (background occupancy is never rendered).
+        # Rendered in the schedule TZ so the picker shows the right wall clock even
+        # when the private window forces Date to UTC.
+        slot_ts = [ts for p in self.schedules for ts in p.get("slots", [])]
+        pending_ts = [e["scheduleTs"] for e in pending_js if e.get("scheduleTs")]
+        labels = _ts_labels(zone, slot_ts + pending_ts)
         page = _PAGE_TMPL
         page = page.replace("__CARDS__", "\n".join(cards))
         page = page.replace("__PENDING__", json.dumps(pending_js))
         page = page.replace("__EXISTING_TS__", json.dumps(self.existing_ts))
         page = page.replace("__SCHEDULES__", json.dumps(self.schedules))
+        page = page.replace("__LABELS__", json.dumps(labels))
         page = page.replace("__AI_MODEL__", html.escape(self.ai_model, quote=True))
         page = page.replace("__OPENROUTER_MODEL__", html.escape(self.openrouter_model, quote=True))
         return page
@@ -888,7 +940,7 @@ def serve(thumb_dir: str, thumb_map: dict[str, str], candidate_paths: list[str],
     GalleryHandler.ai_timeout = args.ai_timeout
     GalleryHandler.json_path = args.json
     GalleryHandler.config = config          # was: load_config(Path.cwd())
-    GalleryHandler.schedules = _schedules_js(config["schedule"])
+    GalleryHandler.schedules = _schedule_data(config["schedule"])
     GalleryHandler.publish_done = None
 
     server = ThreadingHTTPServer(("127.0.0.1", args.port), GalleryHandler)
