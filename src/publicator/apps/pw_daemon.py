@@ -3,7 +3,7 @@
 
 Chromium persistent context in the publication database dir (--data-dir, default
 CWD) `.deviantart-session/`, so it shares the logged-in DeviantArt session with
-publish_next.py.
+the publish-next app.
 
 # ponytail: single-page, single-context daemon. Add tab tracking if the
 # publication flow starts spawning multiple tabs we care about.
@@ -24,7 +24,7 @@ _ap = argparse.ArgumentParser(description="Playwright daemon for manual DA publi
 _ap.add_argument("--data-dir", default=None,
                  help="publication database dir holding .deviantart-session/; default: CWD")
 _dd = _ap.parse_args().data_dir
-SESSION = (Path(_dd).resolve() if _dd else Path.cwd()) / ".deviantart-session"  # shared with publish_next.py
+SESSION = (Path(_dd).resolve() if _dd else Path.cwd()) / ".deviantart-session"  # shared with the publish-next app
 
 if not os.path.exists(FIFO):
     os.mkfifo(FIFO)

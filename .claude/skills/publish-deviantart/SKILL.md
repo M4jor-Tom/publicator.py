@@ -21,7 +21,7 @@ Publishes ONE entry — the first `state=unpublished` in `publications.json` (ad
 
 If it exits non-zero, it prints `AUTOMATION FAILED: <reason>` to stderr and
 closes the browser cleanly. Fall through to the manual steps below to finish the
-current publication, then update `publish_deviantart.py` to cover whatever
+current publication, then update `deviantart.py` to cover whatever
 tripped it (so the next run doesn't fall through).
 
 ## Values for the current publication
@@ -30,7 +30,7 @@ tripped it (so the next run doesn't fall through).
 `state=unpublished` entry in `publications.json` (stdlib-only, no app needed):
 
 ```sh
-python ./echo_first_unpublished_publication_data.py
+nix run <publicator.py>#echo-first -- --data-dir .
 ```
 
 ## Manual fallback: drive Chromium via the daemon
@@ -40,7 +40,7 @@ nix run .#pw-daemon
 ```
 
 Chromium persistent context in `.deviantart-session/` (the same logged-in
-session `publish_next.py` uses — no Firefox profile prep needed). First run is
+session the publish-next app uses — no Firefox profile prep needed). First run is
 headed; log into DeviantArt once and the session persists.
 
 Daemon FIFO `/tmp/pw.cmd`, output `/tmp/pw.log`, screenshot `/tmp/pw.png`; scope
