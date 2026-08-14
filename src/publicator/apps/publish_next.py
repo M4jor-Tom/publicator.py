@@ -9,8 +9,9 @@ from pathlib import Path
 from publicator import setup_logging
 from publicator.config import load_config
 from publicator.deviantart import configure, load_pending_entries
+from publicator.images import find_candidates, generate_thumbnails
 from publicator.llm_meta import DEFAULT_MODEL
-from publicator.publish_next import find_candidates, generate_thumbnails, serve
+from publicator.publish_next import serve
 
 log = logging.getLogger("publicator.gallery")
 
