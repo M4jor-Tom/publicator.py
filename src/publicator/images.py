@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import mimetypes
 import os
 import random
 import shutil
@@ -9,22 +10,15 @@ import subprocess
 import sys
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tiff", ".mp4"}
-MIME = {
-    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
-    ".webp": "image/webp", ".gif": "image/gif", ".mp4": "video/mp4",
-}
 
 
 def guess_mime(path: str) -> str:
-    return MIME.get(os.path.splitext(path)[1].lower(), "application/octet-stream")
+    return mimetypes.guess_type(path)[0] or "application/octet-stream"
 
 
-def compute_sha512(filepath: str, chunk_size: int = 1024 * 1024) -> str:
-    h = hashlib.sha512()
+def compute_sha512(filepath: str) -> str:
     with open(filepath, "rb") as f:
-        while chunk := f.read(chunk_size):
-            h.update(chunk)
-    return h.hexdigest()
+        return hashlib.file_digest(f, "sha512").hexdigest()
 
 
 def load_publicated_hashes(json_path: str) -> set[str]:

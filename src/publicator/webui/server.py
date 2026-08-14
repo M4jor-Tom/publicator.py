@@ -57,6 +57,16 @@ class GalleryHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_file(self, path: str) -> None:
+        if path and os.path.isfile(path):
+            self.send_response(200)
+            self.send_header("Content-type", guess_mime(path))
+            self.end_headers()
+            with open(path, "rb") as f:
+                self.wfile.write(f.read())
+        else:
+            self.send_response(404); self.end_headers()
+
     def do_GET(self):
         if self.path in ("/", "/index.html"):
             page = self._build_page().encode("utf-8")
@@ -68,12 +78,8 @@ class GalleryHandler(BaseHTTPRequestHandler):
         elif self.path.startswith("/thumbs/"):
             rel_path = self.path[len("/thumbs/"):]
             full_path = os.path.normpath(os.path.join(self.thumb_dir, rel_path))
-            if full_path.startswith(os.path.normpath(self.thumb_dir)) and os.path.isfile(full_path):
-                self.send_response(200)
-                self.send_header("Content-type", guess_mime(full_path))
-                self.end_headers()
-                with open(full_path, "rb") as f:
-                    self.wfile.write(f.read())
+            if full_path.startswith(os.path.normpath(self.thumb_dir)):
+                self._send_file(full_path)
             else:
                 self.send_response(404); self.end_headers()
         elif self.path.startswith("/original?"):
@@ -82,12 +88,8 @@ class GalleryHandler(BaseHTTPRequestHandler):
             # originals); anything else 404s, so no arbitrary-path read.
             qs = urllib.parse.urlparse(self.path).query
             req_path = urllib.parse.parse_qs(qs).get("path", [""])[0]
-            if req_path in self.thumb_map and os.path.isfile(req_path):
-                self.send_response(200)
-                self.send_header("Content-type", guess_mime(req_path))
-                self.end_headers()
-                with open(req_path, "rb") as f:
-                    self.wfile.write(f.read())
+            if req_path in self.thumb_map:
+                self._send_file(req_path)
             else:
                 self.send_response(404); self.end_headers()
         else:

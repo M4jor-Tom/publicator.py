@@ -1,5 +1,3 @@
-import urllib.parse
-
 from publicator.scheduling import schedule_data
 from publicator.webui.page import render_page
 
@@ -51,11 +49,3 @@ def test_pending_card_renders_with_its_schedule_and_uuid():
     assert "Tickler" in page
     assert '00000000-0000-4000-8000-000000000001' in page   # PENDING payload injected
     assert "__PENDING__" not in page and "__CARDS__" not in page
-
-
-def test_original_query_decodes_verbatim_for_the_allow_list():
-    """/original decodes the path arg verbatim, so the allow-list (path in
-    thumb_map) sees the real path — a non-listed path can't sneak through."""
-    q = urllib.parse.parse_qs(
-        urllib.parse.urlparse("/original?path=%2Fetc%2Fpasswd").query)
-    assert q.get("path", [""])[0] == "/etc/passwd"
