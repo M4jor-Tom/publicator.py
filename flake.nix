@@ -48,9 +48,10 @@
       devPython = pyInterp.withPackages (ps: pyPkgs ps ++ [ ps.pytest ]);
       src = ./.;
       browsers = pkgs.playwright-driver.browsers;
-      # Each script resolves its code assets (schema, tags/) via __file__, so apps
-      # must run them from the packaged source dir. Data + runtime state resolve
-      # against CWD — invoke from the Art data dir (`nix run <this>#app`).
+      # Each script resolves its code assets (the JSON schema) via __file__, so apps
+      # must run them from the packaged source dir. The tags file, like all other
+      # data + runtime state, resolves against CWD — invoke from the Art data dir
+      # (`nix run <this>#app`).
       # extra: per-app runtime deps. pw: needs Playwright browsers (drags in the
       # heavy chromium/webkit closure — only the browser-driving apps set it).
       app = name: module: extra: pw: {

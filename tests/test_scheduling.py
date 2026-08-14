@@ -112,7 +112,7 @@ def test_schedule_slots_stay_2000_paris_across_dst():
         {"timezone": _TZ, "profiles": [
             {"name": "tuesday", "day": "tuesday", "hour": 20, "per_slot": 2}]})
     slots = data[0]["slots"]
-    assert len(slots) >= 52
+    assert len(slots) == scheduling.SLOT_HORIZON_WEEKS
     hours = {datetime.fromtimestamp(s, _PARIS).hour for s in slots}
     assert hours == {20}, sorted(hours)
     # crosses at least one DST transition -> two distinct UTC offsets present

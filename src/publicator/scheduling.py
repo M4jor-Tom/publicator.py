@@ -59,19 +59,19 @@ def schedule_profiles(schedule: dict) -> list[dict]:
     return out
 
 
-def profile_slots(profile: dict, zone: ZoneInfo, start: int) -> list[int]:
+def profile_slots(profile: dict, tz: ZoneInfo, start: int) -> list[int]:
     """Ascending epochs of the next SLOT_HORIZON_WEEKS weekly slots for `profile`,
-    each at its (weekday, hour) wall-clock in `zone`. Built date-by-date in the zone
+    each at its (weekday, hour) wall-clock in `tz`. Built date-by-date in the zone
     so a slot stays 20:00 local across DST (never a fixed UTC offset). First slot is
     the earliest matching instant strictly after `start`."""
     hour = profile["hour"]
-    day = datetime.fromtimestamp(start, zone).date()
+    day = datetime.fromtimestamp(start, tz).date()
     day += timedelta(days=(profile["day"] - day.weekday()) % 7)   # this week's (or today's) weekday
-    if datetime(day.year, day.month, day.day, hour, tzinfo=zone).timestamp() <= start:
+    if datetime(day.year, day.month, day.day, hour, tzinfo=tz).timestamp() <= start:
         day += timedelta(days=7)                                  # today's slot already passed
     slots = []
     for _ in range(SLOT_HORIZON_WEEKS):
-        slots.append(int(datetime(day.year, day.month, day.day, hour, tzinfo=zone).timestamp()))
+        slots.append(int(datetime(day.year, day.month, day.day, hour, tzinfo=tz).timestamp()))
         day += timedelta(days=7)
     return slots
 
@@ -88,10 +88,10 @@ def schedule_data(schedule: dict, now: int | None = None) -> list[dict]:
             for p in schedule_profiles(schedule)]
 
 
-def ts_labels(zone: ZoneInfo, tss) -> dict[int, str]:
+def ts_labels(tz: ZoneInfo, tss) -> dict[int, str]:
     """{ts: 'YYYY-MM-DDTHH:MM'} in the schedule timezone, so datetime-local inputs
     show the intended wall clock regardless of the browser's timezone."""
-    return {ts: datetime.fromtimestamp(ts, zone).strftime("%Y-%m-%dT%H:%M")
+    return {ts: datetime.fromtimestamp(ts, tz).strftime("%Y-%m-%dT%H:%M")
             for ts in set(tss)}
 
 

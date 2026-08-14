@@ -12,9 +12,11 @@ DeviantArt submit flow. This repo is **code only** — the publication *data*
 (images, `publications.json`, `publicator.toml`, browser-session dirs) lives in a
 separate **data directory** (in practice `../Art`).
 
-Code assets (JSON schema, `tags/`) resolve via `__file__`; data + runtime state
-resolve against **CWD**. So apps must be run *from the data dir*, or given
-`--data-dir`. `nix run <this>#<app>` is expected to be invoked from `../Art`.
+Code assets (the JSON schema) resolve via `__file__`; the tags file, like all
+data + runtime state, resolves against the **data dir** (`publicator.toml`'s
+`tags` key, joined to `--data-dir`/CWD). So apps must be run *from the data
+dir*, or given `--data-dir`. `nix run <this>#<app>` is expected to be invoked
+from `../Art`.
 
 ## Commands
 
@@ -50,9 +52,9 @@ nix run <this>#check-steps    # cheap CI drift guard (no browser/data deps)
 the logic; `webui/{page,server}.py` is the gallery (a pure `render_page` plus
 the `ThreadingHTTPServer` that calls it); `apps/{publish_next,da_publish,
 validate,echo_first,pw_daemon}.py` are the thin CLI entry points the flake's
-`nix run` apps invoke. Code assets (JSON schema, `tags/`) resolve via
-`__file__` inside the package; data + runtime state still resolve against
-CWD/`--data-dir`, per the code/data split above.
+`nix run` apps invoke. Code assets (the JSON schema) resolve via `__file__`
+inside the package; the tags file, like all data + runtime state, still
+resolves against CWD/`--data-dir`, per the code/data split above.
 
 **The publish pipeline.**
 1. `#login` opens a genuine, flake-pinned Firefox for a human sign-in and writes

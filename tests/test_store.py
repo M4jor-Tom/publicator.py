@@ -33,6 +33,17 @@ def test_write_publications_appends_an_unpublished_entry(tmp_path, img):
     assert app["urlElsePublicationName"] == "t"
 
 
+def test_write_publications_falls_back_to_load_config_when_none(tmp_path, monkeypatch, img):
+    """config=None -> load_config(Path.cwd()); covers the standalone-caller path."""
+    (tmp_path / "publicator.toml").write_text(f'[schedule]\ntimezone = "{_TZ}"\n')
+    monkeypatch.chdir(tmp_path)
+    jp = str(tmp_path / "publications.json")
+    uuids = store.write_publications(
+        [{"path": img, "title": "t", "description": "d", "scheduleTs": _TUE_2000}], jp)
+    rows = json.loads(open(jp).read())
+    assert len(uuids) == 1 and rows[0]["uuid"] == uuids[0]
+
+
 def test_write_publications_requires_a_schedule(tmp_path, img):
     jp = str(tmp_path / "publications.json")
     with pytest.raises(ValueError):
