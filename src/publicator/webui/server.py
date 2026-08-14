@@ -1,19 +1,5 @@
-#!/usr/bin/env python3
-"""Unified publish workflow: gallery + AI metadata + Playwright Firefox batch.
-
-Single entrypoint. Scans picked/, opens a dark gallery on 127.0.0.1:PORT, lets
-you delete images or add them to a queue (with AI-generated title/description
-and per-entry schedule override), then writes to publications.json and drives a
-Firefox persistent context through the DeviantArt submission flow.
-
-DeviantArt is behind PerimeterX bot detection, which blocks EVERY Playwright
-browser at the login page (Chromium and Firefox alike, since Playwright forces
-navigator.webdriver). So login is NOT automated: `nix run <publicator>#login`
-opens a real, flake-managed Firefox on the repo-local `.deviantart-login/`
-profile for a one-time human sign-in. publish_batch copies that logged-in +
-PerimeterX-cleared profile into the Playwright Firefox session and only VERIFIES
-it — the submission pages themselves are not bot-walled.
-"""
+"""The human-review gallery: a ThreadingHTTPServer on 127.0.0.1 plus its
+JSON endpoints (/delete, /ai, /stage, /update, /publish)."""
 
 import json
 import logging
@@ -23,7 +9,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from publicator.config import validate_publications
-from publicator.deviantart import configure, load_pending_entries, publish_batch
+from publicator.deviantart import publish_batch
 from publicator.images import guess_mime
 from publicator.llm_meta import DEFAULT_MODEL, generate_metadata
 from publicator.scheduling import existing_ts, schedule_data, zone
@@ -31,10 +17,6 @@ from publicator.store import apply_update, atomic_write_json, write_publications
 from publicator.webui.page import render_page
 
 log = logging.getLogger("publicator.gallery")
-
-# Runtime state (publications.json, images, browser session) resolves against the
-# publication database dir (--data-dir, default CWD). da_publish.configure() owns
-# the DATA_DIR/session paths; main() calls it once args are parsed.
 
 
 # ---------------------------------------------------------------------------
