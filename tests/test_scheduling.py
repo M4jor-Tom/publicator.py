@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from publicator import scheduling
-from publicator.publish_next import PAGE_TEMPLATE
+from publicator.webui.page import PAGE_TEMPLATE
 
 _TZ = "Europe/Paris"
 _PARIS = ZoneInfo(_TZ)
