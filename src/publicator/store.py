@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 from publicator.config import load_config, validate_publications
 from publicator.entries import STATE_UNPUBLISHED, deviantart_apparition
 from publicator.images import compute_sha512
+from publicator.scheduling import zone
 
 
 def atomic_write_json(path: str, data) -> None:
@@ -49,7 +50,7 @@ def write_publications(entries: list[dict], json_path: str, config: dict | None 
     except FileNotFoundError:
         data = []
 
-    tz = ZoneInfo((config or {}).get("schedule", {}).get("timezone", "Europe/Paris"))
+    tz = zone((config or {}).get("schedule", {}))
     new_uuids = []
     now = int(time.time())
     for i, e in enumerate(entries):

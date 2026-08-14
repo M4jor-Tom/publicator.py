@@ -12,7 +12,7 @@ from publicator.config import validate_publications
 from publicator.deviantart import publish_batch
 from publicator.images import guess_mime
 from publicator.llm_meta import DEFAULT_MODEL, generate_metadata
-from publicator.scheduling import existing_ts, schedule_data, zone
+from publicator.scheduling import existing_ts as compute_existing_ts, schedule_data, zone
 from publicator.store import apply_update, atomic_write_json, write_publications
 from publicator.webui.page import render_page
 
@@ -202,7 +202,7 @@ def serve(thumb_dir: str, thumb_map: dict[str, str], candidate_paths: list[str],
     GalleryHandler.thumb_map = thumb_map
     GalleryHandler.candidate_paths = candidate_paths
     GalleryHandler.pending = pending
-    GalleryHandler.existing_ts = existing_ts(args.json)
+    GalleryHandler.existing_ts = compute_existing_ts(args.json)
     GalleryHandler.ai_model = args.ai_model
     GalleryHandler.openrouter_model = args.openrouter_model
     GalleryHandler.ai_timeout = args.ai_timeout
