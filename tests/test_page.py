@@ -1,31 +1,20 @@
 import urllib.parse
 
-from publicator import publish_next
-from publicator.publish_next import GalleryHandler
+from publicator.scheduling import schedule_data
+from publicator.webui.page import render_page
 
 
-def _handler(**overrides):
-    """Configure the handler's class attributes for a render-only call.
-    ponytail: _build_page reads only class attrs, so it is called with the class
-    as `self` — constructing a real BaseHTTPRequestHandler would need a socket."""
-    GalleryHandler.thumb_dir = "/t"
-    GalleryHandler.thumb_map = {}
-    GalleryHandler.candidate_paths = []
-    GalleryHandler.pending = []
-    GalleryHandler.existing_ts = []
-    GalleryHandler.ai_model = "m"
-    GalleryHandler.openrouter_model = "o"
-    GalleryHandler.config = {}
-    GalleryHandler.schedules = publish_next.schedule_data({})
-    for k, v in overrides.items():
-        setattr(GalleryHandler, k, v)
-    return GalleryHandler
+def _render(**overrides):
+    kwargs = dict(thumb_dir="/t", thumb_map={}, candidates=[], pending=[],
+                  existing_ts=[], schedules=schedule_data({}), config={},
+                  ai_model="m", openrouter_model="o")
+    kwargs.update(overrides)
+    return render_page(**kwargs)
 
 
 def test_page_offers_both_models():
-    H = _handler(ai_model="claude-cli-opus",
-                 openrouter_model="openrouter/google/gemini-2.0-flash-exp:free")
-    page = GalleryHandler._build_page(H)
+    page = _render(ai_model="claude-cli-opus",
+                   openrouter_model="openrouter/google/gemini-2.0-flash-exp:free")
     assert 'id="ai-model"' in page
     assert "claude-cli-opus" in page
     assert "openrouter/google/gemini-2.0-flash-exp:free" in page
@@ -33,9 +22,8 @@ def test_page_offers_both_models():
 
 
 def test_page_renders_config_tiers_galleries():
-    H = _handler(candidate_paths=["/t/a.png"],
-                 config={"tiers": ["gold"], "galleries": ["Art"]})
-    page = GalleryHandler._build_page(H)
+    page = _render(candidates=["/t/a.png"],
+                   config={"tiers": ["gold"], "galleries": ["Art"]})
     assert 'class="f-tier"' in page and ">gold<" in page
     assert 'class="f-gallery"' in page and 'value="Art"' in page
 
@@ -44,16 +32,25 @@ def test_page_renders_schedule_presets():
     config = {"schedule": {"profiles": [
         {"name": "free", "day": "tuesday", "hour": 20, "per_slot": 2},
         {"name": "paid", "day": "friday", "hour": 20, "per_slot": 1}]}}
-    H = _handler(candidate_paths=["/t/a.png"], config=config,
-                 schedules=publish_next.schedule_data(config["schedule"]))
-    page = GalleryHandler._build_page(H)
+    page = _render(candidates=["/t/a.png"], config=config,
+                   schedules=schedule_data(config["schedule"]))
     assert 'class="f-preset"' in page
     assert '<option value="free">free</option>' in page
     assert '<option value="paid">paid</option>' in page
-    assert '"name": "free"' in page and '"name": "paid"' in page   # SCHEDULES injected
-    assert '"slots"' in page                                       # canonical instants embedded
+    assert '"name": "free"' in page and '"name": "paid"' in page
+    assert '"slots"' in page
     assert "__SCHEDULES__" not in page and "__EXISTING_TS__" not in page
-    assert "__LABELS__" not in page                                # label map substituted
+    assert "__LABELS__" not in page
+
+
+def test_pending_card_renders_with_its_schedule_and_uuid():
+    pending = [{"uuid": "00000000-0000-4000-8000-000000000001", "path": "/t/a.png",
+                "title": "Tickler", "description": "d", "scheduleTs": 1800000000,
+                "price": None, "tier": None, "galleries": []}]
+    page = _render(pending=pending, thumb_map={"/t/a.png": "/t/thumb_0000.png"})
+    assert "Tickler" in page
+    assert '00000000-0000-4000-8000-000000000001' in page   # PENDING payload injected
+    assert "__PENDING__" not in page and "__CARDS__" not in page
 
 
 def test_original_query_decodes_verbatim_for_the_allow_list():

@@ -14,7 +14,7 @@ from publicator.entries import STATE_UNPUBLISHED
 
 # ---------------------------------------------------------------------------
 # Schedule cadence — all weekday/hour/timezone math is done here server-side and
-# shipped to the browser as absolute slot instants (see _build_page).
+# shipped to the browser as absolute slot instants (see webui.page.render_page).
 # ---------------------------------------------------------------------------
 
 DEFAULT_TZ = "Europe/Paris"       # the wall clock "20:00" is anchored to; overridable via schedule.timezone
