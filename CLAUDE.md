@@ -24,13 +24,11 @@ pytest + imagemagick + Playwright browsers + the `claude` CLI, and sets
 
 ```sh
 nix develop -c pytest -q                              # full test suite
-nix develop -c pytest test_publish_next.py::NAME -q   # one test
-nix develop -c python3 publish_next.py --selfcheck    # offline self-checks (also: da_publish.py, validate.py)
-nix develop -c python3 da_publish.py --check-steps     # drift guard: STEPS registry vs the publish-deviantart skill
+nix develop -c pytest tests/test_scheduling.py -q     # one file
+nix run <this>#check-steps                            # drift guard: STEPS registry vs the publish-deviantart skill
 ```
 
-There is no linter. Correctness is guarded by pytest **plus** each module's
-`_selfcheck()` (assert-based, offline, no browser) — keep both green after edits.
+There is no linter. Correctness is guarded by pytest (`tests/`).
 Some scheduler tests shell out to `node` to run the served page's client JS and
 `pytest.skip` if `node` is absent.
 
@@ -41,6 +39,7 @@ nix run <this>#login          # one-time DeviantArt sign-in in a REAL Firefox (s
 nix run <this>#publish-next   # the gallery UI: review picked/, AI metadata, schedule, batch-publish
 nix run <this>#da-publish -- --data-dir <dir> [--uuid <id>]   # publish ONE publications.json entry
 nix run <this>#validate       # validate publications.json against publicationsSchema.json
+nix run <this>#echo-first     # path/title/schedule of the first state=unpublished entry
 nix run <this>#check-steps    # cheap CI drift guard (no browser/data deps)
 ```
 

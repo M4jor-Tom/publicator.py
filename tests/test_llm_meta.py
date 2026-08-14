@@ -1,6 +1,6 @@
 import json, subprocess, pytest
 from types import SimpleNamespace
-import llm_meta
+from publicator import llm_meta
 
 
 def make_run(stdout="", returncode=0, stderr="", capture=None):
