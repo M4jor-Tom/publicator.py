@@ -5,14 +5,13 @@ import os
 import tempfile
 import time
 import uuid
-from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from publicator.config import load_config, validate_publications
 from publicator.entries import STATE_UNPUBLISHED, deviantart_apparition
 from publicator.images import compute_sha512
-from publicator.scheduling import zone
+from publicator.scheduling import resolve_ts, zone
 
 
 def atomic_write_json(path: str, data) -> None:
@@ -26,19 +25,6 @@ def atomic_write_json(path: str, data) -> None:
         try: os.unlink(tmp)
         except OSError: pass
         raise
-
-
-def resolve_ts(fields: dict, zone: ZoneInfo) -> int:
-    """Epoch for a save. Prefer the naive 'schedule' wall-clock string resolved in
-    the schedule timezone (browser-TZ-proof — a private window spoofs Date to UTC,
-    so the client can't be trusted to convert it); fall back to a raw 'scheduleTs'
-    epoch (non-UI callers). One of the two must be present."""
-    s = fields.get("schedule")
-    if s:
-        return int(datetime.fromisoformat(s).replace(tzinfo=zone).timestamp())
-    if fields.get("scheduleTs"):
-        return int(fields["scheduleTs"])
-    raise ValueError("schedule required")
 
 
 def write_publications(entries: list[dict], json_path: str, config: dict | None = None) -> list[str]:
@@ -83,6 +69,16 @@ def write_publications(entries: list[dict], json_path: str, config: dict | None 
     validate_publications(data, config if config is not None else load_config(Path.cwd()))
     atomic_write_json(json_path, data)
     return new_uuids
+
+
+def mark_state(json_path: str, target_uuid: str, state: str) -> None:
+    with open(json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    for p in data:
+        if p.get("uuid") == target_uuid:
+            deviantart_apparition(p)["state"] = state
+            break
+    atomic_write_json(json_path, data)
 
 
 def set_or_pop(d, k, v):

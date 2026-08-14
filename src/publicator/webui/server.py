@@ -35,8 +35,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
     ai_timeout = 300
     json_path = "publications.json"
     config: dict = {}
-    schedules: list = schedule_data({})
-    publish_done: dict | None = None
+    schedules: list = []
 
     def _build_page(self) -> str:
         return render_page(
@@ -148,7 +147,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
                 result = {"published": published, "failed": failed}
                 if err:
                     result["error"] = err
-                self.__class__.publish_done = result
+                self.server.publish_done = result
                 self._send(200, result)
 
             elif self.path == "/stage":
@@ -207,11 +206,11 @@ def serve(thumb_dir: str, thumb_map: dict[str, str], candidate_paths: list[str],
     GalleryHandler.openrouter_model = args.openrouter_model
     GalleryHandler.ai_timeout = args.ai_timeout
     GalleryHandler.json_path = args.json
-    GalleryHandler.config = config          # was: load_config(Path.cwd())
+    GalleryHandler.config = config
     GalleryHandler.schedules = schedule_data(config["schedule"])
-    GalleryHandler.publish_done = None
 
     server = ThreadingHTTPServer(("127.0.0.1", args.port), GalleryHandler)
+    server.publish_done = None
     server.timeout = 0.5
     url = f"http://127.0.0.1:{args.port}"
     print(f"Gallery: {url}")
@@ -224,10 +223,10 @@ def serve(thumb_dir: str, thumb_map: dict[str, str], candidate_paths: list[str],
         print("(open the URL yourself; firefox not found)")
 
     try:
-        while GalleryHandler.publish_done is None:
+        while server.publish_done is None:
             server.handle_request()
     except KeyboardInterrupt:
         print("\nShutting down...")
     finally:
         server.server_close()
-    return GalleryHandler.publish_done
+    return server.publish_done

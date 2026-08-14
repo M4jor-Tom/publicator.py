@@ -75,11 +75,6 @@ def test_apply_update_raises_on_unknown_uuid():
         store.apply_update([], "nope", {"title": "t", "scheduleTs": _TUE_2000}, _PARIS)
 
 
-def test_resolve_ts_reads_a_naive_string_in_the_schedule_timezone():
-    assert store.resolve_ts({"schedule": "2026-10-15T20:00"}, _PARIS) == \
-        int(datetime(2026, 10, 15, 20, tzinfo=_PARIS).timestamp())
-
-
 def test_custom_schedule_resolves_in_config_timezone(tmp_path, img):
     """A custom-typed wall-clock string persists as the schedule-TZ instant, not
     whatever the browser's timezone makes of it. A UTC-spoofed private window sends

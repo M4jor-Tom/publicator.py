@@ -36,7 +36,7 @@ from publicator.entries import (
     format_schedule,
     set_data_dir,
 )
-from publicator.store import atomic_write_json
+from publicator.store import atomic_write_json, mark_state
 
 log = logging.getLogger("publicator.da")
 
@@ -70,20 +70,6 @@ def configure(data_dir, config=None) -> Path:
     tags = (config if config is not None else load_config(DATA_DIR)).get("tags")
     TAGS_FILE = DATA_DIR / tags if tags else None
     return DATA_DIR
-
-
-# ---------------------------------------------------------------------------
-# publications.json state write
-# ---------------------------------------------------------------------------
-
-def mark_state(json_path: str, target_uuid: str, state: str) -> None:
-    with open(json_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    for p in data:
-        if p.get("uuid") == target_uuid:
-            deviantart_apparition(p)["state"] = state
-            break
-    atomic_write_json(json_path, data)
 
 
 # ---------------------------------------------------------------------------
