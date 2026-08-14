@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from publicator import publish_next as scheduling   # Task 3 -> from publicator import scheduling
+from publicator import scheduling
 from publicator.publish_next import PAGE_TEMPLATE
 
 _TZ = "Europe/Paris"
