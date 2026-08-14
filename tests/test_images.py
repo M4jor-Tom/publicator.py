@@ -30,5 +30,10 @@ def test_find_candidates_tolerates_a_missing_directory(tmp_path):
 
 
 def test_guess_mime_falls_back_to_octet_stream():
+    assert guess_mime("/a/b.jpg") == "image/jpeg"
+    assert guess_mime("/a/b.jpeg") == "image/jpeg"
     assert guess_mime("/a/b.png") == "image/png"
+    assert guess_mime("/a/b.webp") == "image/webp"
+    assert guess_mime("/a/b.gif") == "image/gif"
+    assert guess_mime("/a/b.mp4") == "video/mp4"
     assert guess_mime("/a/b.unknown") == "application/octet-stream"

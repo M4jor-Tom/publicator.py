@@ -36,7 +36,7 @@ from publicator.entries import (
     format_schedule,
     set_data_dir,
 )
-from publicator.store import atomic_write_json, mark_state
+from publicator.store import mark_state
 
 log = logging.getLogger("publicator.da")
 
