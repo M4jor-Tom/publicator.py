@@ -105,6 +105,11 @@ def test_existing_ts_tolerates_a_missing_file(tmp_path):
     assert scheduling.existing_ts(str(tmp_path / "nope.json")) == []
 
 
+def test_resolve_ts_reads_a_naive_string_in_the_schedule_timezone():
+    assert scheduling.resolve_ts({"schedule": "2026-10-15T20:00"}, _PARIS) == \
+        int(datetime(2026, 10, 15, 20, tzinfo=_PARIS).timestamp())
+
+
 def test_schedule_slots_stay_2000_paris_across_dst():
     """Every generated slot is 20:00 Europe/Paris wall-clock, summer or winter —
     the invariant a fixed UTC offset would violate at the DST boundary."""

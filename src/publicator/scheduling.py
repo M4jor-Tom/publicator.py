@@ -95,6 +95,19 @@ def ts_labels(tz: ZoneInfo, tss) -> dict[int, str]:
             for ts in set(tss)}
 
 
+def resolve_ts(fields: dict, tz: ZoneInfo) -> int:
+    """Epoch for a save. Prefer the naive 'schedule' wall-clock string resolved in
+    the schedule timezone (browser-TZ-proof — a private window spoofs Date to UTC,
+    so the client can't be trusted to convert it); fall back to a raw 'scheduleTs'
+    epoch (non-UI callers). One of the two must be present."""
+    s = fields.get("schedule")
+    if s:
+        return int(datetime.fromisoformat(s).replace(tzinfo=tz).timestamp())
+    if fields.get("scheduleTs"):
+        return int(fields["scheduleTs"])
+    raise ValueError("schedule required")
+
+
 def existing_ts(json_path: str) -> list[int]:
     """Future timestamps of already-scheduled apparitions (state != unpublished) —
     the occupancy background the client packs new slots around. Unpublished

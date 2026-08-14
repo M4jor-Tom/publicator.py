@@ -11,6 +11,7 @@ the publish-next app.
 import argparse
 import io
 import os
+import sys
 import traceback
 from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
@@ -20,16 +21,6 @@ from playwright.sync_api import sync_playwright
 FIFO = "/tmp/pw.cmd"
 LOG = "/tmp/pw.log"
 SHOT = "/tmp/pw.png"
-_ap = argparse.ArgumentParser(description="Playwright daemon for manual DA publishing.")
-_ap.add_argument("--data-dir", default=None,
-                 help="publication database dir holding .deviantart-session/; default: CWD")
-_dd = _ap.parse_args().data_dir
-SESSION = (Path(_dd).resolve() if _dd else Path.cwd()) / ".deviantart-session"  # shared with the publish-next app
-
-if not os.path.exists(FIFO):
-    os.mkfifo(FIFO)
-open(LOG, "w").close()
-SESSION.mkdir(parents=True, exist_ok=True)
 
 
 def log(msg: str) -> None:
@@ -37,37 +28,53 @@ def log(msg: str) -> None:
         f.write(str(msg).rstrip() + "\n")
 
 
-with sync_playwright() as p:
-    context = p.chromium.launch_persistent_context(str(SESSION), headless=False)
-    page = context.pages[0] if context.pages else context.new_page()
-    log(f"READY pid={os.getpid()}")
-    seq = 0
-    scope = {"p": p, "context": context, "page": page}
-    while True:
-        with open(FIFO, "r") as f:
-            cmd = f.read()
-        if not cmd.strip():
-            continue
-        seq += 1
-        log(f"--- CMD {seq} ---")
-        log(cmd)
-        buf = io.StringIO()
-        try:
-            with redirect_stdout(buf), redirect_stderr(buf):
-                exec(cmd, scope)
-            out = buf.getvalue()
-            if out:
-                log(out)
-            log(f"--- OK {seq} ---")
-        except Exception:
-            out = buf.getvalue()
-            if out:
-                log(out)
-            log(traceback.format_exc())
-            log(f"--- ERR {seq} ---")
-        # refresh page ref in case command re-bound it (new tab, etc.)
-        page = scope.get("page", page)
-        try:
-            page.screenshot(path=SHOT, full_page=False)
-        except Exception as e:
-            log(f"screenshot err: {e}")
+def main() -> None:
+    _ap = argparse.ArgumentParser(description="Playwright daemon for manual DA publishing.")
+    _ap.add_argument("--data-dir", default=None,
+                     help="publication database dir holding .deviantart-session/; default: CWD")
+    _dd = _ap.parse_args().data_dir
+    SESSION = (Path(_dd).resolve() if _dd else Path.cwd()) / ".deviantart-session"  # shared with the publish-next app
+
+    if not os.path.exists(FIFO):
+        os.mkfifo(FIFO)
+    open(LOG, "w").close()
+    SESSION.mkdir(parents=True, exist_ok=True)
+
+    with sync_playwright() as p:
+        context = p.chromium.launch_persistent_context(str(SESSION), headless=False)
+        page = context.pages[0] if context.pages else context.new_page()
+        log(f"READY pid={os.getpid()}")
+        seq = 0
+        scope = {"p": p, "context": context, "page": page}
+        while True:
+            with open(FIFO, "r") as f:
+                cmd = f.read()
+            if not cmd.strip():
+                continue
+            seq += 1
+            log(f"--- CMD {seq} ---")
+            log(cmd)
+            buf = io.StringIO()
+            try:
+                with redirect_stdout(buf), redirect_stderr(buf):
+                    exec(cmd, scope)
+                out = buf.getvalue()
+                if out:
+                    log(out)
+                log(f"--- OK {seq} ---")
+            except Exception:
+                out = buf.getvalue()
+                if out:
+                    log(out)
+                log(traceback.format_exc())
+                log(f"--- ERR {seq} ---")
+            # refresh page ref in case command re-bound it (new tab, etc.)
+            page = scope.get("page", page)
+            try:
+                page.screenshot(path=SHOT, full_page=False)
+            except Exception as e:
+                log(f"screenshot err: {e}")
+
+
+if __name__ == "__main__":
+    sys.exit(main())
