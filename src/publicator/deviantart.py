@@ -18,7 +18,6 @@ pages themselves are not bot-walled.
 
 import json
 import logging
-import os
 import re
 import shutil
 import sqlite3
@@ -37,6 +36,7 @@ from publicator.entries import (
     format_schedule,
     set_data_dir,
 )
+from publicator.store import atomic_write_json
 
 log = logging.getLogger("publicator.da")
 
@@ -75,19 +75,6 @@ def configure(data_dir, config=None) -> Path:
 # ---------------------------------------------------------------------------
 # publications.json state write
 # ---------------------------------------------------------------------------
-
-def atomic_write_json(path: str, data) -> None:
-    d = os.path.dirname(os.path.abspath(path)) or "."
-    fd, tmp = tempfile.mkstemp(prefix=".pub-", dir=d)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4)
-        os.replace(tmp, path)
-    except Exception:
-        try: os.unlink(tmp)
-        except OSError: pass
-        raise
-
 
 def mark_state(json_path: str, target_uuid: str, state: str) -> None:
     with open(json_path, "r", encoding="utf-8") as f:

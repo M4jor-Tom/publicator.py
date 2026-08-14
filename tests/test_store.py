@@ -4,7 +4,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from publicator import publish_next as store   # Task 4 -> from publicator import store
+from publicator import store
 from publicator.entries import STATE_UNPUBLISHED
 
 _TZ = "Europe/Paris"
