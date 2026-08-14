@@ -1,10 +1,10 @@
-#!/usr/bin/env python3
-"""DeviantArt submission — Playwright logic only, extracted from publish_next.py.
+"""DeviantArt submission — Playwright logic only.
 
 Publishes ONE publications.json entry through the DeviantArt web submit flow and
-flips its state to published_or_scheduled. `publish_next.py` (the gallery UI)
-imports `publish_batch`/`load_pending_entries`/`configure` from here; this module
-never imports back, so there is no cycle.
+flips its state to published_or_scheduled. `webui.server` (the gallery UI) and
+`apps.da_publish` (the single-entry CLI) import `publish_batch`/
+`load_pending_entries`/`configure` from here; this module never imports back, so
+there is no cycle.
 
 The ordered `STEPS` registry below mirrors, 1:1, the numbered list in the
 `publish-deviantart` skill (SKILL.md). `--check-steps` asserts they stay in sync,
@@ -402,11 +402,11 @@ def check_steps() -> bool:
     if skill == ours:
         print(f"check-steps OK: {len(ours)} steps in sync with the skill")
         return True
-    print("check-steps DRIFT: SKILL.md and da_publish.STEPS differ "
+    print("check-steps DRIFT: SKILL.md and deviantart.STEPS differ "
           f"(skill has {len(skill)}, script implements {len(ours)}):", file=sys.stderr)
     for i in range(max(len(skill), len(ours))):
         s = skill[i] if i < len(skill) else "<none — remove from STEPS?>"
-        o = ours[i] if i < len(ours) else "<none — IMPLEMENT THIS STEP in da_publish.STEPS>"
+        o = ours[i] if i < len(ours) else "<none — IMPLEMENT THIS STEP in deviantart.STEPS>"
         mark = "  ok" if s == o else ">>DRIFT"
         print(f"{mark} step {i + 1}\n    skill:  {s}\n    script: {o}", file=sys.stderr)
     return False

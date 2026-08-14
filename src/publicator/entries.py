@@ -10,7 +10,7 @@ from pathlib import Path
 # Data (publications.json + images) lives in the publication database dir: the
 # --data-dir passed to each app, defaulting to CWD. Only code assets (schema,
 # tags/) travel with this package. set_data_dir() retargets the helpers below,
-# so publish_next.py can point them at its own --data-dir.
+# so each app/webui caller can point them at its own --data-dir.
 DATA_DIR = Path.cwd()
 
 # publications.json apparition states. They live here, with the entry model, so
@@ -59,5 +59,5 @@ def find_art_path(basename: str) -> Path:
 
 
 def format_schedule(ts: int) -> str:
-    # Match `date --date @TS` — parse_schedule in publish_next.py expects it.
+    # Match `date --date @TS` — deviantart.parse_schedule expects it.
     return subprocess.check_output(["date", "--date", f"@{ts}"]).decode().strip()
