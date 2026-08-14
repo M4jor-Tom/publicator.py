@@ -1,14 +1,10 @@
-#!/usr/bin/env python3
-"""Print path/title/schedule for the first state=unpublished publication.
+"""The publications.json entry model: locate entries, their art, their schedule.
 
-Replaces echo_first_unstaged_publication_data.sh: source of truth is
-publications.json state field, not git diff --staged.
-Also exposes helpers imported by publish_next.py.
+Source of truth for "unpublished" is the apparition `state` field, not git.
+The CLI that prints the first unpublished entry lives in apps/echo_first.py.
 """
-import argparse
 import json
 import subprocess
-import sys
 from pathlib import Path
 
 # Data (publications.json + images) lives in the publication database dir: the
@@ -16,6 +12,11 @@ from pathlib import Path
 # tags/) travel with this package. set_data_dir() retargets the helpers below,
 # so publish_next.py can point them at its own --data-dir.
 DATA_DIR = Path.cwd()
+
+# publications.json apparition states. They live here, with the entry model, so
+# scheduling.py can filter on them without importing the Playwright module.
+STATE_UNPUBLISHED = "unpublished"
+STATE_PUBLISHED = "published_or_scheduled"
 
 
 def set_data_dir(path: str | None = None) -> Path:
@@ -36,7 +37,7 @@ def load_pubs() -> list[dict]:
 def first_unpublished() -> dict:
     for p in load_pubs():
         for a in p.get("apparitions", []):
-            if a.get("state") == "unpublished":
+            if a.get("state") == STATE_UNPUBLISHED:
                 return p
     raise SystemExit("no unpublished publication")
 
@@ -60,23 +61,3 @@ def find_art_path(basename: str) -> Path:
 def format_schedule(ts: int) -> str:
     # Match `date --date @TS` — parse_schedule in publish_next.py expects it.
     return subprocess.check_output(["date", "--date", f"@{ts}"]).decode().strip()
-
-
-def main() -> int:
-    ap = argparse.ArgumentParser(description="Print the first unpublished publication's data.")
-    ap.add_argument("--data-dir", default=None,
-                    help="publication database dir (publications.json + images); default: CWD")
-    set_data_dir(ap.parse_args().data_dir)
-    pub = first_unpublished()
-    app = deviantart_apparition(pub)
-    ts = app.get("apparitionTimestampIfDifferentThanSubmission")
-    if ts is None:
-        raise SystemExit(f"no apparitionTimestampIfDifferentThanSubmission on {pub['uuid']}")
-    print(f"path: {find_art_path(pub['files'][0]['basename'])}")
-    print(f"title: {app['urlElsePublicationName']}")
-    print(f"schedule: {format_schedule(ts)}")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

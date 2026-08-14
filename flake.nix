@@ -53,7 +53,7 @@
       # against CWD — invoke from the Art data dir (`nix run <this>#app`).
       # extra: per-app runtime deps. pw: needs Playwright browsers (drags in the
       # heavy chromium/webkit closure — only the browser-driving apps set it).
-      app = name: script: extra: pw: {
+      app = name: module: extra: pw: {
         type = "app";
         program = "${pkgs.writeShellApplication {
           name = name;
@@ -62,7 +62,8 @@
             export PLAYWRIGHT_BROWSERS_PATH=${browsers}
             export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=true
           '' else "") + ''
-            exec python ${src}/${script} "$@"
+            export PYTHONPATH=${src}/src
+            exec python -m publicator.apps.${module} "$@"
           '';
         }}/bin/${name}";
       };
@@ -90,20 +91,25 @@
       apps.${system} = {
         # `claude` on PATH so llm-claude-cli can shell out for AI metadata
         # (uses the logged-in Claude subscription at $HOME/.claude — no API key).
-        publish-next = app "publish-next" "publish_next.py" [ pkgs.imagemagick browsers claude ] true;
+        publish-next = app "publish-next" "publish_next" [ pkgs.imagemagick browsers claude ] true;
         # Publish ONE publications.json entry (the extracted Playwright flow):
         #   nix run .#da-publish -- --data-dir <dir> [--uuid <id>]
-        da-publish = app "da-publish" "da_publish.py" [ pkgs.imagemagick browsers ] true;
-        pw-daemon = app "pw-daemon" "pw_daemon.py" [ browsers ] true;
-        validate = app "validate" "validate.py" [ ] false;
+        da-publish = app "da-publish" "da_publish" [ pkgs.imagemagick browsers ] true;
+        pw-daemon = app "pw-daemon" "pw_daemon" [ browsers ] true;
+        validate = app "validate" "validate" [ ] false;
+        # First state=unpublished entry's path/title/schedule (used by the skill).
+        echo-first = app "echo-first" "echo_first" [ ] false;
         # Drift guard: fails if the publish-deviantart skill grew a step that
-        # da_publish.py's STEPS doesn't implement. No browser/data deps (cheap CI).
+        # deviantart.py's STEPS doesn't implement. No browser/data deps (cheap CI).
         check-steps = {
           type = "app";
           program = "${pkgs.writeShellApplication {
             name = "check-steps";
             runtimeInputs = [ python ];
-            text = ''exec python ${src}/da_publish.py --check-steps "$@"'';
+            text = ''
+              export PYTHONPATH=${src}/src
+              exec python -m publicator.apps.da_publish --check-steps "$@"
+            '';
           }}/bin/check-steps";
         };
         login = login;
@@ -113,6 +119,7 @@
         shellHook = ''
           export PLAYWRIGHT_BROWSERS_PATH=${pkgs.playwright-driver.browsers}
           export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=true
+          export PYTHONPATH="$PWD/src''${PYTHONPATH:+:$PYTHONPATH}"
         '';
       };
     };

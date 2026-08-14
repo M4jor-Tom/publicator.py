@@ -15,7 +15,6 @@ PerimeterX-cleared profile into the Playwright Firefox session and only VERIFIES
 it — the submission pages themselves are not bot-walled.
 """
 
-import argparse
 import hashlib
 import html
 import json
@@ -25,26 +24,23 @@ import random
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.parse
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from da_publish import (
-    STATE_UNPUBLISHED,
-    _atomic_write_json,
+from publicator.config import load_config, validate_publications
+from publicator.deviantart import (
+    atomic_write_json,
     configure,
     load_pending_entries,
     publish_batch,
-    setup_logging,
 )
-from echo_first_unpublished_publication_data import deviantart_apparition
-from llm_meta import DEFAULT_MODEL, generate_metadata
-from validate import load_config, validate_publications
+from publicator.entries import STATE_UNPUBLISHED, deviantart_apparition
+from publicator.llm_meta import DEFAULT_MODEL, generate_metadata
 
 log = logging.getLogger("publicator.gallery")
 
@@ -134,21 +130,21 @@ def generate_thumbnails(image_paths: list[str], thumb_dir: str) -> dict[str, str
 # shipped to the browser as absolute slot instants (see _build_page).
 # ---------------------------------------------------------------------------
 
-_DEFAULT_TZ = "Europe/Paris"       # the wall clock "20:00" is anchored to; overridable via schedule.timezone
-_SLOT_HORIZON_WEEKS = 52           # ponytail: 1y of weekly slots embedded; bump if you ever queue further out
-_WEEKDAY = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+DEFAULT_TZ = "Europe/Paris"       # the wall clock "20:00" is anchored to; overridable via schedule.timezone
+SLOT_HORIZON_WEEKS = 52           # ponytail: 1y of weekly slots embedded; bump if you ever queue further out
+WEEKDAY = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
             "friday": 4, "saturday": 5, "sunday": 6}   # Python date.weekday()
 
 
-def _zone(schedule: dict) -> ZoneInfo:
-    return ZoneInfo(schedule.get("timezone", _DEFAULT_TZ))
+def zone(schedule: dict) -> ZoneInfo:
+    return ZoneInfo(schedule.get("timezone", DEFAULT_TZ))
 
 
-def _schedule_profiles(schedule: dict) -> list[dict]:
+def schedule_profiles(schedule: dict) -> list[dict]:
     """Validated cadence: [{name, day: <Python weekday, 0=Mon>, hour, per_slot}, ...].
     Reads schedule['profiles']; a flat day/hour/per_slot config becomes one 'default'
     profile, an empty dict the built-in default. Only frequency='weekly' is
-    implemented; profiles need distinct (day, hour). Internal to _schedule_data —
+    implemented; profiles need distinct (day, hour). Internal to schedule_data —
     the browser never sees day/hour, only the generated slot instants."""
     raw = schedule.get("profiles")
     if raw is None:               # flat day/hour/per_slot config, or {} -> one 'default' profile
@@ -159,25 +155,25 @@ def _schedule_profiles(schedule: dict) -> list[dict]:
         if freq != "weekly":
             raise NotImplementedError(f"schedule.frequency {freq!r} not implemented (only 'weekly')")
         day = str(p.get("day", "tuesday")).lower()
-        if day not in _WEEKDAY:
+        if day not in WEEKDAY:
             raise ValueError(f"schedule.day {day!r} invalid")
         hour = int(p.get("hour", 20))
         per_slot = int(p.get("per_slot", 2))
         if per_slot < 1:
             raise ValueError(f"schedule.per_slot must be >= 1, got {per_slot}")
-        key = (_WEEKDAY[day], hour)
+        key = (WEEKDAY[day], hour)
         if key in seen:
             raise ValueError(f"schedule profiles collide on (day={day}, hour={hour})")
         seen.add(key)
         out.append({"name": str(p.get("name", "default")),
-                    "day": _WEEKDAY[day], "hour": hour, "per_slot": per_slot})
+                    "day": WEEKDAY[day], "hour": hour, "per_slot": per_slot})
     if not out:
         raise ValueError("schedule.profiles is empty")
     return out
 
 
-def _profile_slots(profile: dict, zone: ZoneInfo, start: int) -> list[int]:
-    """Ascending epochs of the next _SLOT_HORIZON_WEEKS weekly slots for `profile`,
+def profile_slots(profile: dict, zone: ZoneInfo, start: int) -> list[int]:
+    """Ascending epochs of the next SLOT_HORIZON_WEEKS weekly slots for `profile`,
     each at its (weekday, hour) wall-clock in `zone`. Built date-by-date in the zone
     so a slot stays 20:00 local across DST (never a fixed UTC offset). First slot is
     the earliest matching instant strictly after `start`."""
@@ -187,32 +183,32 @@ def _profile_slots(profile: dict, zone: ZoneInfo, start: int) -> list[int]:
     if datetime(day.year, day.month, day.day, hour, tzinfo=zone).timestamp() <= start:
         day += timedelta(days=7)                                  # today's slot already passed
     slots = []
-    for _ in range(_SLOT_HORIZON_WEEKS):
+    for _ in range(SLOT_HORIZON_WEEKS):
         slots.append(int(datetime(day.year, day.month, day.day, hour, tzinfo=zone).timestamp()))
         day += timedelta(days=7)
     return slots
 
 
-def _schedule_data(schedule: dict, now: int | None = None) -> list[dict]:
+def schedule_data(schedule: dict, now: int | None = None) -> list[dict]:
     """Client scheduling payload: per profile, its upcoming canonical slot
     instants. ALL weekday/hour/timezone math lives here (Python zoneinfo) so the
     browser never reads a clock — it only counts occupancy by exact-timestamp
     equality, immune to the private-window UTC spoof."""
-    zone = _zone(schedule)
+    tz = zone(schedule)
     start = int(now if now is not None else time.time())
     return [{"name": p["name"], "per_slot": p["per_slot"],
-             "slots": _profile_slots(p, zone, start)}
-            for p in _schedule_profiles(schedule)]
+             "slots": profile_slots(p, tz, start)}
+            for p in schedule_profiles(schedule)]
 
 
-def _ts_labels(zone: ZoneInfo, tss) -> dict[int, str]:
+def ts_labels(zone: ZoneInfo, tss) -> dict[int, str]:
     """{ts: 'YYYY-MM-DDTHH:MM'} in the schedule timezone, so datetime-local inputs
     show the intended wall clock regardless of the browser's timezone."""
     return {ts: datetime.fromtimestamp(ts, zone).strftime("%Y-%m-%dT%H:%M")
             for ts in set(tss)}
 
 
-def _existing_ts(json_path: str) -> list[int]:
+def existing_ts(json_path: str) -> list[int]:
     """Future timestamps of already-scheduled apparitions (state != unpublished) —
     the occupancy background the client packs new slots around. Unpublished
     (pending) entries are excluded; they ride in the client queue instead.
@@ -233,87 +229,11 @@ def _existing_ts(json_path: str) -> list[int]:
     return out
 
 
-def _selfcheck() -> None:
-    # schedule cadence: profiles -> validated list; weekly day-name -> Python weekday (0=Mon)
-    assert _schedule_profiles({"profiles": [
-        {"name": "free", "day": "tuesday", "hour": 20, "per_slot": 2}]}) == \
-        [{"name": "free", "day": 1, "hour": 20, "per_slot": 2}]
-    # flat keys -> single "default" profile
-    assert _schedule_profiles({"day": "friday", "hour": 18, "per_slot": 1}) == \
-        [{"name": "default", "day": 4, "hour": 18, "per_slot": 1}]
-    # empty -> built-in default (Tuesday 20:00, per_slot 2)
-    assert _schedule_profiles({}) == [{"name": "default", "day": 1, "hour": 20, "per_slot": 2}]
-    for bad, exc in [
-        ({"profiles": [{"frequency": "monthly"}]}, NotImplementedError),
-        ({"profiles": [{"day": "tuesday", "per_slot": 0}]}, ValueError),
-        ({"profiles": [{"name": "a", "day": "tuesday", "hour": 20},
-                       {"name": "b", "day": "tuesday", "hour": 20}]}, ValueError),
-        ({"profiles": []}, ValueError),
-    ]:
-        try:
-            _schedule_profiles(bad); assert False, f"{bad} not rejected"
-        except exc:
-            pass
-    # slots stay on the profile's wall clock: 52 future Tuesday-20:00 Europe/Paris
-    _slots = _schedule_data({"timezone": "Europe/Paris", "profiles": [
-        {"name": "t", "day": "tuesday", "hour": 20, "per_slot": 2}]})[0]["slots"]
-    assert len(_slots) == 52 and all(datetime.fromtimestamp(s, ZoneInfo("Europe/Paris")).hour == 20
-                                     for s in _slots), _slots
-    # literal Tuesday 20:00 UTC anchors for the write_publications round-trip
-    s0 = int(datetime(2026, 1, 6, 20, tzinfo=timezone.utc).timestamp())  # 2026-01-06 is a Tue
-    s1 = s0 + 7 * 24 * 3600
-    # /original decodes the path arg verbatim, so the allow-list (path in
-    # thumb_map) sees the real path — a non-listed path can't sneak through.
-    q = urllib.parse.parse_qs(urllib.parse.urlparse("/original?path=%2Fetc%2Fpasswd").query)
-    assert q.get("path", [""])[0] == "/etc/passwd", q
-    with tempfile.TemporaryDirectory() as _d:
-        _jp = os.path.join(_d, "publications.json")
-        _img = os.path.join(_d, "pic.png")
-        with open(_img, "wb") as _f:
-            _f.write(b"\x89PNG\r\n\x1a\n")  # bytes are enough for sha512
-        _uuids = write_publications(
-            [{"path": _img, "title": "t", "description": "d", "scheduleTs": s0}],
-            _jp,
-        )
-        assert len(_uuids) == 1, _uuids
-        # scheduleTs is now required — a missing one must raise, no write
-        try:
-            write_publications([{"path": _img, "title": "t", "description": "d"}], _jp)
-            assert False, "missing scheduleTs not rejected"
-        except ValueError:
-            pass
-        with open(_jp) as _f:
-            _rows = json.load(_f)
-        assert len(_rows) == 1 and _rows[0]["uuid"] == _uuids[0], _rows
-        assert _rows[0]["apparitions"][0]["state"] == STATE_UNPUBLISHED, _rows[0]
-        import copy
-        ok = copy.deepcopy(_rows)
-        ok[0]["apparitions"][0]["tier"] = "gold"; ok[0]["apparitions"][0]["galleries"] = ["Art"]
-        validate_publications(ok, {"tiers": ["gold"], "galleries": ["Art"]})
-        try:
-            validate_publications(ok, {"tiers": [], "galleries": []}); assert False, "tier not rejected"
-        except ValueError:
-            pass
-        _pz = ZoneInfo(_DEFAULT_TZ)
-        apply_update(_rows, _uuids[0], {"title": "T2", "description": "D2", "scheduleTs": s1,
-                                        "price": 3, "tier": "gold", "galleries": ["Art"]}, _pz)
-        a = _rows[0]["apparitions"][0]
-        assert a["urlElsePublicationName"] == "T2" and a["priceIfNotFree"] == 3.0
-        assert a["tier"] == "gold" and a["galleries"] == ["Art"], a
-        apply_update(_rows, _uuids[0], {"title": "T3", "description": "D3", "scheduleTs": s1}, _pz)
-        a = _rows[0]["apparitions"][0]
-        assert "priceIfNotFree" not in a and "tier" not in a and "galleries" not in a, a
-    # resolve-on-save: a naive 'schedule' string is read in the schedule TZ, not UTC
-    assert _resolve_ts({"schedule": "2026-10-15T20:00"}, _pz) == \
-        int(datetime(2026, 10, 15, 20, tzinfo=_pz).timestamp())
-    print("publish_next selfcheck OK")
-
-
 # ---------------------------------------------------------------------------
 # HTTP: gallery + queue endpoints
 # ---------------------------------------------------------------------------
 
-_PAGE_TMPL = r"""<!DOCTYPE html>
+PAGE_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Publish next</title>
@@ -380,7 +300,7 @@ const PENDING = __PENDING__;           // already-queued entries from publicatio
 
 const queue = []; // [{cardId, path, title, description, price, scheduleTs, tier, galleries, uuid?}]
 
-// >>> scheduler core (sliced verbatim by test_publish_next.py) >>>
+// >>> scheduler core (sliced verbatim by tests/test_scheduling.py) >>>
 // Slots are absolute instants generated server-side in the schedule's timezone,
 // so nothing here reads the browser clock — `firefox --private-window` spoofing
 // Date to UTC can no longer make a taken slot look free (the bug this replaced).
@@ -396,7 +316,7 @@ function presetForTs(ts) {               // profile whose slot list holds ts, el
 function nextSlotForProfile(p) {         // earliest upcoming slot with room (< per_slot)
   const taken = EXISTING_TS.concat(queue.map(e => e.scheduleTs).filter(Boolean));  // background + queue
   const slot = p.slots.find(s => taken.filter(t => t === s).length < p.per_slot);
-  return slot ?? p.slots[p.slots.length - 1];  // ponytail: horizon full -> reuse last; widen _SLOT_HORIZON_WEEKS
+  return slot ?? p.slots[p.slots.length - 1];  // ponytail: horizon full -> reuse last; widen SLOT_HORIZON_WEEKS
 }
 function tsToLocalInput(ts) {            // schedule-TZ label; browser-local only for an unlabeled custom instant
   if (LABELS[ts]) return LABELS[ts];
@@ -588,7 +508,7 @@ refreshCount();
 """
 
 
-def _tier_gallery_fields(config):
+def tier_gallery_fields(config):
     if not config.get("tiers") and not config.get("galleries"):
         return ""
     tiers = "".join(f'<option value="{html.escape(t, quote=True)}">{html.escape(t)}</option>'
@@ -600,13 +520,13 @@ def _tier_gallery_fields(config):
             f'<div class="galleries"><span>Galleries</span>{gals}</div>')
 
 
-def _preset_options(schedules):
+def preset_options(schedules):
     opts = "".join(f'<option value="{html.escape(s["name"], quote=True)}">'
                    f'{html.escape(s["name"])}</option>' for s in schedules)
     return opts + '<option value="__custom__">(custom)</option>'
 
 
-def _card_form_html(cid, js_path, tg, save_label, preset_opts):
+def card_form_html(cid, js_path, tg, save_label, preset_opts):
     """The shared edit form rendered on every card (candidate + pending). Only the
     save-button label differs between the two call sites."""
     return f"""  <div class="form">
@@ -636,15 +556,15 @@ class GalleryHandler(BaseHTTPRequestHandler):
     ai_timeout = 300
     json_path = "publications.json"
     config: dict = {}
-    schedules: list = _schedule_data({})
+    schedules: list = schedule_data({})
     publish_done: dict | None = None
 
     def _build_page(self) -> str:
         cards = []
         pending_js = []
-        tg = _tier_gallery_fields(self.config)
-        preset_opts = _preset_options(self.schedules)
-        zone = _zone(self.config.get("schedule", {}))
+        tg = tier_gallery_fields(self.config)
+        preset_opts = preset_options(self.schedules)
+        tz = zone(self.config.get("schedule", {}))
         # Pre-queued cards: entries already in publications.json (state=unpublished).
         for idx, e in enumerate(self.pending):
             thumb_path = self.thumb_map.get(e["path"], e["path"])
@@ -653,7 +573,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
             safe_title = html.escape(e["title"], quote=True)
             view_href = html.escape("/original?path=" + urllib.parse.quote(e["path"]), quote=True)
             ts = e.get("scheduleTs")
-            sched = (datetime.fromtimestamp(ts, zone).strftime("%a %d %b %Y %H:%M")
+            sched = (datetime.fromtimestamp(ts, tz).strftime("%a %d %b %Y %H:%M")
                      if ts else "no schedule")
             cid = f"pending_{idx}"
             js_pathp = html.escape(json.dumps(e["path"]), quote=True)
@@ -665,7 +585,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
     <a class="btn-view" href="{view_href}" target="_blank" rel="noopener">View</a>
     <button class="btn-add" onclick="openForm('{cid}')">Edit</button>
   </div>
-{_card_form_html(cid, js_pathp, tg, "Save changes", preset_opts)}
+{card_form_html(cid, js_pathp, tg, "Save changes", preset_opts)}
 </div>""")
             pending_js.append({"cardId": cid, "uuid": e["uuid"], "path": e["path"],
                                "title": e["title"], "description": e.get("description"),
@@ -689,7 +609,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
     <button class="btn-add" onclick="openForm('{cid}')">Add</button>
     <button class="btn-del" onclick="delCard('{cid}', {js_path})">Delete</button>
   </div>
-{_card_form_html(cid, js_path, tg, "Save to queue", preset_opts)}
+{card_form_html(cid, js_path, tg, "Save to queue", preset_opts)}
 </div>""")
         # Labels for every instant that can land in a datetime-local input: slot
         # presets and pending scheduleTs (background occupancy is never rendered).
@@ -697,8 +617,8 @@ class GalleryHandler(BaseHTTPRequestHandler):
         # when the private window forces Date to UTC.
         slot_ts = [ts for p in self.schedules for ts in p.get("slots", [])]
         pending_ts = [e["scheduleTs"] for e in pending_js if e.get("scheduleTs")]
-        labels = _ts_labels(zone, slot_ts + pending_ts)
-        page = _PAGE_TMPL
+        labels = ts_labels(tz, slot_ts + pending_ts)
+        page = PAGE_TEMPLATE
         page = page.replace("__CARDS__", "\n".join(cards))
         page = page.replace("__PENDING__", json.dumps(pending_js))
         page = page.replace("__EXISTING_TS__", json.dumps(self.existing_ts))
@@ -836,14 +756,14 @@ class GalleryHandler(BaseHTTPRequestHandler):
                 with open(self.json_path) as f:
                     pubs = json.load(f)
                 try:
-                    apply_update(pubs, u, data, _zone(self.config.get("schedule", {})))
+                    apply_update(pubs, u, data, zone(self.config.get("schedule", {})))
                 except KeyError:
                     self._send(404, {"error": f"uuid not found: {u}"}); return
                 try:
                     validate_publications(pubs, self.config)
                 except Exception as e:
                     self._send(400, {"error": f"invalid: {e}"}); return
-                _atomic_write_json(self.json_path, pubs)
+                atomic_write_json(self.json_path, pubs)
                 self._send(200, {"ok": True})
             else:
                 self.send_response(404); self.end_headers()
@@ -861,7 +781,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
 # Publications.json write
 # ---------------------------------------------------------------------------
 
-def _resolve_ts(fields: dict, zone: ZoneInfo) -> int:
+def resolve_ts(fields: dict, zone: ZoneInfo) -> int:
     """Epoch for a save. Prefer the naive 'schedule' wall-clock string resolved in
     the schedule timezone (browser-TZ-proof — a private window spoofs Date to UTC,
     so the client can't be trusted to convert it); fall back to a raw 'scheduleTs'
@@ -883,13 +803,13 @@ def write_publications(entries: list[dict], json_path: str, config: dict | None 
     except FileNotFoundError:
         data = []
 
-    zone = _zone((config or {}).get("schedule", {}))
+    tz = zone((config or {}).get("schedule", {}))
     new_uuids = []
     now = int(time.time())
     for i, e in enumerate(entries):
         path = e["path"]
         sha = compute_sha512(path)
-        ts = _resolve_ts(e, zone)
+        ts = resolve_ts(e, tz)
         apparition = {
             "platformName": "deviantart",
             "state": STATE_UNPUBLISHED,
@@ -897,9 +817,9 @@ def write_publications(entries: list[dict], json_path: str, config: dict | None 
             "apparitionTimestampIfDifferentThanSubmission": ts,
         }
         price = e.get("price")
-        _set_or_pop(apparition, "priceIfNotFree", float(price) if price not in (None, "") else None)
-        _set_or_pop(apparition, "tier", e.get("tier") or None)
-        _set_or_pop(apparition, "galleries", list(e["galleries"]) if e.get("galleries") else None)
+        set_or_pop(apparition, "priceIfNotFree", float(price) if price not in (None, "") else None)
+        set_or_pop(apparition, "tier", e.get("tier") or None)
+        set_or_pop(apparition, "galleries", list(e["galleries"]) if e.get("galleries") else None)
         u = str(uuid.uuid4())
         new_uuids.append(u)
         data.append({
@@ -914,11 +834,11 @@ def write_publications(entries: list[dict], json_path: str, config: dict | None 
         })
 
     validate_publications(data, config if config is not None else load_config(Path.cwd()))
-    _atomic_write_json(json_path, data)
+    atomic_write_json(json_path, data)
     return new_uuids
 
 
-def _set_or_pop(d, k, v):
+def set_or_pop(d, k, v):
     if v in (None, [], ""):
         d.pop(k, None)
     else:
@@ -928,7 +848,7 @@ def _set_or_pop(d, k, v):
 def apply_update(pubs, uuid_, fields, zone: ZoneInfo):
     """Patch the publication (and its DA apparition) with uuid_ in place.
     Cleared price/tier/galleries are removed. Raises KeyError if not found.
-    `zone` resolves the naive 'schedule' string (see _resolve_ts)."""
+    `zone` resolves the naive 'schedule' string (see resolve_ts)."""
     for p in pubs:
         if p.get("uuid") == uuid_:
             break
@@ -937,11 +857,11 @@ def apply_update(pubs, uuid_, fields, zone: ZoneInfo):
     p["description"] = fields.get("description", p.get("description", ""))
     app = deviantart_apparition(p)
     app["urlElsePublicationName"] = fields["title"]
-    app["apparitionTimestampIfDifferentThanSubmission"] = _resolve_ts(fields, zone)
+    app["apparitionTimestampIfDifferentThanSubmission"] = resolve_ts(fields, zone)
     price = fields.get("price")
-    _set_or_pop(app, "priceIfNotFree", float(price) if price not in (None, "") else None)
-    _set_or_pop(app, "tier", fields.get("tier") or None)
-    _set_or_pop(app, "galleries", list(fields["galleries"]) if fields.get("galleries") else None)
+    set_or_pop(app, "priceIfNotFree", float(price) if price not in (None, "") else None)
+    set_or_pop(app, "tier", fields.get("tier") or None)
+    set_or_pop(app, "galleries", list(fields["galleries"]) if fields.get("galleries") else None)
 
 
 # ---------------------------------------------------------------------------
@@ -954,13 +874,13 @@ def serve(thumb_dir: str, thumb_map: dict[str, str], candidate_paths: list[str],
     GalleryHandler.thumb_map = thumb_map
     GalleryHandler.candidate_paths = candidate_paths
     GalleryHandler.pending = pending
-    GalleryHandler.existing_ts = _existing_ts(args.json)
+    GalleryHandler.existing_ts = existing_ts(args.json)
     GalleryHandler.ai_model = args.ai_model
     GalleryHandler.openrouter_model = args.openrouter_model
     GalleryHandler.ai_timeout = args.ai_timeout
     GalleryHandler.json_path = args.json
     GalleryHandler.config = config          # was: load_config(Path.cwd())
-    GalleryHandler.schedules = _schedule_data(config["schedule"])
+    GalleryHandler.schedules = schedule_data(config["schedule"])
     GalleryHandler.publish_done = None
 
     server = ThreadingHTTPServer(("127.0.0.1", args.port), GalleryHandler)
@@ -983,64 +903,3 @@ def serve(thumb_dir: str, thumb_map: dict[str, str], candidate_paths: list[str],
     finally:
         server.server_close()
     return GalleryHandler.publish_done
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Unified publish workflow (gallery + AI + Chromium DA).")
-    parser.add_argument("-n", type=int, default=10)
-    parser.add_argument("--data-dir", default=None,
-                        help="publication database dir (publications.json + images + browser session); default: CWD")
-    parser.add_argument("--json", default=None, help="default: <data-dir>/publications.json")
-    parser.add_argument("--ai-model", default=DEFAULT_MODEL)
-    parser.add_argument("--openrouter-model",
-                        # ponytail: free :free ids churn on OpenRouter; this is the current
-                        # free model with both vision and structured_outputs. Override via flag.
-                        default="openrouter/google/gemma-4-26b-a4b-it:free",
-                        help="free vision model for the OpenRouter option; needs $OPENROUTER_KEY")
-    parser.add_argument("--ai-timeout", type=int, default=300,
-                        help="seconds to wait for an AI title/description (default: 300)")
-    parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("-v", "--verbose", action="store_true",
-                        help="debug logging (HTTP requests, AI/llm calls, publish steps)")
-    args = parser.parse_args()
-
-    setup_logging(args.verbose)
-
-    data_dir = Path(args.data_dir).resolve() if args.data_dir else Path.cwd()
-    config = load_config(data_dir)
-    configure(args.data_dir, config)  # points da_publish + echo helpers at the db dir
-    args.json = args.json or str(data_dir / "publications.json")
-    publicable_dirs = [str(data_dir / d) for d in config["publicable"]]
-
-    print("Finding unpublished images...")
-    candidates = find_candidates(publicable_dirs, args.json, args.n)
-    pending = load_pending_entries(args.json)
-    log.debug("found %d candidate(s), %d pending", len(candidates), len(pending))
-    if not candidates and not pending:
-        print("Nothing to publish (no new picks, no pending queue).")
-        return 0
-
-    msg = f"{len(candidates)} new pick(s)"
-    if pending:
-        msg += f", {len(pending)} already queued"
-    print(f"Found {msg}. Generating thumbnails...")
-    with tempfile.TemporaryDirectory(prefix="publish-next-") as thumb_dir:
-        thumb_map = generate_thumbnails(candidates + [e["path"] for e in pending], thumb_dir)
-        log.debug("generated %d thumbnail(s) in %s", len(thumb_map), thumb_dir)
-        result = serve(thumb_dir, thumb_map, candidates, pending, args, config)
-
-    if result is None:
-        print("No publish action taken.")
-        return 0
-    print(f"Done. published={result.get('published',0)} failed={result.get('failed',0)}")
-    if result.get("error"):
-        print(f"error: {result['error']}", file=sys.stderr)
-        return 1
-    return 0
-
-
-if __name__ == "__main__":
-    if "--selfcheck" in sys.argv:
-        _selfcheck()
-    else:
-        sys.exit(main())

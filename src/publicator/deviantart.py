@@ -16,7 +16,6 @@ here we copy that pre-signed-in profile and only VERIFY the session — the subm
 pages themselves are not bot-walled.
 """
 
-import argparse
 import json
 import logging
 import os
@@ -29,33 +28,25 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-log = logging.getLogger("publicator.da")
-
-
-def setup_logging(verbose: bool) -> None:
-    """App-wide logging. verbose -> DEBUG (llm calls, HTTP, each publish step),
-    else INFO. Shared by both entrypoints; basicConfig is a no-op after the first
-    call, so whichever main() runs first wins (they use the same settings)."""
-    logging.basicConfig(
-        level=logging.DEBUG if verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-    )
-
-from echo_first_unpublished_publication_data import (
+from publicator.config import load_config
+from publicator.entries import (
+    STATE_PUBLISHED,
+    STATE_UNPUBLISHED,
     deviantart_apparition,
     find_art_path,
     format_schedule,
     set_data_dir,
 )
-from validate import load_config
 
-PKG = Path(__file__).resolve().parent  # code assets (SKILL.md) travel with the package
-TAGS_FILE = None                       # resolved by configure() from publicator.toml [tags], under DATA_DIR
-SKILL_MD = PKG / ".claude/skills/publish-deviantart/SKILL.md"
+log = logging.getLogger("publicator.da")
 
-STATE_UNPUBLISHED = "unpublished"
-STATE_PUBLISHED = "published_or_scheduled"
+TAGS_FILE = None  # resolved by configure() from publicator.toml [tags], under DATA_DIR
+
+# The skill file is a repo asset, not a package one: src/publicator/deviantart.py
+# -> parents[2] is the repo root. Absent (e.g. an installed copy) -> check_steps
+# reports "not found" and skips, which is the documented dev-only behaviour.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SKILL_MD = REPO_ROOT / ".claude/skills/publish-deviantart/SKILL.md"
 
 # Runtime state (publications.json, images, browser session) lives in the
 # publication database dir: --data-dir, defaulting to CWD. configure() retargets.
@@ -85,7 +76,7 @@ def configure(data_dir, config=None) -> Path:
 # publications.json state write
 # ---------------------------------------------------------------------------
 
-def _atomic_write_json(path: str, data) -> None:
+def atomic_write_json(path: str, data) -> None:
     d = os.path.dirname(os.path.abspath(path)) or "."
     fd, tmp = tempfile.mkstemp(prefix=".pub-", dir=d)
     try:
@@ -105,7 +96,7 @@ def mark_state(json_path: str, target_uuid: str, state: str) -> None:
         if p.get("uuid") == target_uuid:
             deviantart_apparition(p)["state"] = state
             break
-    _atomic_write_json(json_path, data)
+    atomic_write_json(json_path, data)
 
 
 # ---------------------------------------------------------------------------
@@ -543,77 +534,3 @@ def publish_batch(entries: list[dict], uuids: list[str],
         ctx.close()
 
     return published, failed, err
-
-
-# ---------------------------------------------------------------------------
-# CLI + self-check
-# ---------------------------------------------------------------------------
-
-def _selfcheck() -> None:
-    assert parse_schedule("Tue Sep 8 08:00:00 PM CEST 2026") == (2026, 9, 8, 20)
-    assert parse_schedule("Wed Jan 1 12:00:00 AM UTC 2025") == (2025, 1, 1, 0)
-    assert parse_schedule("Wed Jan 1 12:00:00 PM UTC 2025") == (2025, 1, 1, 12)
-    assert [fn for _, fn in STEPS], "STEPS must map to callables"
-    assert check_steps(), "STEPS drifted from the skill"
-
-    class _NoPage:
-        def __getattr__(self, _n): raise AssertionError("premium step touched page for a free entry")
-    _step_premium(_NoPage(), {"price": None})
-    _step_tier(_NoPage(), {})        # no tier -> no-op
-    _step_galleries(_NoPage(), {})   # no galleries -> no-op
-
-    # TAGS_FILE resolves config["tags"] under DATA_DIR; None when unset
-    with tempfile.TemporaryDirectory() as _d:
-        configure(_d, {"tags": "sub/tags.txt"})
-        assert TAGS_FILE == Path(_d) / "sub/tags.txt", TAGS_FILE
-        configure(_d, {})   # no [tags] key
-        assert TAGS_FILE is None, TAGS_FILE
-        assert _da_login_cookies() == [], "no login DB -> no cookies to inject"
-    print("da_publish selfcheck OK")
-
-
-def main() -> int:
-    ap = argparse.ArgumentParser(
-        description="Publish ONE publications.json entry to DeviantArt via Playwright.")
-    ap.add_argument("--data-dir", default=None,
-                    help="publication database dir (publications.json + .deviantart-session); default: CWD")
-    ap.add_argument("--json", default=None, help="default: <data-dir>/publications.json")
-    ap.add_argument("--uuid", default=None,
-                    help="entry to publish; default: first state=unpublished")
-    ap.add_argument("--check-steps", action="store_true",
-                    help="verify STEPS mirror the skill's steps, then exit")
-    ap.add_argument("--selfcheck", action="store_true", help="run offline self-checks, then exit")
-    ap.add_argument("-v", "--verbose", action="store_true", help="debug logging (steps, session, llm)")
-    a = ap.parse_args()
-
-    setup_logging(a.verbose)
-
-    if a.selfcheck:
-        _selfcheck()
-        return 0
-    if a.check_steps:
-        return 0 if check_steps() else 1
-
-    configure(a.data_dir)
-    json_path = a.json or str(DATA_DIR / "publications.json")
-    entries = load_pending_entries(json_path)
-    if a.uuid:
-        entries = [e for e in entries if e["uuid"] == a.uuid]
-        if not entries:
-            print(f"no state=unpublished entry with uuid {a.uuid}", file=sys.stderr)
-            return 1
-    if not entries:
-        print("nothing to publish (no state=unpublished entry)")
-        return 0
-
-    entry = entries[0]
-    print(f"publishing: {entry['title']}  [{entry['uuid']}]")
-    published, failed, err = publish_batch([entry], [entry["uuid"]], json_path)
-    print(f"published={published} failed={failed}")
-    if err:
-        print(f"error: {err}", file=sys.stderr)
-    return 0 if published and not failed else 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())
