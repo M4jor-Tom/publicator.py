@@ -1,5 +1,0 @@
-- Non platform-dependant schedule:
-    - Schedule publicator execution from a github actions workflow instead of deviantart selectors (premium feature)
-- ~~publih_next.py: Split-refactor~~
-- Schedule
-    - Fix ahead detection => Don't propose for next slot if it's full
