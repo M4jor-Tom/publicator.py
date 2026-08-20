@@ -7,5 +7,8 @@
 
 - Non platform-dependant schedule:
     - Schedule publicator execution from a github actions workflow instead of deviantart selectors (premium feature)
-- Calendar view (past + future)
 - Prompt mapping
+
+## DONE
+
+- Calendar view (past + future) — Calendar tab in `#publish-next`, read-only

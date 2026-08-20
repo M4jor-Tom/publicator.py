@@ -3,13 +3,12 @@
 import argparse
 import logging
 import sys
-import tempfile
 from pathlib import Path
 
 from publicator import setup_logging
 from publicator.config import load_config
 from publicator.deviantart import configure, load_pending_entries
-from publicator.images import find_candidates, generate_thumbnails
+from publicator.images import find_candidates
 from publicator.llm_meta import DEFAULT_MODEL
 from publicator.webui.server import serve
 
@@ -54,11 +53,8 @@ def main() -> int:
     msg = f"{len(candidates)} new pick(s)"
     if pending:
         msg += f", {len(pending)} already queued"
-    print(f"Found {msg}. Generating thumbnails...")
-    with tempfile.TemporaryDirectory(prefix="publish-next-") as thumb_dir:
-        thumb_map = generate_thumbnails(candidates + [e["path"] for e in pending], thumb_dir)
-        log.debug("generated %d thumbnail(s) in %s", len(thumb_map), thumb_dir)
-        result = serve(thumb_dir, thumb_map, candidates, pending, args, config)
+    print(f"Found {msg}.")
+    result = serve(str(data_dir), candidates, pending, args, config)
 
     if result is None:
         print("No publish action taken.")

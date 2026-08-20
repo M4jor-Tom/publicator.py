@@ -11,6 +11,7 @@ import urllib.parse
 from datetime import datetime
 
 from publicator.scheduling import ts_labels, zone
+from publicator.webui.calendar_view import render_calendar
 
 PAGE_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en"><head>
@@ -55,10 +56,29 @@ PAGE_TEMPLATE = r"""<!DOCTYPE html>
   .btn-save { background: #4caf50; color: white; }
   .btn-cancel { background: #555; color: white; }
   .err { color: #ff8080; font-size: 12px; min-height: 14px; }
+  .tab { padding: 8px 16px; background: #222; color: #aaa; border: 1px solid #333;
+         border-radius: 6px; cursor: pointer; font-size: 14px; }
+  .tab.on { background: #333; color: #fff; }
+  .month { scroll-margin-top: 70px; }   /* clear the sticky header when scrolled to */
+  .month h3 { margin: 24px 0 8px; font-size: 16px; color: #ccc; }
+  .month.now h3 { color: #4caf50; }
+  table.cal { border-collapse: collapse; width: 100%; max-width: 1100px; }
+  table.cal th { font-size: 12px; color: #888; font-weight: normal; padding: 4px; }
+  .day { border: 1px solid #333; vertical-align: top; height: 78px; width: 14.28%;
+         padding: 2px; background: #222; }
+  .day.other { background: #1a1a1a; border-color: #262626; }
+  .day.today { border: 2px solid #4caf50; }
+  .day .num { font-size: 11px; color: #777; display: block; }
+  .ev { display: inline-block; margin: 1px; line-height: 0; font-size: 11px; color: #ccc; }
+  .ev img { width: 46px; height: 46px; object-fit: cover; border-radius: 3px; }
+  .ev.past { opacity: 0.55; }
+  .ev.upcoming img { outline: 2px solid #2196f3; }
 </style>
 </head><body>
 <header>
   <h1>Publish next</h1>
+  <button id="tab-gallery" class="tab on" onclick="showTab('gallery')">Gallery</button>
+  <button id="tab-calendar" class="tab" onclick="showTab('calendar')">Calendar</button>
   <span id="queue-count">0 queued</span>
   <select id="ai-model" title="AI model for Generate with AI">
     <option value="__OPENROUTER_MODEL__">OpenRouter (free)</option>
@@ -69,7 +89,8 @@ PAGE_TEMPLATE = r"""<!DOCTYPE html>
   <button id="publish-btn" onclick="publishQueue()" disabled>Publish</button>
 </header>
 <main>
-  <div class="grid" id="gallery">__CARDS__</div>
+  <div id="gallery-tab" class="grid">__CARDS__</div>
+  <div id="calendar-tab" hidden>__CALENDAR__</div>
 </main>
 <script>
 const EXISTING_TS = __EXISTING_TS__;   // already-scheduled background instants (occupancy)
@@ -112,6 +133,22 @@ function applyPreset(sel, cardId) {      // preset change -> refill the picker
   const card = document.getElementById(cardId);
   card.querySelector(".f-schedule").value = tsToLocalInput(nextSlotForProfile(profileByName(sel.value)));
 }
+
+function showTab(name) {                 // two tabs, one page: no routing, no reload
+  for (const t of ["gallery", "calendar"]) {
+    document.getElementById(t + "-tab").hidden = (t !== name);
+    document.getElementById("tab-" + t).classList.toggle("on", t === name);
+  }
+  if (name === "calendar") document.querySelector(".month.now")?.scrollIntoView({block: "start"});
+}
+// A scheduled entry in the calendar links to its gallery card (#pending_N) —
+// reveal the gallery first, or the anchor would jump inside a hidden tab.
+document.getElementById("calendar-tab").addEventListener("click", e => {
+  const a = e.target.closest('a[href^="#"]');
+  if (!a) return;
+  showTab("gallery");
+  document.getElementById(a.getAttribute("href").slice(1))?.scrollIntoView({block: "center"});
+});
 
 function refreshCount() {
   const onPad = queue.filter(e => e.uuid).length; // entries persisted to publications.json
@@ -324,10 +361,11 @@ def card_form_html(cid, js_path, tg, save_label, preset_opts):
   </div>"""
 
 
-def render_page(*, thumb_dir, thumb_map, candidates, pending, existing_ts,
+def render_page(*, thumb_map, candidates, pending, existing_ts, timeline,
                 schedules, config, ai_model, openrouter_model) -> str:
-    """The whole gallery page as HTML. Pure: no handler, no socket, no I/O
-    beyond the paths it is handed — which is what makes it testable."""
+    """The whole page as HTML — gallery tab + calendar tab. Pure: no handler, no
+    socket, no I/O beyond the paths it is handed, which is what makes it testable.
+    `thumb_map` is {art path: cached thumbnail name} (see images.thumb_name)."""
     cards = []
     pending_js = []
     tg = tier_gallery_fields(config)
@@ -335,9 +373,7 @@ def render_page(*, thumb_dir, thumb_map, candidates, pending, existing_ts,
     tz = zone(config.get("schedule", {}))
     # Pre-queued cards: entries already in publications.json (state=unpublished).
     for idx, e in enumerate(pending):
-        thumb_path = thumb_map.get(e["path"], e["path"])
-        rel = os.path.relpath(thumb_path, thumb_dir)
-        safe_rel = html.escape(rel, quote=True)
+        safe_rel = html.escape(thumb_map.get(e["path"], ""), quote=True)
         safe_title = html.escape(e["title"], quote=True)
         view_href = html.escape("/original?path=" + urllib.parse.quote(e["path"]), quote=True)
         ts = e.get("scheduleTs")
@@ -361,11 +397,9 @@ def render_page(*, thumb_dir, thumb_map, candidates, pending, existing_ts,
                            "tier": e.get("tier"), "galleries": e.get("galleries", [])})
     # Add-able cards: new picks from picked/.
     for idx, orig_path in enumerate(candidates):
-        thumb_path = thumb_map.get(orig_path, orig_path)
-        rel = os.path.relpath(thumb_path, thumb_dir)
         filename = os.path.basename(orig_path)
         safe_name = html.escape(filename, quote=True)
-        safe_rel = html.escape(rel, quote=True)
+        safe_rel = html.escape(thumb_map.get(orig_path, ""), quote=True)
         js_path = html.escape(json.dumps(orig_path), quote=True)
         view_href = html.escape("/original?path=" + urllib.parse.quote(orig_path), quote=True)
         cid = f"card_{idx}"
@@ -388,6 +422,9 @@ def render_page(*, thumb_dir, thumb_map, candidates, pending, existing_ts,
     labels = ts_labels(tz, slot_ts + pending_ts)
     page = PAGE_TEMPLATE
     page = page.replace("__CARDS__", "\n".join(cards))
+    # anchors: uuid -> card id, how a scheduled entry links back to its card.
+    anchors = {e["uuid"]: e["cardId"] for e in pending_js}
+    page = page.replace("__CALENDAR__", render_calendar(timeline, tz=tz, anchors=anchors))
     page = page.replace("__PENDING__", json.dumps(pending_js))
     page = page.replace("__EXISTING_TS__", json.dumps(existing_ts))
     page = page.replace("__SCHEDULES__", json.dumps(schedules))
