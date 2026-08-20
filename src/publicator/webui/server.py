@@ -10,10 +10,17 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from publicator.config import validate_publications
 from publicator.deviantart import publish_batch
-from publicator.images import guess_mime
+from publicator.images import (
+    THUMB_CACHE,
+    ensure_thumb,
+    guess_mime,
+    index_by_basename,
+    thumb_name,
+)
 from publicator.llm_meta import DEFAULT_MODEL, generate_metadata
 from publicator.scheduling import existing_ts as compute_existing_ts, schedule_data, zone
 from publicator.store import apply_update, atomic_write_json, write_publications
+from publicator.webui.calendar_view import timeline
 from publicator.webui.page import render_page
 
 log = logging.getLogger("publicator.gallery")
@@ -25,10 +32,12 @@ log = logging.getLogger("publicator.gallery")
 
 
 class GalleryHandler(BaseHTTPRequestHandler):
-    thumb_dir = ""
-    thumb_map: dict[str, str] = {}
+    cache_dir = ""                       # <data-dir>/.thumbs, shared by both tabs
+    thumb_map: dict[str, str] = {}       # art path -> cache name (gallery cards)
+    thumb_src: dict[str, str] = {}       # cache name -> art path (what /thumbs may serve)
     candidate_paths: list[str] = []      # new picks from picked/, add-able
     pending: list[dict] = []             # already-queued entries from publications.json
+    timeline: list[dict] = []            # every DA apparition, for the calendar tab
     existing_ts: list[int] = []
     ai_model = DEFAULT_MODEL
     openrouter_model = ""
@@ -39,9 +48,9 @@ class GalleryHandler(BaseHTTPRequestHandler):
 
     def _build_page(self) -> str:
         return render_page(
-            thumb_dir=self.thumb_dir, thumb_map=self.thumb_map,
-            candidates=self.candidate_paths, pending=self.pending,
-            existing_ts=self.existing_ts, schedules=self.schedules,
+            thumb_map=self.thumb_map, candidates=self.candidate_paths,
+            pending=self.pending, existing_ts=self.existing_ts,
+            timeline=self.timeline, schedules=self.schedules,
             config=self.config, ai_model=self.ai_model,
             openrouter_model=self.openrouter_model)
 
@@ -76,11 +85,15 @@ class GalleryHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(page)
         elif self.path.startswith("/thumbs/"):
-            rel_path = self.path[len("/thumbs/"):]
-            full_path = os.path.normpath(os.path.join(self.thumb_dir, rel_path))
-            if full_path.startswith(os.path.normpath(self.thumb_dir)):
-                self._send_file(full_path)
-            else:
+            # Allow-list = the cache names this page rendered, so no path can be
+            # traversed in. Thumbnails are built on the first request that wants
+            # one and then live in the data dir, not per run in /tmp.
+            name = self.path[len("/thumbs/"):]
+            src = self.thumb_src.get(name)
+            try:
+                self._send_file(ensure_thumb(src, self.cache_dir, name) if src else "")
+            except OSError as e:
+                log.debug("thumbnail %s: %s", name, e)
                 self.send_response(404); self.end_headers()
         elif self.path.startswith("/original?"):
             # Full-res original for a card's thumbnail, opened in a new tab.
@@ -106,7 +119,10 @@ class GalleryHandler(BaseHTTPRequestHandler):
                     self._send(200, {"ok": False, "error": str(e)}); return
                 # ponytail: gallery renders once; concurrent refresh vs. delete
                 # would race this dict, but in practice the tab is opened once.
-                self.__class__.thumb_map.pop(path, None)
+                # The cached thumbnail is left behind — it is content-addressed,
+                # so it costs ~20KB and is reused if the art ever comes back.
+                name = self.__class__.thumb_map.pop(path, "")
+                self.__class__.thumb_src.pop(name, None)
                 self._send(200, {"ok": True})
 
             elif self.path == "/ai":
@@ -117,7 +133,10 @@ class GalleryHandler(BaseHTTPRequestHandler):
                     self._send(400, {"error": f"model not allowed: {model}"}); return
                 # Send the thumbnail to Claude, not the full-res original — same
                 # visual info for a fraction of the tokens/latency.
-                image_for_ai = self.thumb_map.get(path, path)
+                try:
+                    image_for_ai = ensure_thumb(path, self.cache_dir, self.thumb_map.get(path))
+                except OSError:
+                    image_for_ai = path      # unwritable cache: costlier, still works
                 log.debug("AI metadata: %s (model=%s, timeout=%ss)",
                           image_for_ai, model, self.ai_timeout)
                 try:
@@ -197,10 +216,31 @@ class GalleryHandler(BaseHTTPRequestHandler):
 # Main
 # ---------------------------------------------------------------------------
 
-def serve(thumb_dir: str, thumb_map: dict[str, str], candidate_paths: list[str],
-          pending: list[dict], args, config: dict) -> dict | None:
-    GalleryHandler.thumb_dir = thumb_dir
-    GalleryHandler.thumb_map = thumb_map
+def thumb_maps(data_dir: str, paths: list[str], rows: list[dict]) -> tuple[dict, dict]:
+    """({art path: cache name}, {cache name: art path}) for everything the page
+    can show, and each calendar row stamped with its cache name (empty when its
+    art has left the disk). Naming happens here, where the files are: gallery art
+    is hashed, the back-catalogue reuses the sha512 publications.json stores, and
+    one walk of the data dir resolves basenames to paths."""
+    thumb_map = {p: thumb_name(p) for p in paths}
+    thumb_src = {name: p for p, name in thumb_map.items()}
+    index = index_by_basename(data_dir)
+    for r in rows:
+        src = index.get(r["basename"])
+        # thumb_name() off `src`, not the basename: the oldest entries have no
+        # stored sha at all, and then it hashes the file it just found.
+        r["thumb"] = thumb_name(src, r["sha"]) if src else ""
+        if src:
+            thumb_src[r["thumb"]] = src
+    return thumb_map, thumb_src
+
+
+def serve(data_dir: str, candidate_paths: list[str], pending: list[dict],
+          args, config: dict) -> dict | None:
+    GalleryHandler.timeline = timeline(args.json)
+    GalleryHandler.thumb_map, GalleryHandler.thumb_src = thumb_maps(
+        data_dir, candidate_paths + [e["path"] for e in pending], GalleryHandler.timeline)
+    GalleryHandler.cache_dir = os.path.join(data_dir, THUMB_CACHE)
     GalleryHandler.candidate_paths = candidate_paths
     GalleryHandler.pending = pending
     GalleryHandler.existing_ts = compute_existing_ts(args.json)

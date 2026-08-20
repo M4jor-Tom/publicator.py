@@ -10,6 +10,7 @@ import subprocess
 import sys
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tiff", ".mp4"}
+THUMB_CACHE = ".thumbs"     # under the data dir: one thumbnail cache for the whole UI
 
 
 def guess_mime(path: str) -> str:
@@ -63,18 +64,38 @@ def find_candidates(directories: list[str], json_path: str, limit: int) -> list[
     return candidates
 
 
-def generate_thumbnails(image_paths: list[str], thumb_dir: str) -> dict[str, str]:
-    os.makedirs(thumb_dir, exist_ok=True)
-    path_to_thumb = {}
-    for i, path in enumerate(image_paths):
-        ext = os.path.splitext(path)[1].lower()
-        thumb_path = os.path.join(thumb_dir, f"thumb_{i:04d}{ext}")
+def thumb_name(path: str, sha: str | None = None) -> str:
+    """Cache filename for this art's thumbnail: content-addressed, so the same
+    image keeps one thumbnail across runs and publications.json's stored sha512
+    saves re-hashing. The extension is kept so the served mime type stays right."""
+    return (sha or compute_sha512(path))[:32] + os.path.splitext(path)[1].lower()
+
+
+def index_by_basename(root: str) -> dict[str, str]:
+    """{basename: path} for everything under the data dir — one walk, so the
+    published back-catalogue resolves to files without a search per entry.
+    Hidden dirs are skipped: the thumbnail cache and the browser profiles."""
+    index = {}
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        for f in filenames:
+            index.setdefault(f, os.path.join(dirpath, f))
+    return index
+
+
+def ensure_thumb(path: str, cache_dir: str, name: str | None = None) -> str:
+    """Path to this art's cached thumbnail, generated on a miss. One cache for
+    the whole UI (gallery cards + calendar), living in the data dir — thumbnails
+    used to be built per run into /tmp and thrown away. `name` short-circuits the
+    hashing when the caller already knows the cache name."""
+    thumb = os.path.join(cache_dir, name or thumb_name(path))
+    if not os.path.exists(thumb):
+        os.makedirs(cache_dir, exist_ok=True)
         try:
             subprocess.run(
-                ["convert", path, "-resize", "300x300>", thumb_path],
+                ["convert", path, "-resize", "300x300>", thumb],
                 capture_output=True, check=True,
             )
         except (subprocess.CalledProcessError, FileNotFoundError):
-            shutil.copy2(path, thumb_path)
-        path_to_thumb[path] = thumb_path
-    return path_to_thumb
+            shutil.copy2(path, thumb)
+    return thumb

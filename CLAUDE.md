@@ -49,8 +49,9 @@ nix run <this>#check-steps    # cheap CI drift guard (no browser/data deps)
 
 **Layout.** `src/publicator/` is a package: `config.py`, `entries.py`,
 `images.py`, `scheduling.py`, `store.py`, `deviantart.py`, `llm_meta.py` hold
-the logic; `webui/{page,server}.py` is the gallery (a pure `render_page` plus
-the `ThreadingHTTPServer` that calls it); `apps/{publish_next,da_publish,
+the logic; `webui/{page,server,calendar_view}.py` is the UI (a pure `render_page`
+plus the `ThreadingHTTPServer` that calls it, and the calendar tab's own pure
+renderer); `apps/{publish_next,da_publish,
 validate,echo_first,pw_daemon}.py` are the thin CLI entry points the flake's
 `nix run` apps invoke. Code assets (the JSON schema) resolve via `__file__`
 inside the package; the tags file, like all data + runtime state, still
@@ -68,6 +69,11 @@ resolves against CWD/`--data-dir`, per the code/data split above.
    title/description and a schedule, writes them to `publications.json`, then
    drives a Firefox persistent context (copied from the `#login` profile)
    through the DA submit flow.
+   The page has two tabs: the gallery (review/queue/publish) and a **read-only
+   calendar** (`webui/calendar_view.py`) of every DeviantArt apparition in
+   `publications.json`, past and scheduled — published entries link out to DA,
+   queued ones jump to their gallery card. All day/month math is server-side, in
+   the schedule timezone, for the same reason scheduling is (see below).
 3. `publicator/deviantart.py` is the Playwright submit logic for **one** entry
    (one-way import: `webui.server` / `apps.da_publish` → `deviantart`, no cycle).
    It flips the entry's apparition `state` `unpublished` → `published_or_scheduled`.
@@ -92,6 +98,13 @@ UTC and would otherwise mis-match local slots. Custom picker times are likewise
 resolved server-side on save (`store.resolve_ts`). **Stored timestamps are
 LOCAL wall-clock 20:00, never UTC 20:00** — don't reintroduce browser-clock math
 in the served page's JS.
+
+**Thumbnails.** One content-addressed cache, `<data-dir>/.thumbs/<sha512[:32]><ext>`
+(`images.thumb_name`/`ensure_thumb`), shared by both tabs and kept across runs —
+it is *not* per-run in `/tmp`. Thumbnails are generated on the first request that
+needs one, so a cold calendar doesn't stall startup; `/thumbs/<name>` only serves
+names the page actually rendered (that allow-list is what keeps paths from being
+traversed in). Add `.thumbs/` to the data dir's `.gitignore`.
 
 **State & data.** `publications.json` is the source of truth (an array of entries,
 each with `apparitions[]` carrying `state` + `apparitionTimestampIfDifferentThanSubmission`).
