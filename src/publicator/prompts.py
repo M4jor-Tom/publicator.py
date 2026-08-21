@@ -18,6 +18,7 @@ import hashlib
 import os
 import re
 import subprocess
+import threading
 from dataclasses import dataclass
 
 
@@ -116,6 +117,14 @@ class PromptArchive:
         self._versions: dict[str, PromptVersion] = {}
         self._by_basename: dict[str, list[str]] = {}
         self._by_path: dict[str, list[str]] = {}      # path -> [digest]
+        # GalleryHandler holds one PromptArchive as a class attribute and
+        # ThreadingHTTPServer serves each request on its own thread, so a
+        # reload racing a slow render (or a second browser tab) can otherwise
+        # observe _versions reassigned while _by_path is still mid-rebuild —
+        # a torn read, not just a stale one (see _refresh). A plain Lock is
+        # enough: _refresh only calls _git/_blobs/_history, never a public
+        # query method, so there is no re-entrancy.
+        self._lock = threading.Lock()
 
     # -- git ---------------------------------------------------------------
 
@@ -215,17 +224,20 @@ class PromptArchive:
     # -- queries -----------------------------------------------------------
 
     def versions(self) -> dict[str, PromptVersion]:
-        self._refresh()
-        return self._versions
+        with self._lock:
+            self._refresh()
+            return self._versions
 
     def paths_for(self, basename: str) -> tuple[str, ...]:
-        self._refresh()
-        return tuple(self._by_basename.get(basename, ()))
+        with self._lock:
+            self._refresh()
+            return tuple(self._by_basename.get(basename, ()))
 
     def versions_at(self, path: str) -> tuple[PromptVersion, ...]:
-        self._refresh()
-        return tuple(sorted((self._versions[d] for d in self._by_path.get(path, ())),
-                            key=lambda v: (-v.committed, v.version)))
+        with self._lock:
+            self._refresh()
+            return tuple(sorted((self._versions[d] for d in self._by_path.get(path, ())),
+                                key=lambda v: (-v.committed, v.version)))
 
     def resolve(self, identity: ImageIdentity, near: str = "") -> PromptMatch:
         """One of three answers, never a nullable string (ADR 0002). `near` is

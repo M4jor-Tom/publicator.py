@@ -1,6 +1,7 @@
 import hashlib
 import re
 import subprocess
+import threading
 
 from publicator.prompts import (
     Exact, ImageIdentity, Lineage, Nearest, PromptArchive, PromptVersion,
@@ -218,6 +219,26 @@ def test_resolve_path_returns_unknown_for_a_non_prompt_filename(tmp_path):
     assert isinstance(archive(repo).resolve_path("picked/tpl/clip.mp4"), Unknown)
 
 
+def test_resolve_path_ranks_nearest_by_the_images_own_directory(tmp_path):
+    """Regression for the `near=os.path.dirname(path)` line inside resolve_path:
+    same basename archived under two different directories. The correct
+    directory (matching the image's own) has near-zero similarity to the
+    filename itself, while the wrong one was picked to score *higher* against
+    the raw filename (lots of shared hex-like characters with the version/uuid)
+    than the right directory scores against that same filename — so this only
+    passes if resolve_path compares against os.path.dirname(path), not path
+    itself; passing the bare path would rank the wrong lineage first."""
+    repo, run = make_repo(tmp_path)
+    commit_file(repo, run, "abcdef_abcdef_abcdef/hot.json", "wrong\n")
+    commit_file(repo, run, "output_gallery_mirror/hot.json", "right\n")
+    image_path = (f"picked/hf/output_gallery_mirror/"
+                  f"hot.json_{'f' * 40}_{UUID}.webp")
+    got = archive(repo).resolve_path(image_path)
+    assert isinstance(got, Nearest)
+    assert len(got.candidates) == 2, "ranking must never discard a candidate"
+    assert got.candidates[0].path == "output_gallery_mirror/hot.json"
+
+
 def test_from_config_returns_none_without_a_prompts_section(tmp_path):
     assert from_config(str(tmp_path), {"prompts": None}) is None
 
@@ -232,3 +253,47 @@ def test_from_config_builds_an_archive_for_a_present_repo(tmp_path):
     commit_file(repo, run, "p/a", "x\n")
     cfg = {"prompts": {"repo": "hf", "pattern": ART, "version_hash": "sha1"}}
     assert isinstance(from_config(str(tmp_path), cfg), PromptArchive)
+
+
+def test_concurrent_queries_never_raise_or_tear(tmp_path):
+    """One PromptArchive sits on GalleryHandler as a class attribute and
+    ThreadingHTTPServer serves each request on its own thread — a reload during
+    a slow render, or a second browser tab, calls the same archive concurrently.
+    _refresh() reassigns _versions then rebuilds _by_path in a loop; without a
+    lock, versions_at()'s self._versions[d] can hit a digest from a _by_path
+    that hasn't caught up yet -> KeyError, an intermittent HTTP 500. Several
+    threads hammer queries while a writer keeps moving HEAD; nothing should
+    escape."""
+    repo, run = make_repo(tmp_path)
+    commit_file(repo, run, "p/hot.json", "seed\n")
+    a = archive(repo)
+    unarchived_path = f"pre/hot.json_{'0' * 40}_{UUID}.webp"
+
+    errors = []
+    stop = threading.Event()
+
+    def writer():
+        try:
+            for i in range(10):
+                commit_file(repo, run, "p/hot.json", f"v{i}\n")
+        finally:
+            stop.set()   # readers must not spin forever if a commit fails
+
+    def reader():
+        while not stop.is_set():
+            try:
+                a.versions()
+                a.paths_for("hot.json")
+                a.versions_at("p/hot.json")
+                a.resolve_path(unarchived_path)
+            except Exception as e:
+                errors.append(e)
+                return
+
+    threads = [threading.Thread(target=writer)]
+    threads += [threading.Thread(target=reader) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
