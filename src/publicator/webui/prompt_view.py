@@ -14,11 +14,11 @@ from datetime import datetime
 from publicator.prompts import Exact, Nearest, PromptMatch, rank_paths
 
 
-def _stamp(committed: int) -> str:
+def _stamp(committed: int, tz=None) -> str:
     """Blobs recovered from unreferenced objects have no commit to date them."""
     if not committed:
         return "unknown date"
-    return datetime.fromtimestamp(committed).strftime("%Y-%m-%d")
+    return datetime.fromtimestamp(committed, tz).strftime("%Y-%m-%d")
 
 
 def _body(text: str) -> str:
@@ -27,7 +27,7 @@ def _body(text: str) -> str:
     return f"<pre>{html.escape(text)}</pre>"
 
 
-def render_prompt(match: PromptMatch, near: str = "") -> str:
+def render_prompt(match: PromptMatch, near: str = "", tz=None) -> str:
     if isinstance(match, Exact):
         v = match.version
         paths = " · ".join(html.escape(p) for p in rank_paths(v.paths, near))
@@ -39,7 +39,7 @@ def render_prompt(match: PromptMatch, near: str = "") -> str:
         for lin in match.candidates:
             n = len(lin.versions)
             versions = "".join(
-                f'<details class="pv"><summary>{_stamp(v.committed)} · '
+                f'<details class="pv"><summary>{_stamp(v.committed, tz)} · '
                 f'<code>{html.escape(v.version[:7])}</code></summary>'
                 f"{_body(v.text)}</details>" for v in lin.versions)
             items.append(
