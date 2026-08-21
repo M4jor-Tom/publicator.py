@@ -18,10 +18,12 @@ from publicator.images import (
     thumb_name,
 )
 from publicator.llm_meta import DEFAULT_MODEL, generate_metadata
+from publicator.prompts import from_config as prompt_archive_from_config
 from publicator.scheduling import existing_ts as compute_existing_ts, schedule_data, zone
 from publicator.store import apply_update, atomic_write_json, write_publications
 from publicator.webui.calendar_view import timeline
 from publicator.webui.page import render_page
+from publicator.webui.prompt_view import render_prompt
 
 log = logging.getLogger("publicator.gallery")
 
@@ -45,6 +47,17 @@ class GalleryHandler(BaseHTTPRequestHandler):
     json_path = "publications.json"
     config: dict = {}
     schedules: list = []
+    archive = None                       # PromptArchive | None; None = feature off
+
+    def _prompt_html(self) -> dict[str, str]:
+        """{art path: prompt block} for everything the page can show. Built here
+        rather than in page.py so the page stays unaware of prompts."""
+        if self.archive is None:
+            return {}
+        tz = zone(self.config.get("schedule", {}))
+        return {p: block for p in self.thumb_map
+                if (block := render_prompt(self.archive.resolve_path(p),
+                                           near=os.path.dirname(p), tz=tz))}
 
     def _build_page(self) -> str:
         return render_page(
@@ -52,7 +65,8 @@ class GalleryHandler(BaseHTTPRequestHandler):
             pending=self.pending, existing_ts=self.existing_ts,
             timeline=self.timeline, schedules=self.schedules,
             config=self.config, ai_model=self.ai_model,
-            openrouter_model=self.openrouter_model)
+            openrouter_model=self.openrouter_model,
+            prompt_html=self._prompt_html())
 
     def _json_body(self) -> dict:
         length = int(self.headers.get("Content-length", 0))
@@ -250,6 +264,7 @@ def serve(data_dir: str, candidate_paths: list[str], pending: list[dict],
     GalleryHandler.json_path = args.json
     GalleryHandler.config = config
     GalleryHandler.schedules = schedule_data(config["schedule"])
+    GalleryHandler.archive = prompt_archive_from_config(data_dir, config)
 
     server = ThreadingHTTPServer(("127.0.0.1", args.port), GalleryHandler)
     server.publish_done = None
