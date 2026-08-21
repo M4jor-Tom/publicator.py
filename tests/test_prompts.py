@@ -4,7 +4,7 @@ import subprocess
 
 from publicator.prompts import (
     Exact, ImageIdentity, Lineage, Nearest, PromptArchive, PromptVersion,
-    Unknown, parse_identity, rank_paths,
+    Unknown, from_config, parse_identity, rank_paths,
 )
 
 ART = re.compile(
@@ -149,3 +149,86 @@ def test_index_refreshes_when_head_moves(tmp_path):
 
 def test_missing_repo_yields_an_empty_index(tmp_path):
     assert archive(tmp_path / "nope").versions() == {}
+
+
+def test_resolve_returns_exact_for_an_archived_version(tmp_path):
+    repo, run = make_repo(tmp_path)
+    digest = commit_file(repo, run, "p/hot.json", "the real prompt\n")
+    got = archive(repo).resolve(ImageIdentity(version=digest, lineage="hot.json"))
+    assert isinstance(got, Exact)
+    assert got.version.text == "the real prompt\n"
+
+
+def test_resolve_returns_exact_for_a_superseded_version(tmp_path):
+    """HEAD has drifted; the image's own version must still win. This is the
+    404-of-426 silently-wrong case from the audit, frozen into a test."""
+    repo, run = make_repo(tmp_path)
+    old = commit_file(repo, run, "p/hot.json", "version one\n")
+    commit_file(repo, run, "p/hot.json", "version two\n")
+    got = archive(repo).resolve(ImageIdentity(version=old, lineage="hot.json"))
+    assert isinstance(got, Exact)
+    assert got.version.text == "version one\n"
+
+
+def test_resolve_returns_nearest_when_the_version_was_never_archived(tmp_path):
+    repo, run = make_repo(tmp_path)
+    commit_file(repo, run, "p/hot.json", "some version\n")
+    got = archive(repo).resolve(ImageIdentity(version="f" * 40, lineage="hot.json"))
+    assert isinstance(got, Nearest)
+    assert [c.path for c in got.candidates] == ["p/hot.json"]
+    assert got.candidates[0].versions[0].text == "some version\n"
+
+
+def test_nearest_keeps_every_ambiguous_lineage_ranked_not_filtered(tmp_path):
+    repo, run = make_repo(tmp_path)
+    commit_file(repo, run, "Heartsync__adult/mommy_tentacles", "adult\n")
+    commit_file(repo, run, "Heartsync__NSFW_Uncensored_image/mommy_tentacles", "image\n")
+    got = archive(repo).resolve(
+        ImageIdentity(version="f" * 40, lineage="mommy_tentacles"),
+        near="picked/huggingface/Heartsync__NSFW-Uncensored-image")
+    assert isinstance(got, Nearest)
+    assert len(got.candidates) == 2, "ranking must never discard a candidate"
+    assert got.candidates[0].path == "Heartsync__NSFW_Uncensored_image/mommy_tentacles"
+
+
+def test_resolve_returns_unknown_when_the_grammar_has_no_lineage(tmp_path):
+    repo, run = make_repo(tmp_path)
+    commit_file(repo, run, "p/a", "x\n")
+    got = archive(repo, NOLIN, "sha256").resolve(
+        ImageIdentity(version="f" * 64, lineage=None))
+    assert isinstance(got, Unknown)
+
+
+def test_resolve_returns_unknown_for_an_unrecognised_lineage(tmp_path):
+    repo, run = make_repo(tmp_path)
+    commit_file(repo, run, "p/a", "x\n")
+    got = archive(repo).resolve(ImageIdentity(version="f" * 40, lineage="never_seen"))
+    assert isinstance(got, Unknown)
+
+
+def test_resolve_path_parses_then_resolves(tmp_path):
+    repo, run = make_repo(tmp_path)
+    digest = commit_file(repo, run, "p/hot.json", "text\n")
+    got = archive(repo).resolve_path(f"picked/hug/hot.json_{digest}_{UUID}.webp")
+    assert isinstance(got, Exact)
+
+
+def test_resolve_path_returns_unknown_for_a_non_prompt_filename(tmp_path):
+    repo, _ = make_repo(tmp_path)
+    assert isinstance(archive(repo).resolve_path("picked/tpl/clip.mp4"), Unknown)
+
+
+def test_from_config_returns_none_without_a_prompts_section(tmp_path):
+    assert from_config(str(tmp_path), {"prompts": None}) is None
+
+
+def test_from_config_returns_none_when_the_repo_is_absent(tmp_path):
+    cfg = {"prompts": {"repo": "nope", "pattern": ART, "version_hash": "sha1"}}
+    assert from_config(str(tmp_path), cfg) is None
+
+
+def test_from_config_builds_an_archive_for_a_present_repo(tmp_path):
+    repo, run = make_repo(tmp_path, "hf")
+    commit_file(repo, run, "p/a", "x\n")
+    cfg = {"prompts": {"repo": "hf", "pattern": ART, "version_hash": "sha1"}}
+    assert isinstance(from_config(str(tmp_path), cfg), PromptArchive)
