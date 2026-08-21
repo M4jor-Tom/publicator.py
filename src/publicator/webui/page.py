@@ -73,6 +73,18 @@ PAGE_TEMPLATE = r"""<!DOCTYPE html>
   .ev img { width: 46px; height: 46px; object-fit: cover; border-radius: 3px; }
   .ev.past { opacity: 0.55; }
   .ev.upcoming img { outline: 2px solid #2196f3; }
+  .prompt { margin: .4rem 0; font-size: .85rem; text-align: left; }
+  .prompt > summary { cursor: pointer; padding: .2rem .4rem; border-radius: 3px; }
+  .prompt.exact > summary { background: #eef4ee; color: #2c4a2c; }
+  .prompt.nearest > summary { background: #fff3cd; color: #7a5b00; font-weight: 600; }
+  .prompt.nearest { border-left: 3px solid #e0a800; padding-left: .4rem; }
+  .prompt .warn { color: #7a5b00; margin: .3rem 0; }
+  .prompt pre { white-space: pre-wrap; word-break: break-word; background: #f7f7f7;
+                color: #222; padding: .4rem; border-radius: 3px; max-height: 20rem;
+                overflow: auto; }
+  .prompt ul { list-style: none; padding-left: 0; }
+  .prompt .lin { font-family: monospace; }
+  .prompt .n { color: #666; font-size: .8rem; }
 </style>
 </head><body>
 <header>
@@ -362,13 +374,17 @@ def card_form_html(cid, js_path, tg, save_label, preset_opts):
 
 
 def render_page(*, thumb_map, candidates, pending, existing_ts, timeline,
-                schedules, config, ai_model, openrouter_model) -> str:
+                schedules, config, ai_model, openrouter_model,
+                prompt_html=None) -> str:
     """The whole page as HTML — gallery tab + calendar tab. Pure: no handler, no
     socket, no I/O beyond the paths it is handed, which is what makes it testable.
-    `thumb_map` is {art path: cached thumbnail name} (see images.thumb_name)."""
+    `thumb_map` is {art path: cached thumbnail name} (see images.thumb_name).
+    `prompt_html` is {art path: prompt HTML block} — pre-rendered by the server
+    so this module stays unaware of prompts."""
     cards = []
     pending_js = []
     tg = tier_gallery_fields(config)
+    prompt_html = prompt_html or {}
     preset_opts = preset_options(schedules)
     tz = zone(config.get("schedule", {}))
     # Pre-queued cards: entries already in publications.json (state=unpublished).
@@ -389,6 +405,7 @@ def render_page(*, thumb_map, candidates, pending, existing_ts, timeline,
     <a class="btn-view" href="{view_href}" target="_blank" rel="noopener">View</a>
     <button class="btn-add" onclick="openForm('{cid}')">Edit</button>
   </div>
+{prompt_html.get(e["path"], "")}
 {card_form_html(cid, js_pathp, tg, "Save changes", preset_opts)}
 </div>""")
         pending_js.append({"cardId": cid, "uuid": e["uuid"], "path": e["path"],
@@ -411,6 +428,7 @@ def render_page(*, thumb_map, candidates, pending, existing_ts, timeline,
     <button class="btn-add" onclick="openForm('{cid}')">Add</button>
     <button class="btn-del" onclick="delCard('{cid}', {js_path})">Delete</button>
   </div>
+{prompt_html.get(orig_path, "")}
 {card_form_html(cid, js_path, tg, "Save to queue", preset_opts)}
 </div>""")
     # Labels for every instant that can land in a datetime-local input: slot

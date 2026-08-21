@@ -79,3 +79,22 @@ def test_calendar_links_a_queued_entry_to_its_gallery_card():
              "basename": "a.png", "sha": "cd" * 64}]
     page = _render(pending=PENDING, timeline=rows, thumb_map={"/t/a.png": "beef.png"})
     assert 'href="#pending_0"' in page      # the card id render_page gave that entry
+
+
+def test_render_page_injects_the_prompt_block_into_a_candidate_card():
+    from publicator.webui.page import render_page
+    page = render_page(
+        thumb_map={"picked/a.webp": "aa.webp"}, candidates=["picked/a.webp"],
+        pending=[], existing_ts=[], timeline=[], schedules=[],
+        config={}, ai_model="m", openrouter_model="",
+        prompt_html={"picked/a.webp": '<details class="prompt exact">X</details>'})
+    assert '<details class="prompt exact">X</details>' in page
+
+
+def test_render_page_without_prompt_html_is_unchanged():
+    from publicator.webui.page import render_page
+    kwargs = dict(
+        thumb_map={"picked/a.webp": "aa.webp"}, candidates=["picked/a.webp"],
+        pending=[], existing_ts=[], timeline=[], schedules=[],
+        config={}, ai_model="m", openrouter_model="")
+    assert render_page(**kwargs) == render_page(**kwargs, prompt_html={})
