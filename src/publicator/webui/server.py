@@ -12,12 +12,16 @@ from publicator.config import validate_publications
 from publicator.deviantart import publish_batch
 from publicator.images import (
     THUMB_CACHE,
+    collect_images,
+    compute_sha512,
     ensure_thumb,
     guess_mime,
     index_by_basename,
+    load_publicated_hashes,
     thumb_name,
 )
 from publicator.llm_meta import DEFAULT_MODEL, generate_metadata
+from publicator.prompts import Exact, Nearest
 from publicator.prompts import from_config as prompt_archive_from_config
 from publicator.scheduling import existing_ts as compute_existing_ts, schedule_data, zone
 from publicator.store import apply_update, atomic_write_json, write_publications
@@ -26,6 +30,11 @@ from publicator.webui.page import render_page
 from publicator.webui.prompt_view import render_prompt
 
 log = logging.getLogger("publicator.gallery")
+
+# ponytail: a filtered view walks every publicable image; this caps how many
+# survivors get sha512-hashed for the already-published check. Raise it if a
+# lineage ever legitimately has more art than this.
+SEARCH_LIMIT = 200
 
 
 # ---------------------------------------------------------------------------
@@ -48,25 +57,81 @@ class GalleryHandler(BaseHTTPRequestHandler):
     config: dict = {}
     schedules: list = []
     archive = None                       # PromptArchive | None; None = feature off
+    publicable_dirs: list[str] = []      # walked in full when a filter is active
 
-    def _prompt_html(self) -> dict[str, str]:
-        """{art path: prompt block} for everything the page can show. Built here
-        rather than in page.py so the page stays unaware of prompts."""
+    def _prompt_html(self, paths) -> dict[str, str]:
+        """{art path: prompt block} for the cards this page will show."""
         if self.archive is None:
             return {}
         tz = zone(self.config.get("schedule", {}))
-        return {p: block for p in self.thumb_map
+        wanted = list(paths) + [e["path"] for e in self.pending]
+        return {p: block for p in wanted
                 if (block := render_prompt(self.archive.resolve_path(p),
                                            near=os.path.dirname(p), tz=tz))}
 
-    def _build_page(self) -> str:
+    def search(self, needle: str, lineage: str) -> tuple[list[str], list[str], int]:
+        """(exact hits, lineage-hint hits, count skipped as unarchived).
+
+        `find_candidates` shuffles and caps, so filtering its sample would
+        return near-nothing — a filtered view walks the publicable dirs itself.
+        Order matters: resolve and filter first (regex + dict lookups, cheap),
+        cap, and only then sha512-hash the survivors for the already-published
+        check, which is the expensive step."""
+        if self.archive is None:
+            return [], [], 0
+        exact, maybe, skipped = [], [], 0
+        for d in self.publicable_dirs:
+            for path in collect_images(d):
+                match = self.archive.resolve_path(path)
+                if isinstance(match, Nearest):
+                    skipped += 1
+                    if lineage and any(c.path == lineage for c in match.candidates):
+                        maybe.append(path)
+                    continue
+                if not isinstance(match, Exact):
+                    continue
+                if needle and needle.lower() not in match.version.text.lower():
+                    continue
+                if lineage and lineage not in match.version.paths:
+                    continue
+                exact.append(path)
+        published = load_publicated_hashes(self.json_path)
+
+        def unpublished(paths):
+            out = []
+            for p in paths[:SEARCH_LIMIT]:
+                try:
+                    if compute_sha512(p) not in published:
+                        out.append(p)
+                except OSError as e:
+                    log.debug("hashing %s: %s", p, e)
+            return out
+
+        return unpublished(exact), unpublished(maybe), skipped
+
+    def _register_thumbs(self, paths: list[str]) -> None:
+        """Extend the /thumbs allow-list with search results. The allow-list is
+        'names this page rendered', so it must grow when a filtered page
+        renders art the initial sample never included."""
+        for p in paths:
+            if p not in self.__class__.thumb_map:
+                name = thumb_name(p)
+                self.__class__.thumb_map[p] = name
+                self.__class__.thumb_src[name] = p
+
+    def _build_page(self, needle: str = "", lineage: str = "") -> str:
+        candidates, skipped = self.candidate_paths, 0
+        if needle or lineage:
+            candidates, _maybe, skipped = self.search(needle, lineage)
+            self._register_thumbs(candidates)
         return render_page(
-            thumb_map=self.thumb_map, candidates=self.candidate_paths,
+            thumb_map=self.thumb_map, candidates=candidates,
             pending=self.pending, existing_ts=self.existing_ts,
             timeline=self.timeline, schedules=self.schedules,
             config=self.config, ai_model=self.ai_model,
             openrouter_model=self.openrouter_model,
-            prompt_html=self._prompt_html())
+            prompt_html=self._prompt_html(candidates),
+            query=needle, skipped=skipped)
 
     def _json_body(self) -> dict:
         length = int(self.headers.get("Content-length", 0))
@@ -91,8 +156,12 @@ class GalleryHandler(BaseHTTPRequestHandler):
             self.send_response(404); self.end_headers()
 
     def do_GET(self):
-        if self.path in ("/", "/index.html"):
-            page = self._build_page().encode("utf-8")
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path in ("/", "/index.html"):
+            q = urllib.parse.parse_qs(parsed.query)
+            page = self._build_page(
+                needle=q.get("prompt", [""])[0],
+                lineage=q.get("lineage", [""])[0]).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-type", "text/html; charset=utf-8")
             self.send_header("Content-length", str(len(page)))
@@ -250,7 +319,7 @@ def thumb_maps(data_dir: str, paths: list[str], rows: list[dict]) -> tuple[dict,
 
 
 def serve(data_dir: str, candidate_paths: list[str], pending: list[dict],
-          args, config: dict) -> dict | None:
+          args, config: dict, publicable_dirs: list[str] | None = None) -> dict | None:
     GalleryHandler.timeline = timeline(args.json)
     GalleryHandler.thumb_map, GalleryHandler.thumb_src = thumb_maps(
         data_dir, candidate_paths + [e["path"] for e in pending], GalleryHandler.timeline)
@@ -265,6 +334,7 @@ def serve(data_dir: str, candidate_paths: list[str], pending: list[dict],
     GalleryHandler.config = config
     GalleryHandler.schedules = schedule_data(config["schedule"])
     GalleryHandler.archive = prompt_archive_from_config(data_dir, config)
+    GalleryHandler.publicable_dirs = publicable_dirs or []
 
     server = ThreadingHTTPServer(("127.0.0.1", args.port), GalleryHandler)
     server.publish_done = None

@@ -98,3 +98,14 @@ def test_render_page_without_prompt_html_is_unchanged():
         pending=[], existing_ts=[], timeline=[], schedules=[],
         config={}, ai_model="m", openrouter_model="")
     assert render_page(**kwargs) == render_page(**kwargs, prompt_html={})
+
+
+def test_render_page_renders_the_search_box_and_skip_banner():
+    from publicator.webui.page import render_page
+    page = render_page(
+        thumb_map={}, candidates=[], pending=[], existing_ts=[], timeline=[],
+        schedules=[], config={}, ai_model="m", openrouter_model="",
+        query="tentacles", skipped=3)
+    assert "__PROMPTSEARCH__" not in page, "placeholder left in PAGE_TEMPLATE"
+    assert 'name="prompt"' in page and 'value="tentacles"' in page
+    assert "3 candidates not searched" in page
