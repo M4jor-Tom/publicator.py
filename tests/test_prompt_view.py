@@ -1,3 +1,5 @@
+from zoneinfo import ZoneInfo
+
 from publicator.prompts import Exact, Lineage, Nearest, PromptVersion, Unknown
 from publicator.webui.prompt_view import render_prompt
 
@@ -48,3 +50,20 @@ def test_undated_version_does_not_crash():
     out = render_prompt(Nearest(candidates=(
         Lineage(path="p/a", versions=(version(committed=0),)),)))
     assert "unknown date" in out
+
+
+def test_stamp_renders_in_the_given_timezone():
+    """1700000000 is 2023-11-14T22:13:20Z, so a UTC+13 zone lands on the NEXT
+    day — a date that silently ignored tz would fail this."""
+    v = version(committed=1_700_000_000)
+    assert "2023-11-14" in render_prompt(Nearest(candidates=(
+        Lineage(path="p/a", versions=(v,)),)), tz=ZoneInfo("UTC"))
+    assert "2023-11-15" in render_prompt(Nearest(candidates=(
+        Lineage(path="p/a", versions=(v,)),)), tz=ZoneInfo("Pacific/Auckland"))
+
+
+def test_nearest_escapes_html_in_candidate_path_and_text():
+    out = render_prompt(Nearest(candidates=(
+        Lineage(path="p/<script>", versions=(version(text="<script>alert(1)</script>"),)),)))
+    assert "<script>" not in out
+    assert "&lt;script&gt;" in out
