@@ -19,7 +19,14 @@ import os
 import re
 import subprocess
 import threading
+import time
 from dataclasses import dataclass
+
+# ponytail: one `git rev-parse HEAD` per query call made a bulk scan spawn
+# thousands of subprocesses. Probe at most every HEAD_PROBE_TTL seconds; a
+# prompt committed mid-render shows up on the next reload. Drop the TTL if the
+# archive ever needs to be read-your-writes.
+HEAD_PROBE_TTL = 2.0
 
 
 @dataclass(frozen=True)
@@ -114,6 +121,7 @@ class PromptArchive:
         self.pattern = pattern
         self.version_hash = version_hash
         self._head: str | None = None
+        self._probed: float | None = None
         self._versions: dict[str, PromptVersion] = {}
         self._by_basename: dict[str, list[str]] = {}
         self._by_path: dict[str, list[str]] = {}      # path -> [digest]
@@ -206,7 +214,11 @@ class PromptArchive:
         return paths, times
 
     def _refresh(self) -> None:
+        now = time.monotonic()
+        if self._probed is not None and now - self._probed < HEAD_PROBE_TTL:
+            return
         head = self._git("rev-parse", "HEAD").decode().strip()
+        self._probed = now
         if head == self._head and self._versions:
             return
         by_oid, content = self._blobs()

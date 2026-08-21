@@ -145,7 +145,22 @@ def test_index_refreshes_when_head_moves(tmp_path):
     a = archive(repo)
     assert len(a.versions()) == 1
     second = commit_file(repo, run, "p/a", "two\n")
+    # ponytail: HEAD_PROBE_TTL throttles the `git rev-parse HEAD` probe; reset
+    # it here to deliberately defeat the cache and prove the index still
+    # refreshes once it does probe, rather than weakening the assertion below.
+    a._probed = None
     assert second in a.versions()
+
+
+def test_index_does_not_refresh_within_the_head_probe_ttl(tmp_path):
+    repo, run = make_repo(tmp_path)
+    commit_file(repo, run, "p/a", "one\n")
+    a = archive(repo)
+    assert len(a.versions()) == 1
+    second = commit_file(repo, run, "p/a", "two\n")
+    assert second not in a.versions(), "probed HEAD again before the TTL elapsed"
+    a._probed = None
+    assert second in a.versions(), "resetting the probe lets the next call see it"
 
 
 def test_missing_repo_yields_an_empty_index(tmp_path):
