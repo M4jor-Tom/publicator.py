@@ -14,8 +14,10 @@ Three things keep this honest, and all three are load-bearing (ADRs 0001-0004):
 """
 
 import difflib
+import hashlib
 import os
 import re
+import subprocess
 from dataclasses import dataclass
 
 
@@ -97,3 +99,130 @@ def rank_paths(paths, near: str) -> list[str]:
     """Order candidate prompt paths by how well their directory matches the
     image's. ORDERS ONLY — every input path comes back out."""
     return sorted(paths, key=lambda p: (-_similarity(near, p), p))
+
+
+class PromptArchive:
+    """The prompt repository, indexed by content digest.
+
+    Git history IS the archive (ADR 0001), so there is no second store to drift.
+    The index is rebuilt when HEAD moves — a sound cache key precisely because
+    every archive write is a commit."""
+
+    def __init__(self, repo: str, pattern: re.Pattern, version_hash: str):
+        self.repo = repo
+        self.pattern = pattern
+        self.version_hash = version_hash
+        self._head: str | None = None
+        self._versions: dict[str, PromptVersion] = {}
+        self._by_basename: dict[str, list[str]] = {}
+        self._by_path: dict[str, list[str]] = {}      # path -> [digest]
+
+    # -- git ---------------------------------------------------------------
+
+    def _git(self, *args: str) -> bytes:
+        """stdout, or b"" for any git failure — a missing or broken prompt repo
+        degrades the feature, it never breaks the gallery."""
+        try:
+            p = subprocess.run(["git", "-C", self.repo, *args],
+                               capture_output=True, check=False)
+        except (OSError, ValueError):
+            return b""
+        return p.stdout if p.returncode == 0 else b""
+
+    def _blobs(self) -> tuple[dict[str, str], dict[str, bytes]]:
+        """({blob oid: digest}, {digest: content}) for every object in the repo.
+
+        --batch-all-objects reaches unreachable blobs too, so a prompt that was
+        staged but never committed is still recovered for free. The stream is
+        `<oid> <type> <size>\\n<payload>\\n`, so it must be walked by length -
+        payloads are arbitrary bytes and may contain newlines."""
+        out = self._git("cat-file", "--batch-all-objects", "--batch")
+        by_oid: dict[str, str] = {}
+        content: dict[str, bytes] = {}
+        i = 0
+        while i < len(out):
+            j = out.find(b"\n", i)
+            if j < 0:
+                break
+            header = out[i:j].split(b" ")
+            if len(header) != 3:
+                break
+            oid, typ, size = header[0], header[1], int(header[2])
+            body = out[j + 1:j + 1 + size]
+            if typ == b"blob":
+                digest = hashlib.new(self.version_hash, body).hexdigest()
+                by_oid[oid.decode()] = digest
+                content[digest] = body
+            i = j + 1 + size + 1          # payload plus its trailing newline
+        return by_oid, content
+
+    def _history(self, by_oid: dict[str, str]):
+        """(digest -> {path}, digest -> earliest commit time) from one log pass.
+
+        Raw lines look like `:100644 100644 <old> <new> M\\tpath`.
+
+        --no-renames is REQUIRED, not cosmetic. diff.renames defaults to true
+        since git 2.9, and a detected rename emits `R100\\tp/a\\tp/b` — TWO
+        tab-separated paths, which a single partition() mangles into the bogus
+        path "p/a\\tp/b". Forcing delete+add gives one path per line and is
+        what we want anyway: both the old and the new path stay discoverable,
+        so a basename that no longer exists at HEAD still resolves."""
+        text = self._git("-c", "core.quotePath=false", "log", "--all", "--raw",
+                         "--no-abbrev", "--no-renames",
+                         "--format=%ct").decode("utf-8", "replace")
+        paths: dict[str, set[str]] = {}
+        times: dict[str, int] = {}
+        ct = 0
+        for line in text.splitlines():
+            if not line:
+                continue
+            if not line.startswith(":"):
+                ct = int(line) if line.isdigit() else ct
+                continue
+            meta, _, path = line.partition("\t")
+            fields = meta.split()
+            if len(fields) < 4 or not path:
+                continue
+            digest = by_oid.get(fields[3])
+            if digest is None:                        # deletion: new oid is all zeros
+                continue
+            paths.setdefault(digest, set()).add(path)
+            times[digest] = min(times.get(digest, ct), ct)
+        return paths, times
+
+    def _refresh(self) -> None:
+        head = self._git("rev-parse", "HEAD").decode().strip()
+        if head == self._head and self._versions:
+            return
+        by_oid, content = self._blobs()
+        paths, times = self._history(by_oid)
+        self._versions = {
+            digest: PromptVersion(
+                version=digest,
+                text=body.decode("utf-8", "replace"),
+                paths=tuple(sorted(paths.get(digest, ()))),
+                committed=times.get(digest, 0))
+            for digest, body in content.items()}
+        self._by_basename, self._by_path = {}, {}
+        for digest, v in self._versions.items():
+            for p in v.paths:
+                self._by_path.setdefault(p, []).append(digest)
+                base = os.path.basename(p)
+                if p not in self._by_basename.setdefault(base, []):
+                    self._by_basename[base].append(p)
+        self._head = head
+
+    # -- queries -----------------------------------------------------------
+
+    def versions(self) -> dict[str, PromptVersion]:
+        self._refresh()
+        return self._versions
+
+    def paths_for(self, basename: str) -> tuple[str, ...]:
+        self._refresh()
+        return tuple(self._by_basename.get(basename, ()))
+
+    def versions_at(self, path: str) -> tuple[PromptVersion, ...]:
+        self._refresh()
+        return tuple(sorted((self._versions[d] for d in self._by_path.get(path, ())),
+                            key=lambda v: (-v.committed, v.version)))

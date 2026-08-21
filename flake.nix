@@ -116,7 +116,7 @@
         login = login;
       };
       devShells.${system}.default = pkgs.mkShell {
-        packages = [ devPython pkgs.imagemagick pkgs.playwright-driver.browsers claude ];
+        packages = [ devPython pkgs.git pkgs.imagemagick pkgs.playwright-driver.browsers claude ];
         shellHook = ''
           export PLAYWRIGHT_BROWSERS_PATH=${pkgs.playwright-driver.browsers}
           export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=true
