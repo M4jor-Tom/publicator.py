@@ -114,42 +114,72 @@ lookup):
 - `[prompts]` absent entirely → feature off; every lookup returns `Unknown`;
   nothing raises
 
-## 4. Write side — the guarantee (repo `huggingface_prompts`)
+## 4. Write side — archive at mint time (repo `huggingface_prompts`)
 
-`identify_image.sh` must refuse to mint an identity for content it has not
-archived. Inserted before the existing `echo`:
+`identify_image.sh` archives the prompt at the moment it mints the reference to
+it. Inserted before the existing `echo`:
 
 ```sh
-die() { echo "$*" >&2; exit 4; }
+warn() { echo "$*" >&2; }   # stderr: stdout is captured as the filename
 
-# $1 may be relative to any cwd; git -C needs both resolved against the repo
+# $1 may be relative to any cwd; git -C resolves pathspecs against -C, not cwd
 target="$(CDPATH= cd -- "$(dirname -- "$1")" && pwd)/$(basename -- "$1")"
-repo="$(git -C "$(dirname -- "$target")" rev-parse --show-toplevel)" \
-    || die "$1 is not inside a git repository — cannot archive"
-git -C "$repo" check-ignore -q -- "$target" && die "$1 is gitignored — cannot archive"
-git -C "$repo" add -- "$target" || die "cannot stage $1"
-git -C "$repo" diff --cached --quiet -- "$target" \
-    || git -C "$repo" commit -q -m "snapshot: ${target#"$repo"/}" \
-    || die "cannot commit $1"
+if repo="$(git -C "$(dirname -- "$target")" rev-parse --show-toplevel 2>/dev/null)"; then
+    if git -C "$repo" check-ignore -q -- "$target"; then
+        warn "WARNING: $1 is gitignored — this image's prompt can never be archived."
+    elif ! git -C "$repo" add -- "$target" \
+      || { ! git -C "$repo" diff --cached --quiet -- "$target" \
+           && ! git -C "$repo" commit -q -m "snapshot: ${target#"$repo"/}"; }; then
+        warn "WARNING: could not archive $1 — the link will dangle until this"
+        warn "         content is committed. Re-run after fixing the repo, or"
+        warn "         commit by hand; the digest resolves retroactively."
+    fi
+else
+    warn "WARNING: $1 is not inside a git repository — prompt will not be archived."
+fi
 ```
+
+**Failure is never fatal.** Priority order is image > prompt > link between
+them, so every guard warns and continues; the identity is always minted and
+`rename_image.sh` always gets a name to move the file to. Fail-closed would be
+actively harmful here: `rename_image.sh` moves a fixed `~/Downloads/image.webp`,
+so a non-zero exit strands the image at a path the next generation overwrites —
+trading a lost link for a lost image.
+
+Warnings go to **stderr** because `rename_image.sh` captures stdout as the
+filename (`new_image_identity=$(./identify_image.sh $1)`); a warning on stdout
+would end up inside the image's name.
 
 Both `$1` and the repo root are resolved to absolute paths first: `git -C <dir>`
 interprets pathspecs relative to `<dir>`, so passing a cwd-relative `$1` through
 it silently addresses the wrong file.
 
-- **The invariant:** a minted version digest always names committed content.
-  Git history *is* the archive — no second store, therefore nothing to drift.
+- **The invariant:** the archive write is *attempted in the same operation* that
+  mints the reference. Git history *is* the archive — no second store, therefore
+  nothing to drift.
+
+  This is deliberately weaker than "a digest can never dangle". The 86 % of §1
+  was caused by never attempting an archive, not by attempts failing — moving
+  the attempt to the right moment closes essentially all of it. What remains is
+  a rare git failure, and that case is usually **self-healing**: the content is
+  still in the working tree, so the next successful run over an unchanged file
+  archives it and the digest resolves retroactively. Content is lost only if
+  that file is edited before any commit ever succeeds.
+
+  The read side needs no adjustment for this: it was already built to resolve
+  dangling references into `Nearest` or `Unknown` (§5), since 363 of them
+  already exist.
 - **Lineage comes free**, including rename tracking, because git already records
   paths across commits.
 - **Self-verifying**: git validates blob contents itself.
 - **One commit per actual tweak**, not per image — unchanged content stages
   clean and `git diff --cached --quiet` skips the commit. This is the history
   already being written by hand, moved to the moment that makes it true.
-- **Fails closed**: if the repo cannot accept the commit, nothing is minted.
-  A missing image beats a dangling pointer.
+- **Fails open**: a dangling link beats a lost image (see above).
 - The `check-ignore` guard is specifically load-bearing here: `.gitignore`
-  contains `prompt`, so generating from that scratch file would otherwise mint
-  an identity that is unarchivable by construction.
+  contains `prompt`, so generating from that scratch file mints an identity that
+  is unarchivable by construction — permanently, unlike the transient failures.
+  It warns rather than refusing, but says so in those terms.
 
 Alternatives rejected: an `objects/<digest>` sidecar (a second store that
 duplicates git, carries no lineage, and can be silently corrupted — nothing
@@ -316,12 +346,16 @@ pattern of `echo-first` / `validate` / `check-steps`.
 ```
 parsed   : 2485 of 11111 files          ← drops to 0 if the grammar drifts
 exact    :  885 images /  58 versions
-nearest  : 1600 images / 363 versions   ← must stop growing
+nearest  : 1600 images / 363 versions   ← flat = healthy; rising = archive failing
 unknown  :    0
 ```
 
 Two lines earn their place. `nearest` is how the §4 invariant is proven to hold
-months from now without reading any code. `parsed` addresses the one honest cost
+months from now without reading any code. Because §4 fails open, this number is
+a genuine health metric rather than a guarantee: it stays flat while archiving
+works, **rises** when git failures are silently dangling new references, and can
+**fall** when a previously-failed prompt is committed later and its digest
+resolves retroactively. A rise is the signal to go read the warnings. `parsed` addresses the one honest cost
 of §3: `identify_image.sh` *produces* the grammar while `publicator.toml`
 *declares* it, in two different repos, and they can drift. Nothing can prevent
 that, so it is made loud — drift turns `parsed` to zero, which is unmissable.
@@ -357,6 +391,21 @@ Also:
 its text; a `Nearest` renders the warning and does **not** render any prompt
 body as if it were the image's own.
 
+### Write side
+
+`huggingface_prompts/test_identify_image.sh` — a plain `sh` check in that repo,
+guarding the one property that now protects the *image* rather than the link.
+Over a throwaway repo in `mktemp -d`, in each of: healthy repo, gitignored
+prompt, not-a-repo, and repo made uncommittable (e.g. a stale `index.lock`):
+
+- exit status is **0** in every case
+- **stdout is exactly one line**, the identity, with warnings on stderr only —
+  a warning leaking to stdout would be spliced into the image's filename
+- the healthy case leaves the prompt committed; the failure cases leave the
+  identity resolvable to nothing, which is the accepted trade
+
+This is the check that would catch a regression back to fail-closed.
+
 ## 9. No migration
 
 Because git history *is* the archive under §4, the 58 recoverable versions
@@ -368,7 +417,8 @@ resolve on day one. There is no backfill script to write, run, or get wrong.
 
 | File | Change | Approx. |
 |---|---|---|
-| `huggingface_prompts/identify_image.sh` | commit-before-mint (other repo) | +4 |
+| `huggingface_prompts/identify_image.sh` | best-effort archive at mint (other repo) | ~+16 |
+| `huggingface_prompts/test_identify_image.sh` | new — image-preservation check | ~25 |
 | `src/publicator/prompts.py` | new — parse, index, resolve | ~150 |
 | `src/publicator/webui/prompt_view.py` | new — pure renderer | ~60 |
 | `src/publicator/config.py` | `[prompts]` load + validation | ~25 |
