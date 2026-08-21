@@ -46,7 +46,7 @@ PAGE_TEMPLATE = r"""<!DOCTYPE html>
   .btn-view { background: #555; color: white; }
   .form { display: none; flex-direction: column; gap: 6px; }
   .form label { font-size: 12px; color: #aaa; }
-  .form input, .form textarea { background: #1a1a1a; color: #eee; border: 1px solid #444;
+  .form input, .form textarea, .promptsearch input { background: #1a1a1a; color: #eee; border: 1px solid #444;
                                 border-radius: 4px; padding: 6px; font-family: inherit; font-size: 13px; }
   .form textarea { min-height: 70px; resize: vertical; }
   .form-actions { display: flex; gap: 6px; margin-top: 4px; }
@@ -85,8 +85,13 @@ PAGE_TEMPLATE = r"""<!DOCTYPE html>
   .prompt ul { list-style: none; padding-left: 0; }
   .prompt .lin { font-family: monospace; }
   .prompt .n { color: #999; font-size: .8rem; }
+  /* .grid is display:grid, and __PROMPTSEARCH__ expands to two siblings
+     (form + banner) as the first children - without this they'd each get
+     pinned to one 280px card-sized track instead of spanning the row. */
+  .promptsearch, .skipped { grid-column: 1 / -1; }
   .promptsearch { margin: .5rem 0; display: flex; gap: .4rem; align-items: center; }
   .promptsearch input { flex: 1; max-width: 30rem; padding: .3rem; }
+  .promptsearch a { color: #8ac; }   /* UA default link colour is ~1.85:1 on #1a1a1a; this is ~7.18:1 */
   /* #7a5b00 (the .prompt.nearest summary text) only works on its own light
      #fff3cd chip; on the page's #1a1a1a background it's ~2.8:1. #e0a800 is the
      same warning hue already used elsewhere in this file directly on the dark
@@ -460,9 +465,12 @@ def render_page(*, thumb_map, candidates, pending, existing_ts, timeline,
     # Server-side search: a plain GET form, no JS — the same reason scheduling
     # is server-side. Unarchived prompts are excluded from matching and the
     # count is stated, so the 86% gap stays visible instead of quietly
-    # shrinking the result set.
+    # shrinking the result set. `skipped` counts Nearest only (never Unknown,
+    # which is mostly non-prompt-bearing files - counting those would produce
+    # a huge number that buries the real gap), so the wording says "skipped",
+    # not "not searched": it names what the number actually measures.
     banner = (f'<p class="skipped">{skipped} candidate'
-              f'{"" if skipped == 1 else "s"} not searched — prompt not archived.</p>'
+              f'{"" if skipped == 1 else "s"} skipped — their prompt was never archived.</p>'
               if skipped else "")
     search = (f'<form class="promptsearch" method="get" action="/">'
               f'<input type="search" name="prompt" placeholder="search prompt text"'

@@ -108,4 +108,13 @@ def test_render_page_renders_the_search_box_and_skip_banner():
         query="tentacles", skipped=3)
     assert "__PROMPTSEARCH__" not in page, "placeholder left in PAGE_TEMPLATE"
     assert 'name="prompt"' in page and 'value="tentacles"' in page
-    assert "3 candidates not searched" in page
+    assert "3 candidates skipped" in page and "their prompt was never archived" in page
+
+
+def test_skip_banner_uses_singular_wording_for_one():
+    from publicator.webui.page import render_page
+    page = render_page(
+        thumb_map={}, candidates=[], pending=[], existing_ts=[], timeline=[],
+        schedules=[], config={}, ai_model="m", openrouter_model="",
+        skipped=1)
+    assert "1 candidate skipped" in page and "candidates" not in page
