@@ -256,14 +256,19 @@ def test_from_config_builds_an_archive_for_a_present_repo(tmp_path):
 
 
 def test_concurrent_queries_never_raise_or_tear(tmp_path):
-    """One PromptArchive sits on GalleryHandler as a class attribute and
-    ThreadingHTTPServer serves each request on its own thread — a reload during
-    a slow render, or a second browser tab, calls the same archive concurrently.
-    _refresh() reassigns _versions then rebuilds _by_path in a loop; without a
-    lock, versions_at()'s self._versions[d] can hit a digest from a _by_path
-    that hasn't caught up yet -> KeyError, an intermittent HTTP 500. Several
-    threads hammer queries while a writer keeps moving HEAD; nothing should
-    escape."""
+    """Smoke/deadlock test, not a regression test: it cannot reliably force the
+    real bug RED without a fixture large enough to span a GIL switch, which
+    would be out of proportion for a unit test. What it does check: several
+    threads hammering one PromptArchive (as GalleryHandler holds it, shared
+    across ThreadingHTTPServer's one-thread-per-request) while a writer keeps
+    moving HEAD never raises, and never observes the two known windows a
+    missing lock opens -- both cheaper to hit than a KeyError:
+    a half-built _by_path/_by_basename makes paths_for() answer () too early,
+    so resolve() calls that Unknown and the card silently shows no prompt
+    block where it should show a NOT ARCHIVED warning; and two concurrent
+    refreshes can each wipe the other's half-built dicts while both still set
+    _head last, corrupting the index for the life of the process (the
+    head-unchanged early-return then always succeeds)."""
     repo, run = make_repo(tmp_path)
     commit_file(repo, run, "p/hot.json", "seed\n")
     a = archive(repo)
@@ -283,8 +288,8 @@ def test_concurrent_queries_never_raise_or_tear(tmp_path):
         while not stop.is_set():
             try:
                 a.versions()
-                a.paths_for("hot.json")
-                a.versions_at("p/hot.json")
+                assert a.paths_for("hot.json") == ("p/hot.json",)
+                assert a.versions_at("p/hot.json") != ()
                 a.resolve_path(unarchived_path)
             except Exception as e:
                 errors.append(e)

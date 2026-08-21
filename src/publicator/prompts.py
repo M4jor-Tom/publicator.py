@@ -120,10 +120,16 @@ class PromptArchive:
         # GalleryHandler holds one PromptArchive as a class attribute and
         # ThreadingHTTPServer serves each request on its own thread, so a
         # reload racing a slow render (or a second browser tab) can otherwise
-        # observe _versions reassigned while _by_path is still mid-rebuild —
-        # a torn read, not just a stale one (see _refresh). A plain Lock is
-        # enough: _refresh only calls _git/_blobs/_history, never a public
-        # query method, so there is no re-entrancy.
+        # read _by_path/_by_basename while they are still empty or mid-rebuild
+        # — an empty read, not just a stale one: paths_for() answers () too
+        # early, resolve() calls that Unknown, and a card silently shows no
+        # prompt block where it should show a NOT ARCHIVED warning. Worse, two
+        # concurrent refreshes can each wipe the other's half-built dicts and
+        # both still set _head last — the head-unchanged early-return then
+        # always succeeds, so the corrupted index persists for the life of the
+        # process. A plain Lock is enough: _refresh only calls
+        # _git/_blobs/_history, never a public query method, so there is no
+        # re-entrancy.
         self._lock = threading.Lock()
 
     # -- git ---------------------------------------------------------------
