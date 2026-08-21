@@ -1,5 +1,3 @@
-import re
-
 import pytest
 
 from publicator.config import load_config, validate_publications
@@ -37,7 +35,7 @@ def test_load_config_reads_schedule_profiles(tmp_path):
 PROMPTS_TOML = (
     '[prompts]\n'
     'repo = "huggingface_prompts"\n'
-    'filename = "^(?P<lineage>.+)_(?P<version>[0-9a-f]{40})_[0-9a-f-]{36}\\\\.[^.]+$"\n'
+    "filename = '^(?P<lineage>.+)_(?P<version>[0-9a-f]{40})_[0-9a-f-]{36}\\.[^.]+$'\n"
     'version_hash = "sha1"\n')
 
 
@@ -56,7 +54,7 @@ def test_load_config_compiles_the_prompt_grammar(tmp_path):
 def test_load_config_accepts_grammar_without_lineage_group(tmp_path):
     (tmp_path / "publicator.toml").write_text(
         '[prompts]\nrepo = "p"\n'
-        'filename = "^prompt-(?P<version>[0-9a-f]{64})\\\\.png$"\n'
+        "filename = '^prompt-(?P<version>[0-9a-f]{64})\\.png$'\n"
         'version_hash = "sha256"\n')
     p = load_config(tmp_path)["prompts"]
     assert "lineage" not in p["pattern"].groupindex
@@ -65,7 +63,7 @@ def test_load_config_accepts_grammar_without_lineage_group(tmp_path):
 def test_load_config_rejects_grammar_without_version_group(tmp_path):
     (tmp_path / "publicator.toml").write_text(
         '[prompts]\nrepo = "p"\n'
-        'filename = "^(?P<lineage>.+)\\\\.png$"\n'
+        "filename = '^(?P<lineage>.+)\\.png$'\n"
         'version_hash = "sha1"\n')
     with pytest.raises(ValueError, match="version"):
         load_config(tmp_path)
@@ -74,7 +72,7 @@ def test_load_config_rejects_grammar_without_version_group(tmp_path):
 def test_load_config_rejects_unknown_version_hash(tmp_path):
     (tmp_path / "publicator.toml").write_text(
         '[prompts]\nrepo = "p"\n'
-        'filename = "^(?P<version>.+)\\\\.png$"\n'
+        "filename = '^(?P<version>.+)\\.png$'\n"
         'version_hash = "crc32-of-my-dreams"\n')
     with pytest.raises(ValueError, match="version_hash"):
         load_config(tmp_path)
@@ -83,7 +81,7 @@ def test_load_config_rejects_unknown_version_hash(tmp_path):
 def test_load_config_rejects_uncompilable_pattern(tmp_path):
     (tmp_path / "publicator.toml").write_text(
         '[prompts]\nrepo = "p"\n'
-        'filename = "^(?P<version>[unterminated"\n'
+        "filename = '^(?P<version>[unterminated'\n"
         'version_hash = "sha1"\n')
     with pytest.raises(ValueError, match="filename"):
         load_config(tmp_path)
@@ -92,7 +90,7 @@ def test_load_config_rejects_uncompilable_pattern(tmp_path):
 def test_load_config_rejects_missing_repo(tmp_path):
     (tmp_path / "publicator.toml").write_text(
         '[prompts]\n'
-        'filename = "^(?P<version>.+)\\\\.png$"\n'
+        "filename = '^(?P<version>.+)\\.png$'\n"
         'version_hash = "sha1"\n')
     with pytest.raises(ValueError, match="repo"):
         load_config(tmp_path)
