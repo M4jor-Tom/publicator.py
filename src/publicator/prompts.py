@@ -226,3 +226,43 @@ class PromptArchive:
         self._refresh()
         return tuple(sorted((self._versions[d] for d in self._by_path.get(path, ())),
                             key=lambda v: (-v.committed, v.version)))
+
+    def resolve(self, identity: ImageIdentity, near: str = "") -> PromptMatch:
+        """One of three answers, never a nullable string (ADR 0002). `near` is
+        the image's own directory and only ever ORDERS Nearest candidates."""
+        exact = self.versions().get(identity.version)
+        if exact is not None:
+            return Exact(version=exact)
+        if not identity.lineage:
+            return Unknown(reason="prompt not archived; "
+                                  "the configured grammar carries no lineage")
+        candidates = tuple(
+            Lineage(path=p, versions=vs)
+            for p in rank_paths(self.paths_for(identity.lineage), near)
+            if (vs := self.versions_at(p)))
+        if not candidates:
+            return Unknown(
+                reason=f"prompt not archived; no known versions of "
+                       f"{identity.lineage!r}")
+        return Nearest(candidates=candidates)
+
+    def resolve_path(self, path: str) -> PromptMatch:
+        """Resolve an art file by its path. Non-prompt-bearing names — most of
+        the data dir — come back Unknown, which renders as nothing."""
+        identity = parse_identity(os.path.basename(path), self.pattern)
+        if identity is None:
+            return Unknown(reason="filename does not match the configured grammar")
+        return self.resolve(identity, near=os.path.dirname(path))
+
+
+def from_config(data_dir: str, config: dict) -> PromptArchive | None:
+    """The archive for this data dir, or None when the feature is off — no
+    [prompts] section, or a configured repo that is not on disk. Callers treat
+    None as 'every lookup is Unknown'."""
+    cfg = config.get("prompts")
+    if not cfg:
+        return None
+    repo = os.path.join(data_dir, cfg["repo"])
+    if not os.path.isdir(repo):
+        return None
+    return PromptArchive(repo, cfg["pattern"], cfg["version_hash"])
