@@ -78,13 +78,13 @@ PAGE_TEMPLATE = r"""<!DOCTYPE html>
   .prompt.exact > summary { background: #eef4ee; color: #2c4a2c; }
   .prompt.nearest > summary { background: #fff3cd; color: #7a5b00; font-weight: 600; }
   .prompt.nearest { border-left: 3px solid #e0a800; padding-left: .4rem; }
-  .prompt .warn { color: #7a5b00; margin: .3rem 0; }
+  .prompt .warn { color: #e0a800; margin: .3rem 0; }
   .prompt pre { white-space: pre-wrap; word-break: break-word; background: #f7f7f7;
                 color: #222; padding: .4rem; border-radius: 3px; max-height: 20rem;
                 overflow: auto; }
   .prompt ul { list-style: none; padding-left: 0; }
   .prompt .lin { font-family: monospace; }
-  .prompt .n { color: #666; font-size: .8rem; }
+  .prompt .n { color: #999; font-size: .8rem; }
 </style>
 </head><body>
 <header>
