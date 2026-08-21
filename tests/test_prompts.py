@@ -2,6 +2,7 @@ import hashlib
 import re
 import subprocess
 import threading
+import time
 
 from publicator.prompts import (
     Exact, ImageIdentity, Lineage, Nearest, PromptArchive, PromptVersion,
@@ -158,6 +159,10 @@ def test_index_does_not_refresh_within_the_head_probe_ttl(tmp_path):
     a = archive(repo)
     assert len(a.versions()) == 1
     second = commit_file(repo, run, "p/a", "two\n")
+    # Pin the probe to "now" rather than trusting that make_repo + two commits
+    # + the first index build finish inside HEAD_PROBE_TTL on a slow/cold-git
+    # machine - that would make this test flake, not the code under test.
+    a._probed = time.monotonic()
     assert second not in a.versions(), "probed HEAD again before the TTL elapsed"
     a._probed = None
     assert second in a.versions(), "resetting the probe lets the next call see it"
