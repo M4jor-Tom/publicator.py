@@ -54,7 +54,7 @@ def main() -> int:
     if pending:
         msg += f", {len(pending)} already queued"
     print(f"Found {msg}.")
-    result = serve(str(data_dir), candidates, pending, args, config)
+    result = serve(str(data_dir), candidates, pending, args, config, publicable_dirs)
 
     if result is None:
         print("No publish action taken.")

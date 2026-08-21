@@ -67,3 +67,48 @@ def test_thumbs_route_serves_a_rendered_name(tmp_path):
 def test_thumbs_route_refuses_a_name_the_page_never_rendered(tmp_path):
     url = _serve_once(cache_dir=str(tmp_path / ".thumbs"), thumb_src={}, thumb_map={})
     assert _get(url + "/thumbs/../../etc/passwd")[0] == 404
+
+
+def test_search_matches_exact_prompt_text_only(tmp_path, monkeypatch):
+    """Matching a Nearest's text would return images whose prompt merely
+    resembles the query - the conflation the whole feature exists to prevent."""
+    import subprocess
+    from publicator.prompts import PromptArchive
+    from publicator.webui.server import GalleryHandler
+    import re, hashlib
+
+    repo = tmp_path / "hf"; repo.mkdir()
+    run = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True,
+                                    capture_output=True)
+    run("init", "-q", "-b", "main")
+    run("config", "user.email", "t@e"); run("config", "user.name", "t")
+    (repo / "a").write_text("tentacles everywhere\n")
+    run("add", "--", "a"); run("commit", "-q", "-m", "s")
+    digest = hashlib.sha1(b"tentacles everywhere\n").hexdigest()
+
+    pattern = re.compile(r"^(?P<lineage>.+)_(?P<version>[0-9a-f]{40})_"
+                         r"[0-9a-f-]{36}\.[^.]+$")
+    uuid = "bb6ba911-8d16-4d5a-82c4-a46b844863ed"
+    picked = tmp_path / "picked"; picked.mkdir()
+    hit = picked / f"a_{digest}_{uuid}.webp"
+    miss = picked / f"a_{'f' * 40}_{uuid}.webp"      # never archived -> Nearest
+    hit.write_bytes(b"1"); miss.write_bytes(b"2")
+
+    # monkeypatch, not plain assignment: these are CLASS attributes and would
+    # otherwise leak into every other test in this file.
+    monkeypatch.setattr(GalleryHandler, "archive",
+                        PromptArchive(str(repo), pattern, "sha1"))
+    monkeypatch.setattr(GalleryHandler, "publicable_dirs", [str(picked)])
+    monkeypatch.setattr(GalleryHandler, "json_path",
+                        str(tmp_path / "publications.json"))
+
+    exact, _maybe, skipped = GalleryHandler.search(GalleryHandler, "tentacles", "")
+    assert exact == [str(hit)]
+    assert skipped == 1, "the unarchived one is reported, not silently dropped"
+
+
+def test_search_is_inert_when_the_feature_is_off(monkeypatch):
+    from publicator.webui.server import GalleryHandler
+    monkeypatch.setattr(GalleryHandler, "archive", None)
+    monkeypatch.setattr(GalleryHandler, "publicable_dirs", [])
+    assert GalleryHandler.search(GalleryHandler, "nothing", "") == ([], [], 0)

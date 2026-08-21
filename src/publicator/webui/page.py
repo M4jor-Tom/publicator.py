@@ -85,6 +85,13 @@ PAGE_TEMPLATE = r"""<!DOCTYPE html>
   .prompt ul { list-style: none; padding-left: 0; }
   .prompt .lin { font-family: monospace; }
   .prompt .n { color: #999; font-size: .8rem; }
+  .promptsearch { margin: .5rem 0; display: flex; gap: .4rem; align-items: center; }
+  .promptsearch input { flex: 1; max-width: 30rem; padding: .3rem; }
+  /* #7a5b00 (the .prompt.nearest summary text) only works on its own light
+     #fff3cd chip; on the page's #1a1a1a background it's ~2.8:1. #e0a800 is the
+     same warning hue already used elsewhere in this file directly on the dark
+     background (.prompt .warn) and clears WCAG AA there. */
+  .skipped { color: #e0a800; font-size: .85rem; margin: .2rem 0 .6rem; }
 </style>
 </head><body>
 <header>
@@ -101,7 +108,8 @@ PAGE_TEMPLATE = r"""<!DOCTYPE html>
   <button id="publish-btn" onclick="publishQueue()" disabled>Publish</button>
 </header>
 <main>
-  <div id="gallery-tab" class="grid">__CARDS__</div>
+  <div id="gallery-tab" class="grid">__PROMPTSEARCH__
+__CARDS__</div>
   <div id="calendar-tab" hidden>__CALENDAR__</div>
 </main>
 <script>
@@ -375,7 +383,7 @@ def card_form_html(cid, js_path, tg, save_label, preset_opts):
 
 def render_page(*, thumb_map, candidates, pending, existing_ts, timeline,
                 schedules, config, ai_model, openrouter_model,
-                prompt_html=None) -> str:
+                prompt_html=None, query="", skipped=0) -> str:
     """The whole page as HTML — gallery tab + calendar tab. Pure: no handler, no
     socket, no I/O beyond the paths it is handed, which is what makes it testable.
     `thumb_map` is {art path: cached thumbnail name} (see images.thumb_name).
@@ -449,4 +457,17 @@ def render_page(*, thumb_map, candidates, pending, existing_ts, timeline,
     page = page.replace("__LABELS__", json.dumps(labels))
     page = page.replace("__AI_MODEL__", html.escape(ai_model, quote=True))
     page = page.replace("__OPENROUTER_MODEL__", html.escape(openrouter_model, quote=True))
+    # Server-side search: a plain GET form, no JS — the same reason scheduling
+    # is server-side. Unarchived prompts are excluded from matching and the
+    # count is stated, so the 86% gap stays visible instead of quietly
+    # shrinking the result set.
+    banner = (f'<p class="skipped">{skipped} candidate'
+              f'{"" if skipped == 1 else "s"} not searched — prompt not archived.</p>'
+              if skipped else "")
+    search = (f'<form class="promptsearch" method="get" action="/">'
+              f'<input type="search" name="prompt" placeholder="search prompt text"'
+              f' value="{html.escape(query, quote=True)}">'
+              f'<button type="submit">Search</button>'
+              f'<a href="/">clear</a></form>{banner}')
+    page = page.replace("__PROMPTSEARCH__", search)
     return page
