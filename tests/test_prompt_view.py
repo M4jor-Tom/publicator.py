@@ -67,3 +67,14 @@ def test_nearest_escapes_html_in_candidate_path_and_text():
         Lineage(path="p/<script>", versions=(version(text="<script>alert(1)</script>"),)),)))
     assert "<script>" not in out
     assert "&lt;script&gt;" in out
+
+
+def test_nearest_lineages_link_to_their_group():
+    out = render_prompt(Nearest(candidates=(
+        Lineage(path="anima_v1/hot.json", versions=(version(),)),)))
+    assert 'href="/?lineage=anima_v1%2Fhot.json"' in out
+
+
+def test_exact_paths_link_to_their_group():
+    out = render_prompt(Exact(version=version(paths=("anima_v1/hot.json",))))
+    assert 'href="/?lineage=anima_v1%2Fhot.json"' in out

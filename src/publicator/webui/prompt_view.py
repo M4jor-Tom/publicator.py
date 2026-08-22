@@ -9,6 +9,7 @@ mistake impossible in code (Nearest has no .text); this module makes it hard to
 make by eye."""
 
 import html
+import urllib.parse
 from datetime import datetime
 
 from publicator.prompts import Exact, Nearest, PromptMatch, rank_paths
@@ -21,6 +22,13 @@ def _stamp(committed: int, tz=None) -> str:
     return datetime.fromtimestamp(committed, tz).strftime("%Y-%m-%d")
 
 
+def _lineage_link(path: str) -> str:
+    """A lineage label that jumps to every image from that prompt file."""
+    href = "/?lineage=" + urllib.parse.quote(path, safe="")
+    return (f'<a class="lin" href="{html.escape(href, quote=True)}">'
+            f"{html.escape(path)}</a>")
+
+
 def _body(text: str) -> str:
     """Raw <pre>, for plain-text and JSON prompts alike — the JSON ones are
     already pretty-printed on disk, so parsing them buys nothing."""
@@ -30,7 +38,7 @@ def _body(text: str) -> str:
 def render_prompt(match: PromptMatch, near: str = "", tz=None) -> str:
     if isinstance(match, Exact):
         v = match.version
-        paths = " · ".join(html.escape(p) for p in rank_paths(v.paths, near))
+        paths = " · ".join(_lineage_link(p) for p in rank_paths(v.paths, near))
         return (f'<details class="prompt exact"><summary>prompt · '
                 f'{paths or "path unknown"} · <code>{html.escape(v.version[:7])}</code>'
                 f'</summary>{_body(v.text)}</details>')
@@ -43,7 +51,7 @@ def render_prompt(match: PromptMatch, near: str = "", tz=None) -> str:
                 f'<code>{html.escape(v.version[:7])}</code></summary>'
                 f"{_body(v.text)}</details>" for v in lin.versions)
             items.append(
-                f'<li><span class="lin">{html.escape(lin.path)}</span> '
+                f"<li>{_lineage_link(lin.path)} "
                 f'<span class="n">{n} known version{"" if n == 1 else "s"}</span>'
                 f"{versions}</li>")
         return ('<details class="prompt nearest">'

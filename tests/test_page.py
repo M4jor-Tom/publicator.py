@@ -118,3 +118,15 @@ def test_skip_banner_uses_singular_wording_for_one():
         schedules=[], config={}, ai_model="m", openrouter_model="",
         skipped=1)
     assert "1 candidate skipped" in page and "candidates" not in page
+
+
+def test_render_page_separates_exact_and_hinted_lineage_results():
+    from publicator.webui.page import render_page
+    page = render_page(
+        thumb_map={"a.webp": "a", "b.webp": "b"}, candidates=["a.webp"],
+        maybe_candidates=["b.webp"], pending=[], existing_ts=[], timeline=[],
+        schedules=[], config={}, ai_model="m", openrouter_model="")
+    assert "possibly from this prompt" in page
+    # the two groups must not be merged into one grid
+    assert page.index("a.webp") < page.index("possibly from this prompt")
+    assert page.index("possibly from this prompt") < page.index("b.webp")
