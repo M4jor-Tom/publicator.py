@@ -171,3 +171,11 @@ def test_render_page_labels_the_exact_results_when_a_lineage_filter_is_active():
 def test_render_page_omits_the_exact_label_outside_a_lineage_filter():
     page = _render(candidates=["a.webp"], thumb_map={"a.webp": "a"})
     assert "images from this prompt" not in page
+
+
+def test_render_page_omits_the_exact_label_when_there_are_no_exact_results():
+    """Matches the gating already used for "possibly from this prompt" below
+    it: an empty labelled section with no explanation reads as a layout
+    glitch, not a deliberate zero-results signal."""
+    page = _render(candidates=[], lineage_active=True)
+    assert "images from this prompt" not in page
