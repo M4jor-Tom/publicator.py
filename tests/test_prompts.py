@@ -122,6 +122,26 @@ def test_index_uses_the_configured_digest_algorithm(tmp_path):
     assert archive(repo, NOLIN, "sha256").versions()[digest].text == "hello\n"
 
 
+def test_blobs_skips_malformed_records_instead_of_truncating_or_raising(tmp_path, monkeypatch):
+    """A malformed `cat-file --batch` record used to `break` the whole scan
+    (silently truncating the index) and `int(header[2])` could raise all the
+    way out through versions() into an HTTP 500. Both must instead just skip
+    that one record and keep the rest of the index intact."""
+    repo, _ = make_repo(tmp_path)
+    a = archive(repo)
+    good1, good2, good3 = "a" * 40, "b" * 40, "c" * 40
+    stream = (
+        f"{good1} blob 5\n".encode() + b"hello\n"
+        + b"onlyonetoken\n"                          # too few header fields
+        + f"{good2} blob 5\n".encode() + b"world\n"
+        + b"a blob notanumber\n"                     # size is not an int
+        + f"{good3} blob 5\n".encode() + b"howdy\n"
+    )
+    monkeypatch.setattr(a, "_git", lambda *args: stream)
+    by_oid, content = a._blobs()      # must not raise
+    assert set(by_oid) == {good1, good2, good3}, "a malformed record must not truncate later ones"
+
+
 def test_paths_for_finds_a_basename_that_no_longer_exists_at_head(tmp_path):
     repo, run = make_repo(tmp_path)
     commit_file(repo, run, "p/hot_mommy.json", "old\n")

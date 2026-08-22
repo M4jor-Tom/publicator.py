@@ -169,8 +169,16 @@ class PromptArchive:
                 break
             header = out[i:j].split(b" ")
             if len(header) != 3:
-                break
-            oid, typ, size = header[0], header[1], int(header[2])
+                # Malformed record: skip just this line and keep scanning,
+                # rather than truncating the rest of the index behind it.
+                i = j + 1
+                continue
+            oid, typ, size_field = header[0], header[1], header[2]
+            try:
+                size = int(size_field)
+            except ValueError:
+                i = j + 1
+                continue
             body = out[j + 1:j + 1 + size]
             if typ == b"blob":
                 digest = hashlib.new(self.version_hash, body).hexdigest()
