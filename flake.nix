@@ -100,6 +100,9 @@
         validate = app "validate" "validate" [ ] false;
         # First state=unpublished entry's path/title/schedule (used by the skill).
         echo-first = app "echo-first" "echo_first" [ ] false;
+        # Prompt-mapping coverage. `parsed` drops to 0 on grammar drift;
+        # `nearest` rising means archive writes are failing (ADRs 0003, 0004).
+        prompt-audit = app "prompt-audit" "prompt_audit" [ pkgs.git ] false;
         # Drift guard: fails if the publish-deviantart skill grew a step that
         # deviantart.py's STEPS doesn't implement. No browser/data deps (cheap CI).
         check-steps = {

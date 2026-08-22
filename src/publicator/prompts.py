@@ -276,10 +276,16 @@ class PromptArchive:
                        f"{identity.lineage!r}")
         return Nearest(candidates=candidates)
 
+    def parse(self, path: str) -> ImageIdentity | None:
+        """The roles this art file's name claims, or None if it is not
+        prompt-bearing. `resolve_path` is parse + resolve; the audit needs the
+        two halves separately, to count distinct versions."""
+        return parse_identity(os.path.basename(path), self.pattern)
+
     def resolve_path(self, path: str) -> PromptMatch:
         """Resolve an art file by its path. Non-prompt-bearing names — most of
         the data dir — come back Unknown, which renders as nothing."""
-        identity = parse_identity(os.path.basename(path), self.pattern)
+        identity = self.parse(path)
         if identity is None:
             return Unknown(reason="filename does not match the configured grammar")
         return self.resolve(identity, near=os.path.dirname(path))
