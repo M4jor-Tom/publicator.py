@@ -106,6 +106,29 @@ needs one, so a cold calendar doesn't stall startup; `/thumbs/<name>` only serve
 names the page actually rendered (that allow-list is what keeps paths from being
 traversed in). Add `.thumbs/` to the data dir's `.gitignore`.
 
+**Prompt mapping.** A card can show the generation prompt that produced its
+image. The art repo's `huggingface_prompts` submodule *is* the archive:
+`identify_image.sh` commits a prompt before minting the digest that names it,
+so a filename references content git holds (it did not, historically — 86% of
+prompt versions were never committed and are unrecoverable).
+`publicator/prompts.py` digests every blob in that repo, including unreachable
+ones, and resolves a filename to one of three types — `Exact`, `Nearest`,
+`Unknown`. **`Nearest` deliberately has no `.text`**: a near-miss must not be
+renderable as the real prompt. Never resolve a prompt by looking its basename
+up at `HEAD`; measured over the real data that is silently wrong on 404 of 426
+pairs, because prompts evolve after the image is made.
+
+The **filename grammar is data, not code** — `publicator.toml`'s `[prompts]`
+declares a `re` pattern with `version` (required) and `lineage` (optional)
+capture groups plus `version_hash`. Nothing in `src/` may hardcode `sha1` or
+the filename shape. `nix run <this>#prompt-audit` reports `parsed: N of M`,
+which drops to 0 if that grammar drifts from what `identify_image.sh` produces,
+and `nearest`, which rising means archive writes are failing. Both apps that
+shell out to git (`publish-next`, `prompt-audit`) must list `pkgs.git` in their
+flake `runtimeInputs` — `writeShellApplication` pins PATH to those.
+Full design: `docs/superpowers/specs/2026-08-21-prompt-mapping-design.md`,
+decisions in `docs/adr/0001`–`0004`.
+
 **State & data.** `publications.json` is the source of truth (an array of entries,
 each with `apparitions[]` carrying `state` + `apparitionTimestampIfDifferentThanSubmission`).
 `publicator/entries.py` reports the first `unpublished` entry (by state field,
@@ -122,3 +145,5 @@ flow.
 - `.webp` is rejected by DeviantArt (top of this file); convert before publishing.
 - Login is out-of-band in real Firefox; Playwright cannot pass the PerimeterX wall.
 - `AGENTS.md` mirrors the one-line `.webp` fact; this file is the fuller guidance.
+- Prompt lookup is content-addressed, never `basename`-at-`HEAD`; and the
+  filename grammar lives in `publicator.toml`, not in the code.
