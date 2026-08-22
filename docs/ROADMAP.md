@@ -11,4 +11,4 @@
 
 - Non platform-dependant schedule:
     - Schedule publicator execution from a github actions workflow instead of deviantart selectors (premium feature)
-- Prompt mapping
+- ~~Prompt mapping~~ — done; see `docs/adr/0001`–`0004`
