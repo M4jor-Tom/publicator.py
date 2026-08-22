@@ -120,17 +120,17 @@ class GalleryHandler(BaseHTTPRequestHandler):
                 self.__class__.thumb_src[name] = p
 
     def _build_page(self, needle: str = "", lineage: str = "") -> str:
-        candidates, skipped = self.candidate_paths, 0
+        candidates, maybe, skipped = self.candidate_paths, [], 0
         if needle or lineage:
-            candidates, _maybe, skipped = self.search(needle, lineage)
-            self._register_thumbs(candidates)
+            candidates, maybe, skipped = self.search(needle, lineage)
+            self._register_thumbs(candidates + maybe)
         return render_page(
             thumb_map=self.thumb_map, candidates=candidates,
-            pending=self.pending, existing_ts=self.existing_ts,
-            timeline=self.timeline, schedules=self.schedules,
-            config=self.config, ai_model=self.ai_model,
-            openrouter_model=self.openrouter_model,
-            prompt_html=self._prompt_html(candidates),
+            maybe_candidates=maybe, pending=self.pending,
+            existing_ts=self.existing_ts, timeline=self.timeline,
+            schedules=self.schedules, config=self.config,
+            ai_model=self.ai_model, openrouter_model=self.openrouter_model,
+            prompt_html=self._prompt_html(candidates + maybe),
             query=needle, skipped=skipped)
 
     def _json_body(self) -> dict:

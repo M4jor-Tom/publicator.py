@@ -85,6 +85,15 @@ PAGE_TEMPLATE = r"""<!DOCTYPE html>
   .prompt ul { list-style: none; padding-left: 0; }
   .prompt .lin { font-family: monospace; }
   .prompt .n { color: #999; font-size: .8rem; }
+  /* Lineage links render on two different backdrops: inside <summary> for
+     Exact (pale #eef4ee) and inside a plain <li> for Nearest (the card's dark
+     #2a2a2a). No single colour clears WCAG AA 4.5:1 on both, so two rules:
+     #1a4d80 is 7.78:1 on #eef4ee, #8ac is 5.92:1 on #2a2a2a. */
+  .prompt.exact a { color: #1a4d80; }
+  .prompt.nearest a { color: #8ac; }
+  .groupsplit { grid-column: 1 / -1; margin: 1rem 0 .3rem; padding: .4rem;
+                background: #fff3cd; color: #7a5b00; border-left: 3px solid #e0a800;
+                font-size: .9rem; }
   /* .grid is display:grid, and __PROMPTSEARCH__ expands to two siblings
      (form + banner) as the first children - without this they'd each get
      pinned to one 280px card-sized track instead of spanning the row. */
@@ -388,7 +397,8 @@ def card_form_html(cid, js_path, tg, save_label, preset_opts):
 
 def render_page(*, thumb_map, candidates, pending, existing_ts, timeline,
                 schedules, config, ai_model, openrouter_model,
-                prompt_html=None, query="", skipped=0) -> str:
+                prompt_html=None, query="", skipped=0,
+                maybe_candidates=None) -> str:
     """The whole page as HTML — gallery tab + calendar tab. Pure: no handler, no
     socket, no I/O beyond the paths it is handed, which is what makes it testable.
     `thumb_map` is {art path: cached thumbnail name} (see images.thumb_name).
@@ -426,14 +436,15 @@ def render_page(*, thumb_map, candidates, pending, existing_ts, timeline,
                            "scheduleTs": ts, "price": e.get("price"),
                            "tier": e.get("tier"), "galleries": e.get("galleries", [])})
     # Add-able cards: new picks from picked/.
-    for idx, orig_path in enumerate(candidates):
+    def candidate_card(idx, orig_path):
         filename = os.path.basename(orig_path)
         safe_name = html.escape(filename, quote=True)
         safe_rel = html.escape(thumb_map.get(orig_path, ""), quote=True)
         js_path = html.escape(json.dumps(orig_path), quote=True)
-        view_href = html.escape("/original?path=" + urllib.parse.quote(orig_path), quote=True)
+        view_href = html.escape("/original?path=" + urllib.parse.quote(orig_path),
+                                quote=True)
         cid = f"card_{idx}"
-        cards.append(f"""<div class="card" id="{cid}">
+        return f"""<div class="card" id="{cid}">
   <img src="/thumbs/{safe_rel}" alt="{safe_name}">
   <div class="name">{safe_name}</div>
   <div class="actions">
@@ -443,7 +454,19 @@ def render_page(*, thumb_map, candidates, pending, existing_ts, timeline,
   </div>
 {prompt_html.get(orig_path, "")}
 {card_form_html(cid, js_path, tg, "Save to queue", preset_opts)}
-</div>""")
+</div>"""
+
+    for idx, orig_path in enumerate(candidates):
+        cards.append(candidate_card(idx, orig_path))
+    # Two lists, never merged: images whose digest IS a version of this lineage,
+    # and images that only share its basename because their own prompt was never
+    # archived. Merging them would re-conflate exactly what the type separates.
+    if maybe_candidates:
+        cards.append('<div class="groupsplit">possibly from this prompt — '
+                     "their own prompt was never archived, so this is a "
+                     "filename hint only</div>")
+        for idx, orig_path in enumerate(maybe_candidates, start=len(candidates)):
+            cards.append(candidate_card(idx, orig_path))
     # Labels for every instant that can land in a datetime-local input: slot
     # presets and pending scheduleTs (background occupancy is never rendered).
     # Rendered in the schedule TZ so the picker shows the right wall clock even
