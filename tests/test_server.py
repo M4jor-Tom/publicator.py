@@ -102,13 +102,56 @@ def test_search_matches_exact_prompt_text_only(tmp_path, monkeypatch):
     monkeypatch.setattr(GalleryHandler, "json_path",
                         str(tmp_path / "publications.json"))
 
-    exact, _maybe, skipped = GalleryHandler.search(GalleryHandler, "tentacles", "")
+    exact, _maybe, skipped, truncated = GalleryHandler.search(GalleryHandler, "tentacles", "")
     assert exact == [str(hit)]
     assert skipped == 1, "the unarchived one is reported, not silently dropped"
+    assert truncated is False
 
 
 def test_search_is_inert_when_the_feature_is_off(monkeypatch):
     from publicator.webui.server import GalleryHandler
     monkeypatch.setattr(GalleryHandler, "archive", None)
     monkeypatch.setattr(GalleryHandler, "publicable_dirs", [])
-    assert GalleryHandler.search(GalleryHandler, "nothing", "") == ([], [], 0)
+    assert GalleryHandler.search(GalleryHandler, "nothing", "") == ([], [], 0, False)
+
+
+def test_prompt_html_is_empty_when_the_feature_is_off(monkeypatch):
+    from publicator.webui.server import GalleryHandler
+    monkeypatch.setattr(GalleryHandler, "archive", None)
+    assert GalleryHandler._prompt_html(GalleryHandler, ["a.webp"]) == {}
+
+
+def test_skipped_excludes_a_nearest_already_shown_as_a_lineage_hint(tmp_path, monkeypatch):
+    """A Nearest whose candidates match the requested lineage is shown under
+    'possibly from this prompt' on a ?lineage= page — it must not ALSO
+    inflate the 'skipped' banner, or the page would simultaneously claim
+    those images were never archived and show them right there."""
+    import subprocess
+    from publicator.prompts import PromptArchive
+    from publicator.webui.server import GalleryHandler
+    import re
+
+    repo = tmp_path / "hf"; repo.mkdir()
+    run = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True,
+                                    capture_output=True)
+    run("init", "-q", "-b", "main")
+    run("config", "user.email", "t@e"); run("config", "user.name", "t")
+    (repo / "a").write_text("original prompt\n")
+    run("add", "--", "a"); run("commit", "-q", "-m", "s")
+
+    pattern = re.compile(r"^(?P<lineage>.+)_(?P<version>[0-9a-f]{40})_"
+                         r"[0-9a-f-]{36}\.[^.]+$")
+    uuid = "bb6ba911-8d16-4d5a-82c4-a46b844863ed"
+    picked = tmp_path / "picked"; picked.mkdir()
+    miss = picked / f"a_{'f' * 40}_{uuid}.webp"      # never archived -> Nearest, lineage "a" known
+    miss.write_bytes(b"1")
+
+    monkeypatch.setattr(GalleryHandler, "archive",
+                        PromptArchive(str(repo), pattern, "sha1"))
+    monkeypatch.setattr(GalleryHandler, "publicable_dirs", [str(picked)])
+    monkeypatch.setattr(GalleryHandler, "json_path",
+                        str(tmp_path / "publications.json"))
+
+    exact, maybe, skipped, truncated = GalleryHandler.search(GalleryHandler, "", "a")
+    assert maybe == [str(miss)]
+    assert skipped == 0, "already shown under 'possibly from this prompt' - not also 'skipped'"

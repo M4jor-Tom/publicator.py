@@ -130,3 +130,44 @@ def test_render_page_separates_exact_and_hinted_lineage_results():
     # the two groups must not be merged into one grid
     assert page.index("a.webp") < page.index("possibly from this prompt")
     assert page.index("possibly from this prompt") < page.index("b.webp")
+
+
+def test_render_page_with_search_disabled_emits_no_search_form():
+    """A data dir with no [prompts] section must be fully inert, not just
+    prompt-less: rendering the form would let a submit run search() (which
+    returns nothing) and empty the gallery with no explanation."""
+    page = _render(search_enabled=False)
+    assert 'class="promptsearch"' not in page
+    assert "__PROMPTSEARCH__" not in page
+
+
+def test_render_page_with_search_enabled_emits_the_search_form():
+    page = _render(search_enabled=True)
+    assert 'class="promptsearch"' in page
+
+
+def test_prompt_text_containing_a_placeholder_survives_as_literal_text():
+    """__CARDS__ must be the LAST .replace() call: html.escape does not touch
+    underscores, so a prompt file whose text is literally "__PROMPTSEARCH__"
+    must not get the real search-form markup spliced into its own <pre>."""
+    page = _render(candidates=["picked/a.webp"],
+                   thumb_map={"picked/a.webp": "aa.webp"},
+                   prompt_html={"picked/a.webp": "<pre>__PROMPTSEARCH__</pre>"})
+    assert "<pre>__PROMPTSEARCH__</pre>" in page
+
+
+def test_render_page_notes_truncated_search_results():
+    """A broad needle can match more than SEARCH_LIMIT files; the page must
+    say so rather than silently showing a shrunk result set."""
+    page = _render(truncated=True)
+    assert "narrow your search" in page
+
+
+def test_render_page_labels_the_exact_results_when_a_lineage_filter_is_active():
+    page = _render(candidates=["a.webp"], thumb_map={"a.webp": "a"}, lineage_active=True)
+    assert "images from this prompt" in page
+
+
+def test_render_page_omits_the_exact_label_outside_a_lineage_filter():
+    page = _render(candidates=["a.webp"], thumb_map={"a.webp": "a"})
+    assert "images from this prompt" not in page

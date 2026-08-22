@@ -69,24 +69,32 @@ class GalleryHandler(BaseHTTPRequestHandler):
                 if (block := render_prompt(self.archive.resolve_path(p),
                                            near=os.path.dirname(p), tz=tz))}
 
-    def search(self, needle: str, lineage: str) -> tuple[list[str], list[str], int]:
-        """(exact hits, lineage-hint hits, count skipped as unarchived).
+    def search(self, needle: str, lineage: str) -> tuple[list[str], list[str], int, bool]:
+        """(exact hits, lineage-hint hits, count skipped as unarchived, truncated).
 
         `find_candidates` shuffles and caps, so filtering its sample would
         return near-nothing — a filtered view walks the publicable dirs itself.
         Order matters: resolve and filter first (regex + dict lookups, cheap),
         cap, and only then sha512-hash the survivors for the already-published
-        check, which is the expensive step."""
+        check, which is the expensive step. `truncated` is True when either
+        list had more matches than SEARCH_LIMIT before the cap — the page
+        must say so, or a broad needle silently shrinks the result set with
+        no sign anything was cut (the same gap-stays-visible principle as
+        `skipped`)."""
         if self.archive is None:
-            return [], [], 0
+            return [], [], 0, False
         exact, maybe, skipped = [], [], 0
         for d in self.publicable_dirs:
             for path in collect_images(d):
                 match = self.archive.resolve_path(path)
                 if isinstance(match, Nearest):
-                    skipped += 1
+                    # A Nearest shown under "possibly from this prompt" is not
+                    # also "skipped" — the banner and the maybe-list would
+                    # otherwise contradict each other on a ?lineage= page.
                     if lineage and any(c.path == lineage for c in match.candidates):
                         maybe.append(path)
+                    else:
+                        skipped += 1
                     continue
                 if not isinstance(match, Exact):
                     continue
@@ -96,6 +104,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
                     continue
                 exact.append(path)
         published = load_publicated_hashes(self.json_path)
+        truncated = len(exact) > SEARCH_LIMIT or len(maybe) > SEARCH_LIMIT
 
         def unpublished(paths):
             out = []
@@ -107,7 +116,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
                     log.debug("hashing %s: %s", p, e)
             return out
 
-        return unpublished(exact), unpublished(maybe), skipped
+        return unpublished(exact), unpublished(maybe), skipped, truncated
 
     def _register_thumbs(self, paths: list[str]) -> None:
         """Extend the /thumbs allow-list with search results. The allow-list is
@@ -120,9 +129,9 @@ class GalleryHandler(BaseHTTPRequestHandler):
                 self.__class__.thumb_src[name] = p
 
     def _build_page(self, needle: str = "", lineage: str = "") -> str:
-        candidates, maybe, skipped = self.candidate_paths, [], 0
+        candidates, maybe, skipped, truncated = self.candidate_paths, [], 0, False
         if needle or lineage:
-            candidates, maybe, skipped = self.search(needle, lineage)
+            candidates, maybe, skipped, truncated = self.search(needle, lineage)
             self._register_thumbs(candidates + maybe)
         return render_page(
             thumb_map=self.thumb_map, candidates=candidates,
@@ -131,7 +140,9 @@ class GalleryHandler(BaseHTTPRequestHandler):
             schedules=self.schedules, config=self.config,
             ai_model=self.ai_model, openrouter_model=self.openrouter_model,
             prompt_html=self._prompt_html(candidates + maybe),
-            query=needle, skipped=skipped)
+            query=needle, skipped=skipped, truncated=truncated,
+            search_enabled=self.archive is not None,
+            lineage_active=bool(lineage))
 
     def _json_body(self) -> dict:
         length = int(self.headers.get("Content-length", 0))
