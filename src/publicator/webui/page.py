@@ -398,12 +398,18 @@ def card_form_html(cid, js_path, tg, save_label, preset_opts):
 def render_page(*, thumb_map, candidates, pending, existing_ts, timeline,
                 schedules, config, ai_model, openrouter_model,
                 prompt_html=None, query="", skipped=0,
-                maybe_candidates=None) -> str:
+                maybe_candidates=None, search_enabled=True, truncated=False,
+                lineage_active=False) -> str:
     """The whole page as HTML — gallery tab + calendar tab. Pure: no handler, no
     socket, no I/O beyond the paths it is handed, which is what makes it testable.
     `thumb_map` is {art path: cached thumbnail name} (see images.thumb_name).
     `prompt_html` is {art path: prompt HTML block} — pre-rendered by the server
-    so this module stays unaware of prompts."""
+    so this module stays unaware of prompts. `search_enabled` defaults True so
+    existing callers keep working; the server passes False when there is no
+    prompt archive, so a data dir that never opted into the feature renders no
+    search box at all. `lineage_active` labels the exact-results group — it
+    only makes sense once a lineage filter narrowed the page, so the normal
+    (unfiltered) gallery view is unchanged."""
     cards = []
     pending_js = []
     tg = tier_gallery_fields(config)
@@ -456,6 +462,10 @@ def render_page(*, thumb_map, candidates, pending, existing_ts, timeline,
 {card_form_html(cid, js_path, tg, "Save to queue", preset_opts)}
 </div>"""
 
+    # Spec §6 names both lists; only label this one when a lineage filter is
+    # active, so the ordinary (unfiltered) gallery grid stays exactly as-is.
+    if lineage_active:
+        cards.append('<div class="groupsplit">images from this prompt</div>')
     for idx, orig_path in enumerate(candidates):
         cards.append(candidate_card(idx, orig_path))
     # Two lists, never merged: images whose digest IS a version of this lineage,
@@ -475,7 +485,6 @@ def render_page(*, thumb_map, candidates, pending, existing_ts, timeline,
     pending_ts = [e["scheduleTs"] for e in pending_js if e.get("scheduleTs")]
     labels = ts_labels(tz, slot_ts + pending_ts)
     page = PAGE_TEMPLATE
-    page = page.replace("__CARDS__", "\n".join(cards))
     # anchors: uuid -> card id, how a scheduled entry links back to its card.
     anchors = {e["uuid"]: e["cardId"] for e in pending_js}
     page = page.replace("__CALENDAR__", render_calendar(timeline, tz=tz, anchors=anchors))
@@ -495,10 +504,26 @@ def render_page(*, thumb_map, candidates, pending, existing_ts, timeline,
     banner = (f'<p class="skipped">{skipped} candidate'
               f'{"" if skipped == 1 else "s"} skipped — their prompt was never archived.</p>'
               if skipped else "")
+    # A broad needle can match far more than SEARCH_LIMIT files; silently
+    # showing only the first batch would contradict the same
+    # gaps-stay-visible principle the skipped banner exists for.
+    if truncated:
+        banner += ('<p class="skipped">more matches exist than are shown — '
+                   "narrow your search to see the rest.</p>")
+    # search_enabled is False when the data dir has no [prompts] section — the
+    # feature must be inert then, not just prompt-less: rendering the form
+    # anyway would let a submit run search() (archive is None -> no results)
+    # and empty the gallery with no explanation.
     search = (f'<form class="promptsearch" method="get" action="/">'
               f'<input type="search" name="prompt" placeholder="search prompt text"'
               f' value="{html.escape(query, quote=True)}">'
               f'<button type="submit">Search</button>'
-              f'<a href="/">clear</a></form>{banner}')
+              f'<a href="/">clear</a></form>{banner}') if search_enabled else ""
     page = page.replace("__PROMPTSEARCH__", search)
+    # __CARDS__ is replaced LAST: a card can embed arbitrary prompt-file text
+    # (prompt_html), and every other placeholder is a literal `__NAME__`
+    # token that html.escape does not touch — replacing them first would let
+    # a prompt whose text happens to contain e.g. "__PROMPTSEARCH__" get that
+    # placeholder's markup spliced into its own <pre>.
+    page = page.replace("__CARDS__", "\n".join(cards))
     return page
