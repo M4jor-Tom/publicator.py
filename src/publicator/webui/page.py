@@ -463,8 +463,11 @@ def render_page(*, thumb_map, candidates, pending, existing_ts, timeline,
 </div>"""
 
     # Spec §6 names both lists; only label this one when a lineage filter is
-    # active, so the ordinary (unfiltered) gallery grid stays exactly as-is.
-    if lineage_active:
+    # active AND it actually has results — matching the "possibly from this
+    # prompt" header below, which is gated the same way. An empty labelled
+    # section with no text explaining why it's empty reads as a layout
+    # glitch, not a deliberate "zero exact matches" signal.
+    if lineage_active and candidates:
         cards.append('<div class="groupsplit">images from this prompt</div>')
     for idx, orig_path in enumerate(candidates):
         cards.append(candidate_card(idx, orig_path))
