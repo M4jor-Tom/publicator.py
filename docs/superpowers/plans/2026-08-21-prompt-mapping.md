@@ -52,7 +52,7 @@ def test_load_config_defaults_when_file_missing(tmp_path):
 PROMPTS_TOML = (
     '[prompts]\n'
     'repo = "huggingface_prompts"\n'
-    "filename = '^(?P<lineage>.+)_(?P<version>[0-9a-f]{40})_[0-9a-f-]{36}\\\\.[^.]+$'\n"
+    "filename = '^(?P<lineage>.+)_(?P<version>[0-9a-f]{40})_[0-9a-f-]{36}\\.[^.]+$'\n"
     'version_hash = "sha1"\n')
 
 
@@ -71,7 +71,7 @@ def test_load_config_compiles_the_prompt_grammar(tmp_path):
 def test_load_config_accepts_grammar_without_lineage_group(tmp_path):
     (tmp_path / "publicator.toml").write_text(
         '[prompts]\nrepo = "p"\n'
-        "filename = '^prompt-(?P<version>[0-9a-f]{64})\\\\.png$'\n"
+        "filename = '^prompt-(?P<version>[0-9a-f]{64})\\.png$'\n"
         'version_hash = "sha256"\n')
     p = load_config(tmp_path)["prompts"]
     assert "lineage" not in p["pattern"].groupindex
@@ -80,7 +80,7 @@ def test_load_config_accepts_grammar_without_lineage_group(tmp_path):
 def test_load_config_rejects_grammar_without_version_group(tmp_path):
     (tmp_path / "publicator.toml").write_text(
         '[prompts]\nrepo = "p"\n'
-        "filename = '^(?P<lineage>.+)\\\\.png$'\n"
+        "filename = '^(?P<lineage>.+)\\.png$'\n"
         'version_hash = "sha1"\n')
     with pytest.raises(ValueError, match="version"):
         load_config(tmp_path)
@@ -89,7 +89,7 @@ def test_load_config_rejects_grammar_without_version_group(tmp_path):
 def test_load_config_rejects_unknown_version_hash(tmp_path):
     (tmp_path / "publicator.toml").write_text(
         '[prompts]\nrepo = "p"\n'
-        "filename = '^(?P<version>.+)\\\\.png$'\n"
+        "filename = '^(?P<version>.+)\\.png$'\n"
         'version_hash = "crc32-of-my-dreams"\n')
     with pytest.raises(ValueError, match="version_hash"):
         load_config(tmp_path)
@@ -107,7 +107,7 @@ def test_load_config_rejects_uncompilable_pattern(tmp_path):
 def test_load_config_rejects_missing_repo(tmp_path):
     (tmp_path / "publicator.toml").write_text(
         '[prompts]\n'
-        "filename = '^(?P<version>.+)\\\\.png$'\n"
+        "filename = '^(?P<version>.+)\\.png$'\n"
         'version_hash = "sha1"\n')
     with pytest.raises(ValueError, match="repo"):
         load_config(tmp_path)
@@ -2183,3 +2183,40 @@ Then open the gallery (`cd ../Art && nix run <this>#publish-next`) and confirm b
 2. A card whose prompt is lost shows an amber **prompt NOT ARCHIVED ⚠** block, and the versions inside it are visibly framed as *not* this image's prompt.
 3. Searching a phrase from a known prompt returns that art, and the banner states how many candidates were skipped as unarchived.
 4. Clicking a lineage label loads `/?lineage=…` with two clearly separated groups.
+
+---
+
+## As executed (2026-08-22)
+
+Delivered on `feature/prompt-mapping` in 19 commits, plus 3 in
+`huggingface_prompts`. 148 tests pass. Divergences from the plan above, all
+arising from task reviews:
+
+- **Task 1's test fixtures were over-escaped** (4 backslashes in Python source
+  yields 2 inside a TOML *literal* string, which the regex reads as an escaped
+  backslash). Corrected in place above; the shipped tests use the corrected form.
+- **`_stamp` gained a `tz` parameter.** Rendering a commit date in ambient local
+  time was inconsistent with `calendar_view.py` and `scheduling.py`, which both
+  take `tz` explicitly, and with this module's own "pure, like calendar_view"
+  docstring.
+- **`PromptArchive` gained a `threading.Lock`.** Task 6 shares one instance
+  across `ThreadingHTTPServer` threads, and `_refresh` rebuilds its lookup maps
+  in place; a concurrent reader could see them empty (a `Nearest` silently
+  becoming `Unknown`), and two concurrent refreshes could corrupt the index for
+  the life of the process, since `_head` is set last.
+- **`HEAD_PROBE_TTL` was added.** `_refresh` probed `git rev-parse HEAD` on every
+  query, which a 3436-image search turns into thousands of serialized subprocess
+  spawns.
+- **The search form is gated on the archive being present.** Without the gate, a
+  data dir with no `[prompts]` section rendered a search box that emptied the
+  gallery.
+- **`__CARDS__` is now the last placeholder replacement**, so prompt text
+  containing a literal `__PROMPTSEARCH__` cannot splice the search form into its
+  own `<pre>`.
+- **The CSS in §6 assumed a light page.** It is dark (`body` `#1a1a1a`, `.card`
+  `#2a2a2a`); several colours were re-measured against their real backdrops, and
+  lineage links needed two rules because they render on both a pale summary and
+  the dark card.
+
+Not done here, deliberately: pushing either repo, and bumping `../Art`'s
+submodule pointer. Those belong together and are the repo owner's to run.
