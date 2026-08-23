@@ -31,6 +31,9 @@ nix run <this>#check-steps                            # drift guard: STEPS regis
 ```
 
 There is no linter. Correctness is guarded by pytest (`tests/`).
+`tests/test_llm_meta_openrouter.py` calls OpenRouter for real: it **skips with a
+warning when offline**, but a reachable network with no `$OPENROUTER_KEY` is a
+failure, not a skip.
 Some scheduler tests shell out to `node` to run the served page's client JS and
 `pytest.skip` if `node` is absent.
 
@@ -88,6 +91,10 @@ to the logged-in `claude` CLI (uses the Claude subscription, no API key). Vision
 works by handing the model the image **path** + the Read tool, *not* `llm -a`
 (attachments are broken through this plugin). `openrouter/*` model ids are the
 exception — they use `-a <image>` and read `$OPENROUTER_KEY` at runtime.
+Most free OpenRouter vision models **reject `--schema`**; `run_llm` retries once
+with the shape in the prompt and remembers the verdict per model (see
+`NO_SCHEMA_SUPPORT`). Don't "fix" a schema failure by chasing a model id that
+supports structured outputs — the free ones churn.
 
 **Scheduling is entirely server-side** (`publicator/scheduling.py`). All
 weekday/hour/timezone math lives in Python (`zoneinfo`, `schedule.timezone`,
