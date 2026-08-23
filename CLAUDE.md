@@ -95,8 +95,9 @@ exception — they use `-a <image>` and read `$OPENROUTER_KEY` at runtime.
 Most free OpenRouter vision models **reject `--schema`**; `run_llm` retries once
 with the shape in the prompt and remembers the verdict per model (see
 `NO_SCHEMA_SUPPORT`). Don't "fix" a schema failure by chasing a model id that
-supports structured outputs — the free ones churn. Every AI caller downscales
-through `images.thumb_for_ai` first.
+supports structured outputs — the free ones churn; rationale and the rejected
+alternatives are in `docs/adr/0005`. Every AI caller downscales through
+`images.thumb_for_ai` first.
 
 **Scheduling is entirely server-side** (`publicator/scheduling.py`). All
 weekday/hour/timezone math lives in Python (`zoneinfo`, `schedule.timezone`,
@@ -153,6 +154,6 @@ flow.
 - Run apps from the data dir (or pass `--data-dir`) — see the code/data split above.
 - `.webp` is rejected by DeviantArt (top of this file); convert before publishing.
 - Login is out-of-band in real Firefox; Playwright cannot pass the PerimeterX wall.
-- `AGENTS.md` mirrors the one-line `.webp` fact; this file is the fuller guidance.
+- `AGENTS.md` is a symlink to this file — edit `CLAUDE.md`, never `AGENTS.md`.
 - Prompt lookup is content-addressed, never `basename`-at-`HEAD`; and the
   filename grammar lives in `publicator.toml`, not in the code.
