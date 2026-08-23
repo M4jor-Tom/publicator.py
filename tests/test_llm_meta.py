@@ -24,6 +24,40 @@ def test_run_llm_builds_argv_and_parses_schema():
     assert cap["stdin"] == "hi"
 
 
+def test_run_llm_retries_without_schema_then_remembers_the_model(monkeypatch):
+    monkeypatch.setattr(llm_meta, "_NO_SCHEMA", set())   # module state: don't leak between tests
+    calls = []
+
+    def run(argv, stdin):
+        calls.append((argv, stdin))
+        if "--schema" in argv:
+            return SimpleNamespace(returncode=1, stdout="",
+                                   stderr=f"Error: OpenRouter: m {llm_meta.NO_SCHEMA_SUPPORT}\n")
+        return SimpleNamespace(returncode=0, stdout='```json\n{"a": 1}\n```', stderr="")
+
+    call = lambda: llm_meta.run_llm("m", "hi", schema={"type": "object"}, attach="/i.png", run=run)
+    assert call() == {"a": 1}
+    assert len(calls) == 2
+    assert "--schema" not in calls[1][0]              # retry drops the rejected flag
+    assert '"type": "object"' in calls[1][1]          # ...and puts the shape in the prompt
+
+    # schema support is static per model, so the next image doesn't re-pay the spawn
+    assert call() == {"a": 1}
+    assert len(calls) == 3 and "--schema" not in calls[2][0]
+
+
+def test_run_llm_other_failure_is_not_retried():
+    calls = []
+
+    def run(argv, stdin):
+        calls.append(argv)
+        return SimpleNamespace(returncode=1, stdout="", stderr="Error code: 429 rate-limited")
+
+    with pytest.raises(RuntimeError, match="429"):
+        llm_meta.run_llm("m", "hi", schema={"type": "object"}, attach="/i.png", run=run)
+    assert len(calls) == 1
+
+
 def test_run_llm_nonzero_raises():
     with pytest.raises(RuntimeError, match="llm failed"):
         llm_meta.run_llm("m", "hi", cwd="/w", run=make_run(returncode=1, stderr="boom"))
