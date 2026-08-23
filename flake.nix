@@ -97,6 +97,10 @@
         #   nix run .#da-publish -- --data-dir <dir> [--uuid <id>]
         da-publish = app "da-publish" "da_publish" [ pkgs.imagemagick browsers ] true;
         pw-daemon = app "pw-daemon" "pw_daemon" [ browsers ] true;
+        # AI title/description for image paths, no gallery/data dir needed:
+        #   nix run .#generate-meta -- [--openrouter] IMAGE...
+        # `claude` for the key-free path; no browsers (this one never publishes).
+        generate-meta = app "generate-meta" "generate_meta" [ claude ] false;
         validate = app "validate" "validate" [ ] false;
         # First state=unpublished entry's path/title/schedule (used by the skill).
         echo-first = app "echo-first" "echo_first" [ ] false;

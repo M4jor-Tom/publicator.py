@@ -18,6 +18,7 @@ from publicator.images import (
     guess_mime,
     index_by_basename,
     load_publicated_hashes,
+    thumb_for_ai,
     thumb_name,
 )
 from publicator.llm_meta import DEFAULT_MODEL, generate_metadata
@@ -225,12 +226,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
                 model = data.get("model") or self.ai_model
                 if model not in (self.ai_model, self.openrouter_model):
                     self._send(400, {"error": f"model not allowed: {model}"}); return
-                # Send the thumbnail to Claude, not the full-res original — same
-                # visual info for a fraction of the tokens/latency.
-                try:
-                    image_for_ai = ensure_thumb(path, self.cache_dir, self.thumb_map.get(path))
-                except OSError:
-                    image_for_ai = path      # unwritable cache: costlier, still works
+                image_for_ai = thumb_for_ai(path, self.cache_dir, self.thumb_map.get(path))
                 log.debug("AI metadata: %s (model=%s, timeout=%ss)",
                           image_for_ai, model, self.ai_timeout)
                 try:
