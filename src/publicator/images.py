@@ -99,3 +99,12 @@ def ensure_thumb(path: str, cache_dir: str, name: str | None = None) -> str:
         except (subprocess.CalledProcessError, FileNotFoundError):
             shutil.copy2(path, thumb)
     return thumb
+
+
+def thumb_for_ai(path: str, cache_dir: str, name: str | None = None) -> str:
+    """What to hand a vision model: the thumbnail, not the full-res original — same
+    visual info for a fraction of the tokens/latency. Every AI caller comes here."""
+    try:
+        return ensure_thumb(path, cache_dir, name)
+    except OSError:
+        return path      # unwritable cache: costlier, still works

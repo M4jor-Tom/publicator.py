@@ -9,7 +9,7 @@ from publicator import setup_logging
 from publicator.config import load_config
 from publicator.deviantart import configure, load_pending_entries
 from publicator.images import find_candidates
-from publicator.llm_meta import DEFAULT_MODEL
+from publicator.llm_meta import DEFAULT_MODEL, OPENROUTER_MODEL
 from publicator.webui.server import serve
 
 log = logging.getLogger("publicator.gallery")
@@ -22,10 +22,7 @@ def main() -> int:
                         help="publication database dir (publications.json + images + browser session); default: CWD")
     parser.add_argument("--json", default=None, help="default: <data-dir>/publications.json")
     parser.add_argument("--ai-model", default=DEFAULT_MODEL)
-    parser.add_argument("--openrouter-model",
-                        # ponytail: free :free ids churn on OpenRouter; this is the current
-                        # free model with both vision and structured_outputs. Override via flag.
-                        default="openrouter/google/gemma-4-26b-a4b-it:free",
+    parser.add_argument("--openrouter-model", default=OPENROUTER_MODEL,
                         help="free vision model for the OpenRouter option; needs $OPENROUTER_KEY")
     parser.add_argument("--ai-timeout", type=int, default=300,
                         help="seconds to wait for an AI title/description (default: 300)")

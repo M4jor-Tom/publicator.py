@@ -43,6 +43,7 @@ Some scheduler tests shell out to `node` to run the served page's client JS and
 nix run <this>#login          # one-time DeviantArt sign-in in a REAL Firefox (see PerimeterX below)
 nix run <this>#publish-next   # the gallery UI: review picked/, AI metadata, schedule, batch-publish
 nix run <this>#da-publish -- --data-dir <dir> [--uuid <id>]   # publish ONE publications.json entry
+nix run <this>#generate-meta -- [--openrouter] IMAGE...   # AI title/description only, no gallery, no data dir
 nix run <this>#validate       # validate publications.json against publicationsSchema.json
 nix run <this>#echo-first     # path/title/schedule of the first state=unpublished entry
 nix run <this>#check-steps    # cheap CI drift guard (no browser/data deps)
@@ -94,7 +95,8 @@ exception — they use `-a <image>` and read `$OPENROUTER_KEY` at runtime.
 Most free OpenRouter vision models **reject `--schema`**; `run_llm` retries once
 with the shape in the prompt and remembers the verdict per model (see
 `NO_SCHEMA_SUPPORT`). Don't "fix" a schema failure by chasing a model id that
-supports structured outputs — the free ones churn.
+supports structured outputs — the free ones churn. Every AI caller downscales
+through `images.thumb_for_ai` first.
 
 **Scheduling is entirely server-side** (`publicator/scheduling.py`). All
 weekday/hour/timezone math lives in Python (`zoneinfo`, `schedule.timezone`,
