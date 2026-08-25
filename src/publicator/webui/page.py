@@ -73,6 +73,17 @@ PAGE_TEMPLATE = r"""<!DOCTYPE html>
   .ev img { width: 46px; height: 46px; object-fit: cover; border-radius: 3px; }
   .ev.past { opacity: 0.55; }
   .ev.upcoming img { outline: 2px solid #2196f3; }
+  /* A thumbnail whose prompt is known is a popover trigger, not a link; strip
+     the UA button chrome so it stays pixel-identical to its <a> siblings.
+     Not `font: inherit` — that shorthand would also reset the 11px .ev sets
+     for the no-thumbnail (title-only) case. */
+  button.ev { background: none; border: 0; padding: 0; cursor: pointer;
+              font-family: inherit; }
+  .evpop { background: #2a2a2a; color: #eee; border: 1px solid #444; border-radius: 8px;
+           padding: 12px; max-width: min(38rem, 92vw); max-height: 85vh; overflow: auto; }
+  .evpop::backdrop { background: rgba(0, 0, 0, .55); }
+  .evpop .evtitle { font-size: 15px; margin-bottom: .3rem; word-break: break-word; }
+  .evpop > a { color: #8ac; font-size: 13px; }   /* ~7.18:1 on #2a2a2a */
   .prompt { margin: .4rem 0; font-size: .85rem; text-align: left; }
   .prompt > summary { cursor: pointer; padding: .2rem .4rem; border-radius: 3px; }
   .prompt.exact > summary { background: #eef4ee; color: #2c4a2c; }
@@ -180,6 +191,9 @@ function showTab(name) {                 // two tabs, one page: no routing, no r
 document.getElementById("calendar-tab").addEventListener("click", e => {
   const a = e.target.closest('a[href^="#"]');
   if (!a) return;
+  // The link may live inside an event's popover (top layer, but still a DOM
+  // descendant of this tab, which is why the click reaches here at all).
+  a.closest("[popover]")?.hidePopover();
   showTab("gallery");
   document.getElementById(a.getAttribute("href").slice(1))?.scrollIntoView({block: "center"});
 });
@@ -490,7 +504,8 @@ def render_page(*, thumb_map, candidates, pending, existing_ts, timeline,
     page = PAGE_TEMPLATE
     # anchors: uuid -> card id, how a scheduled entry links back to its card.
     anchors = {e["uuid"]: e["cardId"] for e in pending_js}
-    page = page.replace("__CALENDAR__", render_calendar(timeline, tz=tz, anchors=anchors))
+    page = page.replace("__CALENDAR__", render_calendar(timeline, tz=tz, anchors=anchors,
+                                                        prompts=prompt_html))
     page = page.replace("__PENDING__", json.dumps(pending_js))
     page = page.replace("__EXISTING_TS__", json.dumps(existing_ts))
     page = page.replace("__SCHEDULES__", json.dumps(schedules))

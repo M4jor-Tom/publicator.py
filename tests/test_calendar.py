@@ -103,9 +103,9 @@ def test_timeline_tolerates_a_missing_file(tmp_path):
 
 # --- render ---------------------------------------------------------------
 
-def _render(rows, now=None, anchors=None):
+def _render(rows, now=None, anchors=None, prompts=None):
     return render_calendar(rows, tz=PARIS, now=now or ts(2026, 1, 6, 12),
-                           anchors=anchors or {})
+                           anchors=anchors or {}, prompts=prompts or {})
 
 
 def row(**over):
@@ -153,6 +153,53 @@ def test_a_queued_event_without_a_card_is_still_shown_unlinked():
     c = cell(page, "2026-01-20")
     assert "Haunted Tower" in c
     assert "href=" not in c
+
+
+BLOCK = '<details class="prompt exact"><summary>prompt</summary><pre>a cat</pre></details>'
+
+
+def test_a_published_event_shows_the_same_prompt_block_the_gallery_renders():
+    # The whole point of the unification: prompt_view renders the block once,
+    # for a card and a calendar thumbnail alike — spliced in, never re-derived.
+    page = _render([row(path="/d/art.webp")], prompts={"/d/art.webp": BLOCK})
+    c = cell(page, "2026-01-06")
+    assert BLOCK in c
+    assert 'popovertarget="evp2026-01-06-0"' in c
+    assert 'id="evp2026-01-06-0" popover' in c
+
+
+def test_a_prompt_bearing_event_keeps_its_deviantart_link_inside_the_panel():
+    page = _render([row(path="/d/art.webp")], prompts={"/d/art.webp": BLOCK})
+    c = cell(page, "2026-01-06")
+    assert 'href="https://da/art/Haunted-Tower"' in c and 'target="_blank"' in c
+    assert "open on DeviantArt" in c
+
+
+def test_a_prompt_bearing_queued_event_still_reaches_its_gallery_card():
+    page = _render([row(state="unpublished", url=None, ts=ts(2026, 1, 20),
+                        path="/d/art.webp")],
+                   anchors={"u1": "pending_3"}, prompts={"/d/art.webp": BLOCK})
+    c = cell(page, "2026-01-20")
+    assert '<a href="#pending_3">go to its gallery card</a>' in c
+    assert 'target="_blank"' not in c   # an in-page anchor, not a new tab
+
+
+def test_an_event_without_a_known_prompt_stays_a_one_click_link():
+    # Most of the back-catalogue predates the archive; a panel holding only a
+    # link would cost those an extra click for nothing.
+    c = cell(_render([row(path="/d/art.webp")]), "2026-01-06")
+    assert "popover" not in c
+    assert '<a class="ev upcoming" href="https://da/art/Haunted-Tower"' in c
+
+
+def test_every_event_panel_gets_its_own_id_even_within_one_publication():
+    # Two apparitions of one entry share a uuid AND, here, one art file, so the
+    # id has to come off the cell — otherwise both panels answer to one target.
+    page = _render([row(path="/d/a.webp"), row(path="/d/a.webp"),
+                    row(path="/d/a.webp", ts=ts(2026, 1, 8))],
+                   prompts={"/d/a.webp": BLOCK})
+    for eid in ("evp2026-01-06-0", "evp2026-01-06-1", "evp2026-01-08-0"):
+        assert f'id="{eid}" popover' in page and f'popovertarget="{eid}"' in page
 
 
 def test_today_is_marked_and_past_events_are_dimmed():

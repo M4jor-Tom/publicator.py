@@ -70,10 +70,18 @@ def months_between(first: date, last: date):
             else date(first.year, first.month + 1, 1)
 
 
-def event_html(row: dict, now: int, anchors: dict) -> str:
+def event_html(row: dict, now: int, anchors: dict, prompts: dict, eid: str) -> str:
     """One publication inside a day cell: its thumbnail, linking to DeviantArt
     once published, else to its card in the gallery tab. Rows whose art is no
-    longer on disk carry no `thumb` and show their title instead."""
+    longer on disk carry no `thumb` and show their title instead.
+
+    When the archive knows the art's prompt, the thumbnail opens a panel
+    carrying the very same block a gallery card shows (prompt_view renders it
+    once, for both tabs) with that link moved inside. A day cell is ~150px
+    wide, so a prompt <pre> has nowhere to live inline — hence a native
+    popover, which also gets light-dismiss without a line of JS. Rows with no
+    prompt keep the plain one-click link: most of the back-catalogue predates
+    the archive, and making those cost an extra click buys nothing."""
     cls = "ev " + ("upcoming" if row["ts"] >= now else "past")
     title = html.escape(row["title"], quote=True)
     thumb = row.get("thumb")   # stamped server-side; the view never touches disk
@@ -81,13 +89,22 @@ def event_html(row: dict, now: int, anchors: dict) -> str:
            f' title="{title}" loading="lazy" onerror="this.replaceWith(this.alt)">'
            if thumb else title)
     href = row["url"] or (f"#{anchors[row['uuid']]}" if row["uuid"] in anchors else "")
-    if not href:
-        return f'<span class="{cls}">{img}</span>'
     tab = ' target="_blank" rel="noopener"' if row["url"] else ""
-    return f'<a class="{cls}" href="{html.escape(href, quote=True)}"{tab}>{img}</a>'
+    prompt = prompts.get(row.get("path"), "")
+    if not prompt:
+        if not href:
+            return f'<span class="{cls}">{img}</span>'
+        return f'<a class="{cls}" href="{html.escape(href, quote=True)}"{tab}>{img}</a>'
+    link = (f'<a href="{html.escape(href, quote=True)}"{tab}>'
+            f'{"open on DeviantArt ↗" if row["url"] else "go to its gallery card"}</a>'
+            if href else "")
+    return (f'<button class="{cls}" popovertarget="{eid}">{img}</button>'
+            f'<div id="{eid}" popover class="evpop">'
+            f'<div class="evtitle">{title}</div>{link}{prompt}</div>')
 
 
-def month_html(year: int, month: int, by_day: dict, today: date, now: int, anchors: dict) -> str:
+def month_html(year: int, month: int, by_day: dict, today: date, now: int,
+               anchors: dict, prompts: dict) -> str:
     head = "".join(f"<th>{d}</th>" for d in calendar.day_abbr)
     weeks = []
     for week in calendar.Calendar().monthdatescalendar(year, month):
@@ -97,7 +114,11 @@ def month_html(year: int, month: int, by_day: dict, today: date, now: int, ancho
                 cells.append('<td class="day other"></td>')
                 continue
             cls = "day today" if d == today else "day"
-            evs = "".join(event_html(r, now, anchors) for r in by_day.get(d, []))
+            # Popover ids must be unique page-wide, and every date renders in
+            # exactly one cell (spill-over takes the `other` branch above), so
+            # the day plus a position within it is enough.
+            evs = "".join(event_html(r, now, anchors, prompts, f"evp{d.isoformat()}-{i}")
+                          for i, r in enumerate(by_day.get(d, [])))
             cells.append(f'<td class="{cls}" data-date="{d.isoformat()}">'
                          f'<span class="num">{d.day}</span>{evs}</td>')
         weeks.append("<tr>" + "".join(cells) + "</tr>")
@@ -108,16 +129,20 @@ def month_html(year: int, month: int, by_day: dict, today: date, now: int, ancho
 
 
 def render_calendar(rows: list[dict], *, tz, now: int | None = None,
-                    anchors: dict | None = None) -> str:
+                    anchors: dict | None = None,
+                    prompts: dict | None = None) -> str:
     """Month grids from the first publication through the last scheduled one,
     always including the current month. `anchors` maps uuid -> gallery card id,
-    which is how a queued entry links back to its editable card."""
+    which is how a queued entry links back to its editable card. `prompts` maps
+    art path -> the prompt block already rendered for the gallery, so both tabs
+    show one image's prompt identically by construction, not by convention."""
     now = int(now if now is not None else time.time())
     anchors = anchors or {}
+    prompts = prompts or {}
     today = datetime.fromtimestamp(now, tz).date()
     by_day: dict[date, list] = {}
     for r in rows:
         by_day.setdefault(datetime.fromtimestamp(r["ts"], tz).date(), []).append(r)
     days = list(by_day) + [today]
-    return "\n".join(month_html(y, m, by_day, today, now, anchors)
+    return "\n".join(month_html(y, m, by_day, today, now, anchors, prompts)
                      for y, m in months_between(min(days), max(days)))
