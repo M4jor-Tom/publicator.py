@@ -25,6 +25,8 @@ def test_thumb_maps_pairs_gallery_art_with_calendar_rows(tmp_path):
     assert "cd" * 16 + ".webp" not in thumb_src                  # art no longer on disk
     assert rows[0]["thumb"] == "ab" * 16 + ".webp"               # stamped for the view
     assert rows[1]["thumb"] == ""                                # ...which shows text instead
+    assert rows[0]["path"] == str(old)   # how the calendar looks its prompt up
+    assert rows[1]["path"] == ""         # no file, so no prompt to resolve
 
 
 def test_thumb_maps_hashes_a_row_the_json_never_recorded_a_sha_for(tmp_path):

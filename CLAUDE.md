@@ -86,6 +86,12 @@ resolves against CWD/`--data-dir`, per the code/data split above.
    `publications.json`, past and scheduled — rows whose name is a URL link out to DA,
    queued ones jump to their gallery card. All day/month math is server-side, in
    the schedule timezone, for the same reason scheduling is (see below).
+   Both tabs show one image's prompt identically because they are handed the
+   *same* block: the server resolves `{art path: prompt HTML}` once per request
+   (`_prompt_html`) and passes it to the cards and to `render_calendar`. A day
+   cell has no room for a prompt `<pre>`, so a calendar thumbnail whose prompt is
+   known becomes a native `popover` trigger holding that block plus its link;
+   rows with no archived prompt stay the plain one-click link they were.
 3. `publicator/deviantart.py` is the Playwright submit logic for **one** entry
    (one-way import: `webui.server` / `apps.da_publish` → `deviantart`, no cycle).
    It flips the entry's apparition `state` `unpublished` → `published_or_scheduled`.
@@ -124,8 +130,10 @@ needs one, so a cold calendar doesn't stall startup; `/thumbs/<name>` only serve
 names the page actually rendered (that allow-list is what keeps paths from being
 traversed in). Add `.thumbs/` to the data dir's `.gitignore`.
 
-**Prompt mapping.** A card can show the generation prompt that produced its
-image. The art repo's `huggingface_prompts` submodule *is* the archive:
+**Prompt mapping.** A gallery card and a calendar thumbnail alike can show the
+generation prompt that produced its image — one block, rendered once by
+`webui/prompt_view.py` and handed to both tabs, so they cannot drift apart.
+The art repo's `huggingface_prompts` submodule *is* the archive:
 `identify_image.sh` commits a prompt before minting the digest that names it,
 so a filename references content git holds (it did not, historically — 86% of
 prompt versions were never committed and are unrecoverable).

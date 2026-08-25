@@ -61,11 +61,17 @@ class GalleryHandler(BaseHTTPRequestHandler):
     publicable_dirs: list[str] = []      # walked in full when a filter is active
 
     def _prompt_html(self, paths) -> dict[str, str]:
-        """{art path: prompt block} for the cards this page will show."""
+        """{art path: prompt block} for everything this page will show — the
+        gallery's cards AND the calendar's thumbnails, resolved once and shared,
+        so a published image's prompt renders exactly like a candidate's.
+        Deduped because a queued entry is both a pending card and a calendar
+        row, and resolving a Nearest runs difflib over every candidate path."""
         if self.archive is None:
             return {}
         tz = zone(self.config.get("schedule", {}))
-        wanted = list(paths) + [e["path"] for e in self.pending]
+        wanted = dict.fromkeys(
+            list(paths) + [e["path"] for e in self.pending]
+            + [r["path"] for r in self.timeline if r.get("path")])
         return {p: block for p in wanted
                 if (block := render_prompt(self.archive.resolve_path(p),
                                            near=os.path.dirname(p), tz=tz))}
@@ -308,10 +314,12 @@ class GalleryHandler(BaseHTTPRequestHandler):
 
 def thumb_maps(data_dir: str, paths: list[str], rows: list[dict]) -> tuple[dict, dict]:
     """({art path: cache name}, {cache name: art path}) for everything the page
-    can show, and each calendar row stamped with its cache name (empty when its
-    art has left the disk). Naming happens here, where the files are: gallery art
-    is hashed, the back-catalogue reuses the sha512 publications.json stores, and
-    one walk of the data dir resolves basenames to paths."""
+    can show, and each calendar row stamped with its cache name and its file on
+    disk (both empty when its art has left the disk). Naming happens here, where
+    the files are: gallery art is hashed, the back-catalogue reuses the sha512
+    publications.json stores, and one walk of the data dir resolves basenames to
+    paths. `path` is that same walk's answer, which is what lets the calendar
+    look a published image's prompt up by path like any gallery card."""
     thumb_map = {p: thumb_name(p) for p in paths}
     thumb_src = {name: p for p, name in thumb_map.items()}
     index = index_by_basename(data_dir)
@@ -320,6 +328,7 @@ def thumb_maps(data_dir: str, paths: list[str], rows: list[dict]) -> tuple[dict,
         # thumb_name() off `src`, not the basename: the oldest entries have no
         # stored sha at all, and then it hashes the file it just found.
         r["thumb"] = thumb_name(src, r["sha"]) if src else ""
+        r["path"] = src or ""
         if src:
             thumb_src[r["thumb"]] = src
     return thumb_map, thumb_src
