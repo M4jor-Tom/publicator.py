@@ -275,7 +275,7 @@ def _step_add_tags(page, e):
         page.wait_for_timeout(120)
 
 
-PREMIUM_TOGGLE_LABEL = "Submit as Premium Download"          # a <button> linked to this label
+PREMIUM_TOGGLE_LABEL = "Sell as Premium Download"            # a <button> linked to this label
 PREMIUM_PRICE_SELECTOR = 'input[name="downloadDollarPrice"]'  # appears once the toggle is on
 
 
@@ -305,7 +305,8 @@ def _step_tier(page, e):
     tier = e.get("tier")
     if not tier:
         return
-    combo = page.locator('xpath=//*[normalize-space(text())="Submit to your Subscribers"]/following::*[@role="combobox"][1]')
+    # get_by_text is case-insensitive: DA flips "Subscribers"/"subscribers" between releases.
+    combo = page.get_by_text("Submit to your subscribers").locator('xpath=following::*[@role="combobox"][1]')
     combo.scroll_into_view_if_needed()
     _pick_in_combo(page, combo, tier)
 
@@ -339,7 +340,7 @@ STEPS: list[tuple[str, object]] = [
     ('Tick boxes "Mature" and "Created using AI tools"', _step_checkboxes),
     ('Drop all the pre-filled tags in the "Tags" field', _step_clear_tags),
     ('Copy the content of the tags file (<data-dir>/<"tags" path>, per publicator.toml [tags]) into the "Tags" field', _step_add_tags),
-    ('If the piece has a price, tick "Submit as Premium Download" and set the price', _step_premium),
+    ('If the piece has a price, tick "Sell as Premium Download" and set the price', _step_premium),
     ("Set the subscription tier <pub.tier>", _step_tier),
     ("Add to galleries <pub.galleries>", _step_galleries),
     ("Schedule publication for the <pub.schedule>", _step_schedule),
