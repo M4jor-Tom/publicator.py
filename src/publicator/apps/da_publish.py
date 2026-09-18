@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""CLI: publish ONE publications.json entry to DeviantArt via Playwright."""
+"""CLI: publish publications.json entries to DeviantArt via Playwright —
+the first state=unpublished one by default, one by --uuid, or --all of them."""
 import argparse
 import sys
 
@@ -10,12 +11,18 @@ from publicator.deviantart import check_steps, configure, load_pending_entries, 
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="Publish ONE publications.json entry to DeviantArt via Playwright.")
+        description="Publish publications.json entries to DeviantArt via Playwright.")
     ap.add_argument("--data-dir", default=None,
                     help="publication database dir (publications.json + .deviantart-session); default: CWD")
     ap.add_argument("--json", default=None, help="default: <data-dir>/publications.json")
-    ap.add_argument("--uuid", default=None,
-                    help="entry to publish; default: first state=unpublished")
+    which = ap.add_mutually_exclusive_group()
+    which.add_argument("--uuid", default=None,
+                       help="entry to publish; default: first state=unpublished")
+    which.add_argument("--all", action="store_true",
+                       help="publish every state=unpublished entry in one browser session")
+    ap.add_argument("--headless", action="store_true",
+                    help="run Firefox headless for unattended use "
+                         "(headed by default: headless is a bot-detection signal)")
     ap.add_argument("--check-steps", action="store_true",
                     help="verify STEPS mirror the skill's steps, then exit")
     ap.add_argument("-v", "--verbose", action="store_true", help="debug logging (steps, session, llm)")
@@ -37,10 +44,13 @@ def main() -> int:
     if not entries:
         print("nothing to publish (no state=unpublished entry)")
         return 0
+    if not a.all:
+        entries = entries[:1]
 
-    entry = entries[0]
-    print(f"publishing: {entry['title']}  [{entry['uuid']}]")
-    published, failed, err = publish_batch([entry], [entry["uuid"]], json_path)
+    for entry in entries:
+        print(f"publishing: {entry['title']}  [{entry['uuid']}]")
+    published, failed, err = publish_batch(
+        entries, [e["uuid"] for e in entries], json_path, headless=a.headless)
     print(f"published={published} failed={failed}")
     if err:
         print(f"error: {err}", file=sys.stderr)

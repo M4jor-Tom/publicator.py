@@ -461,7 +461,7 @@ def _session_authed(page) -> bool:
 
 
 def publish_batch(entries: list[dict], uuids: list[str],
-                  json_path: str) -> tuple[int, int, str | None]:
+                  json_path: str, headless: bool = False) -> tuple[int, int, str | None]:
     """Drive Firefox through DA submission for each entry. Returns (ok, failed, err)."""
     from playwright.sync_api import sync_playwright
 
@@ -476,11 +476,12 @@ def publish_batch(entries: list[dict], uuids: list[str],
     err: str | None = None
 
     with sync_playwright() as p:
-        # Headful Firefox on a copy of the pre-signed-in profile. Login is done
+        # Firefox on a copy of the pre-signed-in profile. Login is done
         # out-of-band via #login (PerimeterX blocks it under Playwright); here we
-        # only verify the session carried over. Headful, not headless: headless
-        # is itself a bot-detection signal.
-        ctx = p.firefox.launch_persistent_context(str(SESSION_DIR), headless=False)
+        # only verify the session carried over. Headed by default: headless is
+        # itself a bot-detection signal, so headless=True is the caller's risk
+        # (da-publish --headless, for unattended runs).
+        ctx = p.firefox.launch_persistent_context(str(SESSION_DIR), headless=headless)
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         # The copied Firefox profile drops its httpOnly auth cookies on load;
         # re-inject them from the login DB before checking the session.
