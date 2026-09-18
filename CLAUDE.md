@@ -42,7 +42,7 @@ Some scheduler tests shell out to `node` to run the served page's client JS and
 ```sh
 nix run <this>#login          # one-time DeviantArt sign-in in a REAL Firefox (see PerimeterX below)
 nix run <this>#publish-next   # the gallery UI: review picked/, AI metadata, schedule, batch-publish
-nix run <this>#da-publish -- --data-dir <dir> [--uuid <id>]   # publish ONE publications.json entry
+nix run <this>#da-publish -- --data-dir <dir> [--uuid <id> | --all] [--headless]   # publish the first pending entry, one by uuid, or all
 nix run <this>#generate-meta -- [--openrouter] IMAGE...   # AI title/description only, no gallery, no data dir
 nix run <this>#validate       # validate publications.json against publicationsSchema.json
 nix run <this>#echo-first     # path/title/schedule of the first state=unpublished entry

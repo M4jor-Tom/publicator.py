@@ -6,20 +6,6 @@ from publicator import deviantart, entries
 from publicator.deviantart import STEPS, check_steps, configure, parse_schedule
 
 
-@pytest.fixture(autouse=True)
-def _restore_data_dir_globals():
-    """configure() mutates the process-global DATA_DIR (and friends) on both
-    deviantart and entries; restore them so a tmp_path pointed at by one test
-    doesn't leak (deleted) into the next."""
-    saved = (deviantart.DATA_DIR, deviantart.LOGIN_DIR, deviantart.SESSION_DIR,
-             deviantart.TAGS_FILE, entries.DATA_DIR)
-    try:
-        yield
-    finally:
-        (deviantart.DATA_DIR, deviantart.LOGIN_DIR, deviantart.SESSION_DIR,
-         deviantart.TAGS_FILE, entries.DATA_DIR) = saved
-
-
 @pytest.mark.parametrize("s,expected", [
     ("Tue Sep 8 08:00:00 PM CEST 2026", (2026, 9, 8, 20)),
     ("Wed Jan 1 12:00:00 AM UTC 2025", (2025, 1, 1, 0)),

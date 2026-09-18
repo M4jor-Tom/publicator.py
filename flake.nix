@@ -93,8 +93,8 @@
         # `claude` on PATH so llm-claude-cli can shell out for AI metadata
         # (uses the logged-in Claude subscription at $HOME/.claude — no API key).
         publish-next = app "publish-next" "publish_next" [ pkgs.git pkgs.imagemagick browsers claude ] true;
-        # Publish ONE publications.json entry (the extracted Playwright flow):
-        #   nix run .#da-publish -- --data-dir <dir> [--uuid <id>]
+        # Publish the first pending publications.json entry, one by uuid, or --all (the extracted Playwright flow):
+        #   nix run .#da-publish -- --data-dir <dir> [--uuid <id> | --all] [--headless]
         da-publish = app "da-publish" "da_publish" [ pkgs.imagemagick browsers ] true;
         pw-daemon = app "pw-daemon" "pw_daemon" [ browsers ] true;
         # AI title/description for image paths, no gallery/data dir needed:
