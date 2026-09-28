@@ -17,7 +17,7 @@ First visit: read `CLAUDE.md` (architecture and gotchas), then the feature you t
 - [Gallery UI (publish-next)](features/gallery-ui.md) — human-review gallery: AI metadata, schedule, stage, batch-publish to DeviantArt
 - [AI metadata (title/description via llm CLI)](features/ai-metadata.md) — title + description via `llm` CLI, Claude or OpenRouter, schema fallback
 - [Scheduling (slots and weekly profiles)](features/scheduling.md) — server-side weekly slot instants and TZ-anchored picker resolution
-- [Calendar tab](features/calendar.md) — read-only month grids of every DA apparition, server-side tz bucketing
+- [Calendar tab](features/calendar.md) — read-only month grids of every DA apparition, server-side tz bucketing, prompt popover per thumbnail
 - [Prompt mapping (image -> generation prompt)](features/prompt-mapping.md) — content-addressed lookup of an image's prompt in the archive repo: Exact, Nearest or Unknown
 - [DeviantArt publishing (Playwright submit flow)](features/deviantart-publish.md) — drives Firefox through DA's submit form for pending entries
 
