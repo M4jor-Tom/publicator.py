@@ -46,7 +46,7 @@
 ## Gotchas
 
 - Don't "fix" a future schema failure by hunting a free model id that supports structured outputs: that is how the original bug arose (`:free` ids churn). The fallback handles it; ADR 0005 alternative A.
-- A 404 on the live test's model means the id died, not the fallback. Pick another schema-less free vision model with the curl|jq in `tests/test_llm_meta_openrouter.py` and change `SCHEMALESS_VISION_MODEL`.
+- A 404 or `Unknown model` on the live test's model means the id died, not the fallback. Pick another schema-less free vision model with the curl|jq in `tests/test_llm_meta_openrouter.py` and change `SCHEMALESS_VISION_MODEL`.
 - `_NO_SCHEMA` is process-global mutable state. Any test exercising the retry must `monkeypatch.setattr(llm_meta, "_NO_SCHEMA", set())` or it poisons later tests expecting `--schema` in argv.
 - Schema-rejection detection string-matches llm's error text (`NO_SCHEMA_SUPPORT = "does not support schemas"`, llm 0.31.1 per ADR 0005). Re-check on an `llm` bump; the live test catches drift. Failure is a loud `RuntimeError`, never a wrong answer.
 - Worst-case wall clock for a schema-rejecting model is 2x timeout: both llm spawns get the same `timeout`. In practice the first dies client-side in about a second.
