@@ -15,11 +15,11 @@ import pytest
 from publicator import llm_meta
 
 # A model that does NOT advertise structured_outputs, which is the point. Free ids
-# churn: if this one 404s the fallback isn't broken, the id is — pick another from
+# churn: if this one 404s or llm says "Unknown model", the fallback isn't broken, the id is — pick another from
 #   curl -s https://openrouter.ai/api/v1/models | jq -r '.data[]
 #     | select(.id|endswith(":free")) | select(.architecture.input_modalities|index("image"))
 #     | select(.supported_parameters|index("structured_outputs")|not) | .id'
-SCHEMALESS_VISION_MODEL = "openrouter/nvidia/nemotron-nano-12b-v2-vl:free"
+SCHEMALESS_VISION_MODEL = "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
 
 # 48x48 navy->orange gradient, so the model has something real to describe.
 # Regenerate with: magick -size 48x48 gradient:navy-orange -strip x.png | base64
