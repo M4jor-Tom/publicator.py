@@ -1,14 +1,11 @@
-## UNTESTED
+# Roadmap
 
-- Schedule
-    - Fix ahead detection => Don't propose for next slot if it's full
+What exists is documented per feature in `docs/features/` (index: `docs/README.md`).
+This file lists only what is not built.
 
-## DONE
-
-- Calendar view (past + future) — Calendar tab in `#publish-next`, read-only
-
-## PLANNED
-
-- Non platform-dependant schedule:
-    - Schedule publicator execution from a github actions workflow instead of deviantart selectors (premium feature)
-- ~~Prompt mapping~~ — done; see `docs/adr/0001`–`0004`
+- **Platform-independent scheduling.** Trigger `da-publish --all --headless` from an
+  external scheduler (e.g. a GitHub Actions cron) instead of paying for DeviantArt's
+  premium scheduling. Groundwork done: the two flags and their tests
+  (`src/publicator/apps/da_publish.py`, `tests/test_da_publish.py`). Not started: the
+  trigger itself, and the fact that the PerimeterX login profile (`.deviantart-login/`)
+  must live on the runner.

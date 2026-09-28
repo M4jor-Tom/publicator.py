@@ -48,7 +48,7 @@ before computing its digest:
 ```sh
 git -C "$repo" add -- "$target"
 git -C "$repo" diff --cached --quiet -- "$target" \
-    || git -C "$repo" commit -q -m "snapshot: ${target#"$repo"/}"
+    || git -C "$repo" commit -q -m "snapshot: ${target#"$repo"/}" -- "$target"
 ```
 
 **Git history is the archive.** There is no second store. A digest minted after
@@ -121,29 +121,7 @@ recorded; it can only disguise its absence.
   This is a cross-repo change.
 - Failure handling of the archive write is a separate decision — see [[0004]].
 
-## Resumption (for Agent)
-
-### Current state
-
-Design approved and committed; **implementation pending**. No code written yet
-in either repository.
-
-### Key files / entry points
-
-| File | Role |
-|------|------|
-| `huggingface_prompts/identify_image.sh` | the change: stage + commit before digesting |
-| `huggingface_prompts/.gitignore` | contains `prompt`; that scratch file can never be archived |
-| `docs/superpowers/specs/2026-08-21-prompt-mapping-design.md` §4 | full spec of the write side |
-| `src/publicator/prompts.py` | to be created: builds the index from git (see [[0002]]) |
-
-### Next steps
-
-1. Edit `identify_image.sh` per spec §4 — resolve `$1` and the repo root to
-   absolute paths, then `add` + conditional `commit`, then the existing `echo`.
-2. Apply the fail-open handling from [[0004]] — the two are one edit in practice.
-3. Add `huggingface_prompts/test_identify_image.sh` (see [[0004]] for what it must assert).
-4. Commit and push in the `huggingface_prompts` repo; bump the submodule pointer in `../Art`.
+## Maintenance
 
 ### How to verify
 
@@ -175,8 +153,7 @@ git cat-file --batch-all-objects --batch-check='%(objectname) %(objecttype)' \
 
 ### Related
 
-- Commits: `7408cf4` (spec), `89592f7` (fail-open revision)
+- Commits: `7408cf4` (spec), `89592f7` (fail-open revision); implemented in `huggingface_prompts` `97aaf63`, `2d4ba4a` and here in `032c896` (read side)
 - Branch: `master`
-- Spec: `docs/superpowers/specs/2026-08-21-prompt-mapping-design.md`
-- Roadmap: `docs/ROADMAP.md:14` — "Prompt mapping"
+- Feature doc: `docs/features/prompt-mapping.md`
 - ADRs: [[0002]] read side, [[0003]] grammar ownership, [[0004]] refines this decision's failure handling

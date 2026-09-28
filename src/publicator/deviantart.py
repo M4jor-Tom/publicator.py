@@ -40,7 +40,7 @@ from publicator.store import mark_state
 
 log = logging.getLogger("publicator.da")
 
-TAGS_FILE = None  # resolved by configure() from publicator.toml [tags], under DATA_DIR
+TAGS_FILE = None  # resolved by configure() from the top-level "tags" key of publicator.toml, under DATA_DIR
 
 # The skill file is a repo asset, not a package one: src/publicator/deviantart.py
 # -> parents[2] is the repo root. Absent (e.g. an installed copy) -> check_steps
@@ -236,7 +236,7 @@ def _step_checkboxes(page, e):
 
 
 def _step_clear_tags(page, e):
-    """Step 6: remove any tags already in the Tags field so only <publicator.toml: "tags" path>
+    """Step 7: remove any tags already in the Tags field so only <publicator.toml: "tags" path>
     ends up on the deviation. DA caps a deviation at 30 tags, so a single
     leftover tag overflows the field once add_tags types its 30.
 
@@ -263,7 +263,7 @@ def _step_clear_tags(page, e):
 
 
 def _step_add_tags(page, e):
-    """Step 7: type each tag from <publicator.toml: "tags" path> into the Tags field."""
+    """Step 8: type each tag from <publicator.toml: "tags" path> into the Tags field."""
     if TAGS_FILE is None:
         raise RuntimeError("no 'tags' path configured in publicator.toml")
     tags = [t.strip() for t in TAGS_FILE.read_text().splitlines() if t.strip()]
@@ -339,7 +339,7 @@ STEPS: list[tuple[str, object]] = [
     ("Set as description <pub.description>", _step_description),
     ('Tick boxes "Mature" and "Created using AI tools"', _step_checkboxes),
     ('Drop all the pre-filled tags in the "Tags" field', _step_clear_tags),
-    ('Copy the content of the tags file (<data-dir>/<"tags" path>, per publicator.toml [tags]) into the "Tags" field', _step_add_tags),
+    ('Copy the content of the tags file (<data-dir>/<"tags" path>, per the top-level "tags" key of publicator.toml) into the "Tags" field', _step_add_tags),
     ('If the piece has a price, tick "Sell as Premium Download" and set the price', _step_premium),
     ("Set the subscription tier <pub.tier>", _step_tier),
     ("Add to galleries <pub.galleries>", _step_galleries),

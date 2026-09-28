@@ -40,6 +40,7 @@ version_hash = "sha1"
 | Key | Required | Meaning to publicator |
 |---|---|---|
 | `repo` | yes | prompts git repo, resolved against the data dir like `tags` |
+| `filename` | yes | the regex; its named groups are the roles below |
 | group `version` | yes | key into the archive — *which exact prompt text* |
 | group `lineage` | no | weak hint — *which logical prompt file* |
 | `version_hash` | yes | digest the art repo used, so publicator hashes archive contents the same way |
@@ -123,30 +124,7 @@ strictly worse than the drift problem it solves.
 - A grammar without a `lineage` group is legal and needs no special case in the
   resolver — see [[0002]].
 
-## Resumption (for Agent)
-
-### Current state
-
-Design approved and committed; **implementation pending**. `publicator.toml` in
-`../Art` does not yet have a `[prompts]` section.
-
-### Key files / entry points
-
-| File | Role |
-|------|------|
-| `src/publicator/config.py` | `load_config` — add `[prompts]` load + validation (~25 lines) |
-| `src/publicator/prompts.py` | to create: consumes the compiled pattern and `version_hash` |
-| `src/publicator/apps/prompt_audit.py` | to create: reports `parsed : N of M` (drift detector) |
-| `../Art/publicator.toml` | data repo: add the `[prompts]` section |
-| `docs/superpowers/specs/2026-08-21-prompt-mapping-design.md` §3, §7 | full spec |
-
-### Next steps
-
-1. Extend `load_config` with a `prompts` key; validate pattern, `version` group,
-   and `version_hash` there, raising `ValueError` that names the problem.
-2. Add the `[prompts]` section to `../Art/publicator.toml` (data repo, commit separately).
-3. Consume it in `prompts.py`; never reference `sha1` or the filename shape in code.
-4. Add `apps/prompt_audit.py` + the flake app entry, with `parsed` as line one.
+## Maintenance
 
 ### How to verify
 
@@ -175,8 +153,8 @@ means the abstraction leaked.
 
 ### Related
 
-- Commits: `7408cf4` (spec), `89592f7`
+- Commits: `7408cf4` (spec), `89592f7`; implemented in `7807845`, `8c361c2`, `7907d31`
 - Branch: `master`
-- Spec: `docs/superpowers/specs/2026-08-21-prompt-mapping-design.md` §3, §7
-- Prior art: `docs/superpowers/specs/2026-08-04-publicator-toml-config-design.md`
+- Feature doc: `docs/features/prompt-mapping.md`
+- Prior art: `docs/features/config.md`
 - ADRs: [[0001]] write side, [[0002]] the roles this grammar feeds, [[0004]]

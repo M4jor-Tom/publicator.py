@@ -22,7 +22,9 @@ from `../Art`.
 
 Everything runs inside the Nix dev shell (`nix develop` provides python312 +
 pytest + imagemagick + Playwright browsers + the `claude` CLI, and sets
-`PLAYWRIGHT_BROWSERS_PATH`). There is no pip/venv.
+`PLAYWRIGHT_BROWSERS_PATH`). There is no pip/venv. `pyproject.toml` is metadata plus pytest config: nothing installs the
+package (apps run with `PYTHONPATH=src`); the authoritative dependency set is
+`flake.nix`'s `pyPkgs`.
 
 ```sh
 nix develop -c pytest -q                              # full test suite
@@ -47,16 +49,22 @@ nix run <this>#generate-meta -- [--openrouter] IMAGE...   # AI title/description
 nix run <this>#validate       # validate publications.json against publicationsSchema.json
 nix run <this>#echo-first     # path/title/schedule of the first state=unpublished entry
 nix run <this>#check-steps    # cheap CI drift guard (no browser/data deps)
+nix run <this>#prompt-audit   # prompt-mapping coverage: parsed N of M, nearest count
+nix run <this>#pw-daemon      # Playwright FIFO daemon for DOM probing (see docs/features/deviantart-publish.md)
 ```
 
 ## Architecture
 
+Per-feature maintenance docs: `docs/README.md` indexes `docs/features/` (one file per
+feature, fixed shape: Does/Run/Code/Tests/Config/Data/Decisions/Verify, then flow,
+invariants, gotchas). Read the feature file before touching its code.
+
 **Layout.** `src/publicator/` is a package: `config.py`, `entries.py`,
-`images.py`, `scheduling.py`, `store.py`, `deviantart.py`, `llm_meta.py` hold
-the logic; `webui/{page,server,calendar_view}.py` is the UI (a pure `render_page`
+`images.py`, `scheduling.py`, `store.py`, `deviantart.py`, `llm_meta.py`, `prompts.py` hold
+the logic; `webui/{page,server,calendar_view,prompt_view}.py` is the UI (a pure `render_page`
 plus the `ThreadingHTTPServer` that calls it, and the calendar tab's own pure
 renderer); `apps/{publish_next,da_publish,
-validate,echo_first,pw_daemon}.py` are the thin CLI entry points the flake's
+validate,echo_first,pw_daemon,generate_meta,prompt_audit}.py` are the thin CLI entry points the flake's
 `nix run` apps invoke. Code assets (the JSON schema) resolve via `__file__`
 inside the package; the tags file, like all data + runtime state, still
 resolves against CWD/`--data-dir`, per the code/data split above.
@@ -75,7 +83,7 @@ resolves against CWD/`--data-dir`, per the code/data split above.
    through the DA submit flow.
    The page has two tabs: the gallery (review/queue/publish) and a **read-only
    calendar** (`webui/calendar_view.py`) of every DeviantArt apparition in
-   `publications.json`, past and scheduled — published entries link out to DA,
+   `publications.json`, past and scheduled — rows whose name is a URL link out to DA,
    queued ones jump to their gallery card. All day/month math is server-side, in
    the schedule timezone, for the same reason scheduling is (see below).
 3. `publicator/deviantart.py` is the Playwright submit logic for **one** entry
@@ -136,7 +144,7 @@ which drops to 0 if that grammar drifts from what `identify_image.sh` produces,
 and `nearest`, which rising means archive writes are failing. Both apps that
 shell out to git (`publish-next`, `prompt-audit`) must list `pkgs.git` in their
 flake `runtimeInputs` — `writeShellApplication` pins PATH to those.
-Full design: `docs/superpowers/specs/2026-08-21-prompt-mapping-design.md`,
+Feature doc: `docs/features/prompt-mapping.md`,
 decisions in `docs/adr/0001`–`0004`.
 
 **State & data.** `publications.json` is the source of truth (an array of entries,

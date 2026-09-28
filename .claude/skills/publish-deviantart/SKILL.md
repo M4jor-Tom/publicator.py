@@ -1,6 +1,6 @@
 ---
 name: publish-deviantart
-description: Publish or schedule the next unpublished art piece to DeviantArt. Try the automated app first; fall back to driving Chromium manually if it exits non-zero.
+description: Publish or schedule the next unpublished art piece to DeviantArt. Try the automated app first; if it exits non-zero, finish by hand in the #login Firefox, using the pw-daemon Chromium only to probe the DOM.
 ---
 
 Every command reads its **publication database** (`publications.json` + images +
@@ -33,15 +33,18 @@ tripped it (so the next run doesn't fall through).
 nix run <publicator.py>#echo-first -- --data-dir .
 ```
 
-## Manual fallback: drive Chromium via the daemon
+## Manual fallback: finish in the #login Firefox, probe with the daemon
 
 ```sh
 nix run .#pw-daemon
 ```
 
-Chromium persistent context in `.deviantart-session/` (the same logged-in
-session the publish-next app uses — no Firefox profile prep needed). First run is
-headed; log into DeviantArt once and the session persists.
+The daemon's Chromium (persistent context in `.deviantart-session/`) is NOT logged
+in: that dir holds the Firefox profile `publish_batch` copies from `.deviantart-login/`,
+which Chromium cannot read, and PerimeterX blocks every Playwright browser at the
+login page. Use it to probe the DOM (find the label a step now times out on). Do the
+steps below by hand in the real, signed-in Firefox: `nix run .#login` opens it on
+the `.deviantart-login/` profile.
 
 Daemon FIFO `/tmp/pw.cmd`, output `/tmp/pw.log`, screenshot `/tmp/pw.png`; scope
 has `page`, `context`, `p`. Send a command chunk, e.g.:
@@ -59,7 +62,7 @@ printf '%s' 'page.goto("https://www.deviantart.com")' > /tmp/pw.cmd
 5. Set as description `<pub.description>`
 6. Tick boxes "Mature" and "Created using AI tools"
 7. Drop all the pre-filled tags in the "Tags" field
-8. Copy the content of the tags file (`<data-dir>/<"tags" path>`, per publicator.toml [tags]) into the "Tags" field
+8. Copy the content of the tags file (`<data-dir>/<"tags" path>`, per the top-level "tags" key of publicator.toml) into the "Tags" field
 9. If the piece has a price, tick "Sell as Premium Download" and set the price
 10. Set the subscription tier `<pub.tier>`
 11. Add to galleries `<pub.galleries>`
