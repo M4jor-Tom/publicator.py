@@ -1,6 +1,6 @@
 # Prompt mapping (image -> generation prompt)
 
-- **Does:** Resolves an art filename to the prompt that generated it by content-digesting every blob of the data dir's prompt git repo (`Exact`/`Nearest`/`Unknown`), shown per gallery card, searchable, audited.
+- **Does:** Resolves an art filename to the prompt that generated it by content-digesting every blob of the data dir's prompt git repo (`Exact`/`Nearest`/`Unknown`), shown per gallery card and calendar thumbnail, searchable, audited.
 - **Run:** `nix run .#prompt-audit -- [--data-dir DIR]` (prints parsed/exact/nearest/unknown)
 - **Run:** `nix run .#publish-next -- [--data-dir DIR]` (cards show the prompt block; `GET /?prompt=<substring>` searches Exact text, `GET /?lineage=<repo path>` groups images by prompt file)
 - **Code:** `src/publicator/prompts.py` (`HEAD_PROBE_TTL`, `PromptArchive`, `from_config`, `rank_paths`, `Nearest`, `resolve_path`), `src/publicator/webui/prompt_view.py` (`render_prompt`, `_stamp`, `_lineage_link`, `_body`), `src/publicator/apps/prompt_audit.py` (`audit`, `format_report`, `main`), `src/publicator/config.py` (`_load_prompts`, `load_config`), `src/publicator/webui/server.py` (`SEARCH_LIMIT`, `GalleryHandler.search`, `GalleryHandler._prompt_html`), `src/publicator/webui/page.py` (`render_page`, `search_enabled`, `__CARDS__`), `flake.nix` (`apps.prompt-audit`, `apps.publish-next`)
@@ -20,7 +20,7 @@
 4. Every query (`versions`/`paths_for`/`versions_at`) takes `self._lock` and calls `_refresh`: return if probed within `HEAD_PROBE_TTL` (2s); else `git rev-parse HEAD`; if HEAD moved or the index is empty, rebuild and set `_head` last.
 5. Rebuild: `_blobs()` walks `cat-file --batch-all-objects --batch` by byte length, digesting each blob with `hashlib.new(version_hash)`; `_history()` walks `log --all --raw --no-abbrev --no-renames --format=%ct` for paths and first commit time.
 6. `resolve()`: digest in `versions()` -> `Exact`. No lineage -> `Unknown`. Else `paths_for(lineage)` (all historical paths of that basename), `rank_paths` (dir-name similarity, nothing dropped), `versions_at` newest-first -> `Nearest`, else `Unknown`.
-7. Gallery `GET /`: `GalleryHandler.do_GET` -> `_build_page` -> `_prompt_html(candidates + maybe)`: per path, `render_prompt(archive.resolve_path(p), near=dirname(p), tz=schedule tz)` -> `{path: html}`; `Unknown` renders `''` and is dropped.
+7. Gallery `GET /`: `GalleryHandler.do_GET` -> `_build_page` -> `_prompt_html(candidates + maybe + pending + timeline rows, deduped)`: per path, `render_prompt(archive.resolve_path(p), near=dirname(p), tz=schedule tz)` -> `{path: html}`, shared by the cards and `render_calendar(prompts=)`; `Unknown` renders `''` and is dropped.
 8. `prompt_view.render_prompt`: `Exact` -> `details.prompt.exact`: `v.paths` as `/?lineage=` links or "path unknown", 7-char digest, escaped `<pre>`; `Nearest` -> `details.prompt.nearest` "prompt NOT ARCHIVED" plus dated `details.pv` per lineage.
 9. `GET /?prompt=X` or `/?lineage=P`: `GalleryHandler.search` walks every publicable dir via `collect_images`; `Nearest` -> `skipped` unless P is a candidate path ("maybe"); `Exact` -> kept if X in text (case-insensitive) and P in `version.paths`.
 10. `search`, cont.: `truncated` set when a list exceeds `SEARCH_LIMIT` (200) before the cap; survivors sha512-hashed, already-published dropped; `_register_thumbs` extends the `/thumbs` allow-list; `render_page` shows both lists plus banners.
@@ -61,7 +61,7 @@
 
 ## Open items
 
-- Unbuilt, not rejected: prompts on the calendar tab (`calendar_view.timeline` rows carry `basename`), storing the resolved prompt in `publications.json`, feeding it to `llm_meta`. Rejected on principle: on-disk index, client-side prompt-UI JS.
+- Unbuilt, not rejected: storing the resolved prompt in `publications.json`, feeding it to `llm_meta`. Rejected on principle: on-disk index, client-side prompt-UI JS.
 - Write side: `identify_image.sh` carries the ADR 0001/0004 guards and has `test_identify_image.sh`, but `huggingface_prompts` history holds no `snapshot:` commits yet, so a flat `nearest` is not yet evidence the guards work in production.
 - `test_concurrent_queries_never_raise_or_tear` is a smoke/deadlock test; it cannot reliably force the torn-index race red.
 - A persistent index keyed on HEAD was considered and never needed; the `HEAD_PROBE_TTL` throttle was enough.
