@@ -130,31 +130,7 @@ but it never filters, and the plural is preserved all the way into the UI.
   This does not weaken `Exact` — the *text* is certain regardless of which file
   it was read from; only the label is plural.
 
-## Resumption (for Agent)
-
-### Current state
-
-Design approved and committed; **implementation pending**. `src/publicator/prompts.py`
-does not exist yet.
-
-### Key files / entry points
-
-| File | Role |
-|------|------|
-| `src/publicator/prompts.py` | to create: types, git index, `resolve()` |
-| `src/publicator/webui/prompt_view.py` | to create: pure renderer, beside `calendar_view.py` |
-| `src/publicator/webui/page.py` | 434 lines already — call the renderer, do not grow it |
-| `tests/test_prompts.py`, `tests/test_prompt_view.py` | to create |
-| `docs/superpowers/specs/2026-08-21-prompt-mapping-design.md` §5–§6 | full spec |
-
-### Next steps
-
-1. Write `prompts.py`: `ImageIdentity`, `PromptVersion`, `Lineage`, `Exact`,
-   `Nearest`, `Unknown`; index from `git cat-file --batch-all-objects --batch`
-   plus one `git log --all --raw --no-abbrev --format=%ct` pass; `resolve()`.
-2. Write `tests/test_prompts.py` — the superseded-version test first (see below).
-3. Write `prompt_view.py` + `tests/test_prompt_view.py`.
-4. Wire `?prompt=` and `?lineage=` query params in `webui/server.py`.
+## Maintenance
 
 ### How to verify
 
@@ -180,14 +156,14 @@ wrong case frozen into a test.
   the cache stays correct there too.
 - `find_candidates` shuffles and caps. Filtering *after* sampling returns
   near-nothing — when a filter is active, bypass the sample and order the work
-  `parse → resolve → filter → dedupe by sha512 → cap`, so the expensive sha512
-  hashing runs only on survivors. Do not modify `find_candidates` itself.
+  `parse → resolve → filter → cap at SEARCH_LIMIT → drop already-published (sha512)`,
+  so the expensive sha512 hashing runs only on the capped survivors. Do not modify `find_candidates` itself.
 - Do not let the ranking heuristic filter. It orders `Nearest.candidates`; the
   plural reaches the UI intact.
 
 ### Related
 
-- Commits: `7408cf4` (spec), `89592f7`
+- Commits: `7408cf4` (spec), `89592f7`; implemented in `e590215`, `032c896`, `f46bcd2`, `bbf7df8`, `8790179`
 - Branch: `master`
-- Spec: `docs/superpowers/specs/2026-08-21-prompt-mapping-design.md` §5–§6
+- Feature doc: `docs/features/prompt-mapping.md`
 - ADRs: [[0001]] write side, [[0003]] grammar ownership, [[0004]] why dangling refs stay possible

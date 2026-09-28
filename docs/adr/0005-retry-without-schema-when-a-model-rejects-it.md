@@ -160,27 +160,9 @@ guard where all callers already route through is the root-cause placement.
   own ADR: it is a thin entry point onto `generate_metadata` with no rejected
   alternatives worth recording.
 
-## Resumption (for Agent)
+## Maintenance
 
-### Current state
-
-**Done and verified.** Both commits are on `master`. The fallback, the memo, the
-lenient parse, the offline unit tests and the live integration test are all in
-place; the full suite is green (151 tests).
-
-### Key files / entry points
-
-| File | Role |
-|------|------|
-| `src/publicator/llm_meta.py` | `NO_SCHEMA_SUPPORT`, `_NO_SCHEMA`, `_JSON_FALLBACK`, `_loads_json`, `_invoke`, and the retry inside `run_llm` |
-| `tests/test_llm_meta.py` | Offline unit tests: the retry fires, the verdict is remembered, an unrelated failure is *not* retried |
-| `tests/test_llm_meta_openrouter.py` | Live check against a deliberately schema-less model; gated on connectivity, not on the key |
-| `src/publicator/webui/server.py` | The `/ai` endpoint — inherits the fallback, unchanged by it |
-| `src/publicator/apps/generate_meta.py` | CLI entry point, same inheritance |
-
-### Next steps
-
-None outstanding. If this ever needs revisiting:
+### If revisited
 
 1. If `llm` is unpinned or bumped, re-check that the message at
    `llm/models.py:691` still contains `does not support schemas`; the live test

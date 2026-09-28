@@ -2,8 +2,9 @@
 `context`, `p` in scope. Writes screenshot + log after each command.
 
 Chromium persistent context in the publication database dir (--data-dir, default
-CWD) `.deviantart-session/`, so it shares the logged-in DeviantArt session with
-the publish-next app.
+CWD) `.deviantart-session/`. It is NOT logged in: publish_batch refills that dir with
+a Firefox profile Chromium cannot read, and PerimeterX blocks Playwright browsers at
+DeviantArt's login page. A DOM-probing tool, not a publishing path.
 
 # ponytail: single-page, single-context daemon. Add tab tracking if the
 # publication flow starts spawning multiple tabs we care about.

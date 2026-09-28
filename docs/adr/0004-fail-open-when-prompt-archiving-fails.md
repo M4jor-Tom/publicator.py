@@ -113,33 +113,7 @@ stdout is captured. A prompt would hang or corrupt the filename.
   dangling new references, and able to **fall** when a previously-failed prompt
   is committed later. A rise is the signal to go read the warnings.
 
-## Resumption (for Agent)
-
-### Current state
-
-Design approved and committed; **implementation pending**. In practice this is
-the same single edit as [[0001]] — do not implement fail-closed first.
-
-### Key files / entry points
-
-| File | Role |
-|------|------|
-| `huggingface_prompts/identify_image.sh` | the guards: warn + continue, never exit non-zero |
-| `huggingface_prompts/rename_image.sh` | the caller whose behaviour forced this decision |
-| `huggingface_prompts/test_identify_image.sh` | to create: the regression guard |
-| `src/publicator/apps/prompt_audit.py` | to create: `nearest` as the health metric |
-| `docs/superpowers/specs/2026-08-21-prompt-mapping-design.md` §4, §7, §8 | full spec |
-
-### Next steps
-
-1. Implement §4 of the spec with warn-and-continue in every branch.
-2. Add `test_identify_image.sh` asserting, over a `mktemp -d` repo, in each of
-   healthy / gitignored / not-a-repo / locked-index cases:
-   - exit status is **0**
-   - **stdout is exactly one line**, the identity, warnings on stderr only
-   - the healthy case leaves the prompt committed
-3. Build `#prompt-audit` and record the baseline numbers
-   (`exact 885 / nearest 1600` as of 2026-08-21) to compare against later.
+## Maintenance
 
 ### How to verify
 
@@ -174,7 +148,7 @@ to fail-closed.
 
 ### Related
 
-- Commits: `89592f7` (this reversal), `7408cf4` (original spec)
+- Commits: `89592f7` (this reversal), `7408cf4` (original spec); implemented in `huggingface_prompts` `97aaf63`, `2d4ba4a`, `0968198`
 - Branch: `master`
-- Spec: `docs/superpowers/specs/2026-08-21-prompt-mapping-design.md` §4, §7, §8
+- Feature doc: `docs/features/prompt-mapping.md`
 - ADRs: refines [[0001]]; relies on [[0002]] absorbing dangling references
