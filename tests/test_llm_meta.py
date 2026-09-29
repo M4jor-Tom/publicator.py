@@ -2,6 +2,27 @@ import json, subprocess, pytest
 from types import SimpleNamespace
 from publicator import llm_meta
 
+GEMMA = "openrouter/google/gemma-4-26b-a4b-it:free"
+GEMMA_31 = "openrouter/google/gemma-4-31b-it:free"
+NVIDIA = "openrouter/nvidia/nemotron-3-nano-omni:free"
+RL = "Error: Error code: 429 - temporarily rate-limited upstream"
+
+
+def listing(ids):
+    """`llm openrouter models --free --json` stdout, listing `ids` as vision models."""
+    return json.dumps([{"id": i.removeprefix("openrouter/"),
+                        "architecture": {"input_modalities": ["text", "image"]}}
+                       for i in ids])
+
+
+def with_listing(ids, then):
+    """A run= stub answering the model listing from `ids`, delegating every other call."""
+    def run(argv, stdin):
+        if argv[:2] == ["llm", "openrouter"]:
+            return SimpleNamespace(returncode=0, stdout=listing(ids), stderr="")
+        return then(argv, stdin)
+    return run
+
 
 def make_run(stdout="", returncode=0, stderr="", capture=None):
     def run(argv, stdin):
@@ -46,15 +67,16 @@ def test_run_llm_retries_without_schema_then_remembers_the_model(monkeypatch):
     assert len(calls) == 3 and "--schema" not in calls[2][0]
 
 
-def test_run_llm_other_failure_is_not_retried():
+def test_run_llm_non_429_failure_is_not_retried():
     calls = []
 
     def run(argv, stdin):
         calls.append(argv)
-        return SimpleNamespace(returncode=1, stdout="", stderr="Error code: 429 rate-limited")
+        return SimpleNamespace(returncode=1, stdout="", stderr="Error: boom")
 
-    with pytest.raises(RuntimeError, match="429"):
-        llm_meta.run_llm("m", "hi", schema={"type": "object"}, attach="/i.png", run=run)
+    with pytest.raises(RuntimeError, match="boom"):
+        llm_meta.run_llm(GEMMA, "hi", schema={"type": "object"}, attach="/i.png", run=run)
+    # one call total: not retried, and the model listing was never even asked for
     assert len(calls) == 1
 
 
@@ -110,3 +132,82 @@ def test_generate_metadata_openrouter_uses_attachment():
     j = argv.index("--schema")
     assert json.loads(argv[j + 1]) == llm_meta.TITLE_DESC_SCHEMA
     assert "attached" in cap["stdin"].lower()      # attachment prompt, not "read the file"
+
+
+# --- 429 -> walk the other free vision models (ADR 0006) ----------------------
+
+def test_free_vision_models_keeps_only_the_ids_that_take_images():
+    assert llm_meta.free_vision_models([
+        {"id": "google/gemma-4-26b-a4b-it:free",
+         "architecture": {"input_modalities": ["text", "image"]}},
+        {"id": "some/text-only:free", "architecture": {"input_modalities": ["text"]}},
+        {"id": "malformed:free"},
+    ]) == (GEMMA,)
+
+
+def test_run_llm_429_walks_to_another_vendor_before_a_sibling(monkeypatch):
+    monkeypatch.setattr(llm_meta, "_NO_SCHEMA", set())
+    tried = []
+
+    def attempt(argv, stdin):
+        tried.append(argv[2])
+        if argv[2] == GEMMA:
+            return SimpleNamespace(returncode=1, stdout="", stderr=RL)
+        return SimpleNamespace(returncode=0, stdout='{"a": 1}', stderr="")
+
+    assert llm_meta.run_llm(GEMMA, "hi", schema={"type": "object"}, attach="/i.png",
+                            run=with_listing([GEMMA, GEMMA_31, NVIDIA], attempt)) == {"a": 1}
+    # 429s are per upstream provider, so the same-vendor sibling is tried LAST
+    assert tried == [GEMMA, NVIDIA]
+
+
+def test_run_llm_429_everywhere_tries_every_candidate_then_raises():
+    tried = []
+
+    def attempt(argv, stdin):
+        tried.append(argv[2])
+        return SimpleNamespace(returncode=1, stdout="", stderr=RL)
+
+    with pytest.raises(RuntimeError, match="429"):
+        llm_meta.run_llm(GEMMA, "hi", attach="/i.png",
+                         run=with_listing([GEMMA, GEMMA_31, NVIDIA], attempt))
+    assert tried == [GEMMA, NVIDIA, GEMMA_31]      # each eligible id, exactly once
+
+
+def test_run_llm_429_on_the_claude_path_never_lists_models():
+    seen = []
+
+    def run(argv, stdin):
+        seen.append(argv)
+        return SimpleNamespace(returncode=1, stdout="", stderr=RL)
+
+    with pytest.raises(RuntimeError, match="429"):
+        llm_meta.run_llm("claude-cli-opus", "hi", cwd="/w", run=run)
+    # no sibling to fall back to and no key to reach one, so nothing is listed
+    assert len(seen) == 1 and llm_meta.FREE_MODELS_ARGV not in seen
+
+
+def test_run_llm_unlistable_models_still_raise_the_original_429():
+    def run(argv, stdin):
+        if argv[:2] == ["llm", "openrouter"]:
+            raise OSError("network is down")
+        return SimpleNamespace(returncode=1, stdout="", stderr=RL)
+
+    with pytest.raises(RuntimeError, match="429"):
+        llm_meta.run_llm(GEMMA, "hi", attach="/i.png", run=run)
+
+
+def test_run_llm_stops_walking_once_the_timeout_budget_is_spent(monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(llm_meta, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    tried = []
+
+    def slow_429(argv, stdin):
+        tried.append(argv[2])
+        clock[0] += 50          # each candidate eats 50s of the 90s budget
+        return SimpleNamespace(returncode=1, stdout="", stderr=RL)
+
+    with pytest.raises(RuntimeError, match="429"):
+        llm_meta.run_llm(GEMMA, "hi", attach="/i.png", timeout=90,
+                         run=with_listing([GEMMA, GEMMA_31, NVIDIA], slow_429))
+    assert tried == [GEMMA, NVIDIA]      # the third never starts: the budget is gone

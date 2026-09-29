@@ -10,6 +10,11 @@ A second provider has landed: `openrouter/*` model ids (via `llm-openrouter`,
 API-key based) have no Read tool, so they go through a `-a <image>` attachment
 instead of the Read-path prompt. Most of them also reject `--schema` — see
 `NO_SCHEMA_SUPPORT` below.
+
+A rate-limited `:free` model is a model-*selection* problem, not a timing one --
+the free tier shares one upstream pool across every OpenRouter user, so backing
+off changes nothing that another vendor's model wouldn't fix instantly. A 429
+therefore walks the other free vision ids llm-openrouter lists; `_fallbacks`, ADR 0006.
 """
 import functools
 import json
@@ -25,6 +30,16 @@ DEFAULT_MODEL = "claude-cli-opus"  # llm-claude-cli's id (scenharnist's default)
 # model. Lives here, not in an app's argparse, so every entrypoint shares one id.
 OPENROUTER_MODEL = "openrouter/google/gemma-4-26b-a4b-it:free"
 DEFAULT_TIMEOUT = 300  # seconds — a vision call is slow through either provider
+
+# Somebody else exhausted the vendor, not you (`upstream_provider_shared_pool`,
+# `is_byok: false`). The text is the openai SDK's `f"Error code: {status} - ..."`;
+# matched in stderr like NO_SCHEMA_SUPPORT, a subprocess offering nothing better.
+RATE_LIMITED = "Error code: 429"
+
+# Ask the plugin, never openrouter.ai: `register_models` mints the ids `llm -m`
+# accepts from this same 1h disk cache, so a listed candidate always resolves --
+# and it needs no key and survives an outage. ADR 0006 alternative G.
+FREE_MODELS_ARGV = ["llm", "openrouter", "models", "--free", "--json"]
 
 # `llm` raises this when --schema meets a model that lacks `structured_outputs`
 # (7 of the 8 free OpenRouter vision models). It fires before any HTTP call, so
@@ -88,8 +103,35 @@ def _loads_json(out):
         raise RuntimeError(f"llm returned non-JSON with schema: {out!r}") from e
 
 
-def run_llm(model, prompt, *, schema=None, cwd=None, attach=None, run=None, timeout=DEFAULT_TIMEOUT):
-    run = run or functools.partial(_default_run, timeout=timeout)
+def free_vision_models(catalogue):
+    """The models in `catalogue` that take images, prefixed for `llm -m`. `--free`
+    did the tier filter; this adds the vision clause, which has no plugin flag."""
+    return tuple("openrouter/" + m["id"] for m in catalogue
+                 if "image" in (m.get("architecture") or {}).get("input_modalities", ()))
+
+
+def _fallbacks(model, run):
+    """`model`, then every other free vision id. A generator on purpose: `run_llm`
+    only asks for a second candidate after a 429, so the happy path lists nothing."""
+    yield model
+    if not model.startswith("openrouter/"):
+        return          # the claude-cli path has no sibling, nor a key to reach one
+    try:
+        others = [m for m in free_vision_models(json.loads(run(FREE_MODELS_ARGV, "").stdout))
+                  if m != model]
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        # Fail open (ADR 0004): the rescue path must never become the failure it
+        # exists to rescue. Narrow on purpose — our own bugs still raise.
+        log.warning("cannot list free vision models (%s); no 429 fallback", e)
+        return
+    # The 429 is per upstream provider, so a sibling from the same vendor is the
+    # likeliest to be saturated too — keep it, but try it last.
+    others.sort(key=lambda m: m.rsplit("/", 1)[0] == model.rsplit("/", 1)[0])
+    yield from others
+
+
+def _attempt(model, prompt, *, schema, cwd, attach, run, timeout):
+    """One model's shot: argv build plus ADR 0005's schema retry -> CompletedProcess."""
     if attach is not None:
         # API-key providers (openrouter/*): vision via -a attachment. The
         # claude-cli -o options don't exist on these models, so omit them.
@@ -100,20 +142,37 @@ def run_llm(model, prompt, *, schema=None, cwd=None, attach=None, run=None, time
         argv = ["llm", "-m", model, "-o", "allowedTools", "Read",
                 "-o", "cwd", str(cwd), "-o", "timeout", str(timeout)]
     if schema is None:
-        cp = _invoke(run, argv, prompt, timeout)
-    else:
-        schema_json = json.dumps(schema)
-        in_prompt = prompt + _JSON_FALLBACK.format(schema=schema_json)
-        if model in _NO_SCHEMA:
-            cp = _invoke(run, argv, in_prompt, timeout)
-        else:
-            cp = _invoke(run, argv + ["--schema", schema_json], prompt, timeout)
-            if cp.returncode != 0 and NO_SCHEMA_SUPPORT in (cp.stderr or ""):
-                log.debug("%s rejects --schema; retrying with the shape in the prompt", model)
-                _NO_SCHEMA.add(model)
-                cp = _invoke(run, argv, in_prompt, timeout)
+        return _invoke(run, argv, prompt, timeout)
+    schema_json = json.dumps(schema)
+    in_prompt = prompt + _JSON_FALLBACK.format(schema=schema_json)
+    if model in _NO_SCHEMA:
+        return _invoke(run, argv, in_prompt, timeout)
+    cp = _invoke(run, argv + ["--schema", schema_json], prompt, timeout)
+    if cp.returncode != 0 and NO_SCHEMA_SUPPORT in (cp.stderr or ""):
+        log.debug("%s rejects --schema; retrying with the shape in the prompt", model)
+        _NO_SCHEMA.add(model)
+        cp = _invoke(run, argv, in_prompt, timeout)
+    return cp
+
+
+def run_llm(model, prompt, *, schema=None, cwd=None, attach=None, run=None, timeout=DEFAULT_TIMEOUT):
+    # `timeout` budgets the whole call, not each attempt: the walk must not turn a
+    # 300s ceiling into N x 300s on a request the gallery tab is blocking on.
+    deadline = time.monotonic() + timeout
+    for candidate in _fallbacks(model, run or functools.partial(_default_run, timeout=timeout)):
+        left = max(1, int(deadline - time.monotonic()))
+        cp = _attempt(candidate, prompt, schema=schema, cwd=cwd, attach=attach,
+                      run=run or functools.partial(_default_run, timeout=left), timeout=left)
+        if cp.returncode == 0 or RATE_LIMITED not in (cp.stderr or ""):
+            break
+        if time.monotonic() >= deadline:
+            log.info("%ss budget spent; giving up the walk after %s", timeout, candidate)
+            break
+        log.info("%s is rate-limited upstream; trying the next free vision model", candidate)
     if cp.returncode != 0:
         raise RuntimeError(f"llm failed ({cp.returncode}): {cp.stderr}")
+    if candidate != model:      # the metadata did not come from the id you picked
+        log.info("%s answered instead of the rate-limited %s", candidate, model)
     out = (cp.stdout or "").strip()
     log.debug("llm output: %s", out)
     return out if schema is None else _loads_json(out)
