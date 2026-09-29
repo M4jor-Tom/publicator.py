@@ -110,7 +110,13 @@ Most free OpenRouter vision models **reject `--schema`**; `run_llm` retries once
 with the shape in the prompt and remembers the verdict per model (see
 `NO_SCHEMA_SUPPORT`). Don't "fix" a schema failure by chasing a model id that
 supports structured outputs — the free ones churn; rationale and the rejected
-alternatives are in `docs/adr/0005`. Every AI caller downscales through
+alternatives are in `docs/adr/0005`. A **429 is a different beast**: the
+`:free` tier shares one upstream pool per vendor, so backing off is useless
+and `run_llm` instead walks the other free vision ids that `llm-openrouter`
+lists (same vendor last — and from the plugin's cache, so they are ids `llm -m`
+can actually resolve), logging at INFO which model answered —
+`docs/adr/0006`. A dead id (`Unknown model`) still fails loudly, by design.
+Every AI caller downscales through
 `images.thumb_for_ai` first.
 
 **Scheduling is entirely server-side** (`publicator/scheduling.py`). All
