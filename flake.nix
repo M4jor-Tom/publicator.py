@@ -92,7 +92,7 @@
       apps.${system} = {
         # `claude` on PATH so llm-claude-cli can shell out for AI metadata
         # (uses the logged-in Claude subscription at $HOME/.claude — no API key).
-        publish-next = app "publish-next" "publish_next" [ pkgs.git pkgs.imagemagick browsers claude ] true;
+        publish-next = app "publish-next" "publish_next" [ pkgs.git pkgs.imagemagick browsers claude pkgs.ollama pkgs.llmfit ] true;
         # Publish the first pending publications.json entry, one by uuid, or --all (the extracted Playwright flow):
         #   nix run .#da-publish -- --data-dir <dir> [--uuid <id> | --all] [--headless]
         da-publish = app "da-publish" "da_publish" [ pkgs.imagemagick browsers ] true;
@@ -100,7 +100,7 @@
         # AI title/description for image paths, no gallery/data dir needed:
         #   nix run .#generate-meta -- [--openrouter] IMAGE...
         # `claude` for the key-free path; no browsers (this one never publishes).
-        generate-meta = app "generate-meta" "generate_meta" [ claude ] false;
+        generate-meta = app "generate-meta" "generate_meta" [ claude pkgs.ollama pkgs.llmfit pkgs.imagemagick ] false;
         validate = app "validate" "validate" [ ] false;
         # First state=unpublished entry's path/title/schedule (used by the skill).
         echo-first = app "echo-first" "echo_first" [ ] false;
@@ -123,7 +123,7 @@
         login = login;
       };
       devShells.${system}.default = pkgs.mkShell {
-        packages = [ devPython pkgs.git pkgs.imagemagick pkgs.playwright-driver.browsers claude ];
+        packages = [ devPython pkgs.git pkgs.imagemagick pkgs.playwright-driver.browsers claude pkgs.ollama pkgs.llmfit ];
         shellHook = ''
           export PLAYWRIGHT_BROWSERS_PATH=${pkgs.playwright-driver.browsers}
           export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=true
