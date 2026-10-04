@@ -1,57 +1,138 @@
 #!/usr/bin/env python3
-"""CLI: AI title/description for image files, without the gallery UI.
-
-An entrypoint onto `llm_meta.generate_metadata` (via the same `thumb_for_ai`
-downscale) and nothing else, so it and the gallery's `/ai` endpoint can't drift.
-No data dir, no publications.json, no browser; `--openrouter` needs $OPENROUTER_KEY.
-"""
+"""Generate metadata for marked publications in a data directory."""
 import argparse
 import json
 import sys
-import tempfile
+from pathlib import Path
 
 from publicator import setup_logging
+from publicator import entries
 from publicator.images import thumb_for_ai
-from publicator.llm_meta import DEFAULT_MODEL, DEFAULT_TIMEOUT, OPENROUTER_MODEL, generate_metadata
+from publicator.llm_meta import (
+    DEFAULT_TIMEOUT, OPENROUTER_MODEL, VISION_MODELS,
+    generate_metadata, local_model_status,
+)
+from publicator.store import atomic_write_json
+
+TODO_GENERATE = "[[PUBLICATOR:TODO_GENERATE]]"
+
+
+def generate_pending(json_path, data_dir, *, source, model_option, timeout=DEFAULT_TIMEOUT, yes=False) -> tuple[int, int]:
+    """Generate every publication containing an exact metadata marker."""
+    entries.set_data_dir(data_dir)
+    with open(json_path, encoding="utf-8") as f:
+        publications = json.load(f)
+    pending = [p for p in publications if p.get("description") == TODO_GENERATE or any(
+        a.get("platformName") == "deviantart" and a.get("urlElsePublicationName") == TODO_GENERATE
+        for a in p.get("apparitions", []))]
+    if not pending:
+        return 0, 0
+
+    install_missing = False
+    if source == "local":
+        status = local_model_status(model_option)
+        if not status["fit"]:
+            print(f"Local model does not fit: {status['reason']}", file=sys.stderr)
+            return 0, len(pending)
+        if not status["available"]:
+            print(f"Ollama is unavailable: {status['reason']}", file=sys.stderr)
+            return 0, len(pending)
+        if not status["installed"]:
+            if not yes:
+                if not sys.stdin.isatty():
+                    print("Local model installation requires a TTY; pass -y to accept", file=sys.stderr)
+                    return 0, len(pending)
+                try:
+                    answer = input(f"Install {model_option['ollama_name']}? [Y/n] ")
+                except EOFError:
+                    answer = "n"
+                if answer.strip().lower() == "n":
+                    print("Local model installation declined", file=sys.stderr)
+                    return 0, len(pending)
+            install_missing = True
+
+    cache_dir = str(Path(data_dir) / ".thumbs")
+    succeeded = failed = 0
+    for pub in pending:
+        uuid = pub.get("uuid", "<unknown>")
+        art_path = "<unresolved>"
+        old_description = pub.get("description")
+        old_titles = [a.get("urlElsePublicationName") for a in pub.get("apparitions", [])]
+        try:
+            art_path = str(entries.find_art_path(pub["files"][0]["basename"]))
+            image = thumb_for_ai(art_path, cache_dir)
+            title, description = generate_metadata(
+                image, model_option, source=source, timeout=timeout,
+                install_missing=install_missing,
+            )
+            if pub.get("description") == TODO_GENERATE:
+                pub["description"] = description
+            for apparition in pub.get("apparitions", []):
+                if (apparition.get("platformName") == "deviantart"
+                        and apparition.get("urlElsePublicationName") == TODO_GENERATE):
+                    apparition["urlElsePublicationName"] = title
+            atomic_write_json(json_path, publications)
+            succeeded += 1
+            install_missing = False
+        except (Exception, SystemExit) as e:
+            if old_description is None:
+                pub.pop("description", None)
+            else:
+                pub["description"] = old_description
+            for apparition, old_title in zip(pub.get("apparitions", []), old_titles):
+                if old_title is None:
+                    apparition.pop("urlElsePublicationName", None)
+                else:
+                    apparition["urlElsePublicationName"] = old_title
+            print(f"{uuid} ({art_path}): {e}", file=sys.stderr)
+            failed += 1
+    print(f"Metadata generation: {succeeded} succeeded, {failed} failed")
+    return succeeded, failed
+
+
+def parse_args(argv=None):
+    ap = argparse.ArgumentParser(description="Generate metadata for marked publications.")
+    ap.add_argument("--data-dir", default=".", help="publication database directory (default: CWD)")
+    ap.add_argument("--source", required=True, choices=("local", "openrouter", "claude"))
+    ap.add_argument("--model", help="provider model name (required for local)")
+    ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT,
+                    help=f"seconds per image (default: {DEFAULT_TIMEOUT})")
+    ap.add_argument("-y", action="store_true", help="accept installation of a missing local model")
+    ap.add_argument("-v", "--verbose", action="store_true", help="debug logging")
+    args = ap.parse_args(argv)
+    if args.source == "local" and not args.model:
+        ap.error("--model is required for --source local")
+    if args.source == "claude":
+        if args.model:
+            ap.error("--model is not used with --source claude")
+        args.model_option = None
+    else:
+        name_field = "ollama_name" if args.source == "local" else "openrouter_name"
+        default = None if args.source == "local" else OPENROUTER_MODEL
+        requested = args.model or default
+        args.model_option = next((m for m in VISION_MODELS if m[name_field] == requested), None)
+        if args.model_option is None:
+            ap.error(f"unsupported {args.source} model: {requested}")
+    return args
+
+
+def main_args(argv=None) -> int:
+    args = parse_args(argv)
+    setup_logging(args.verbose)
+    try:
+        _, failed = generate_pending(
+            str(Path(args.data_dir) / "publications.json"), args.data_dir,
+            source=args.source, model_option=args.model_option,
+            timeout=args.timeout, yes=args.y,
+        )
+    except (OSError, ValueError) as e:
+        print(f"generate-meta: {e}", file=sys.stderr)
+        return 1
+    return 1 if failed else 0
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Generate an AI title + description for an image.")
-    ap.add_argument("images", nargs="+", metavar="IMAGE")
-    which = ap.add_mutually_exclusive_group()
-    which.add_argument("--model", default=DEFAULT_MODEL, help=f"llm model id (default: {DEFAULT_MODEL})")
-    which.add_argument("--openrouter", dest="model", action="store_const", const=OPENROUTER_MODEL,
-                       help=f"shorthand for --model {OPENROUTER_MODEL} (needs $OPENROUTER_KEY)")
-    ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT,
-                    help=f"seconds per image (default: {DEFAULT_TIMEOUT})")
-    ap.add_argument("--json", action="store_true", dest="as_json",
-                    help="emit a JSON array instead of text")
-    ap.add_argument("-v", "--verbose", action="store_true", help="debug logging (the llm calls)")
-    args = ap.parse_args()
-
-    setup_logging(args.verbose)
-
-    done = []
-    # ponytail: throwaway thumb cache — the gallery keeps a content-addressed one
-    # in the data dir, but this app is defined by not having a data dir.
-    with tempfile.TemporaryDirectory() as cache:
-        for image in args.images:
-            try:
-                title, description = generate_metadata(
-                    thumb_for_ai(image, cache), args.model, timeout=args.timeout)
-            except RuntimeError as e:
-                print(f"{image}: {e}", file=sys.stderr)  # one bad image shouldn't sink a batch
-                continue
-            done.append({"path": image, "title": title, "description": description})
-            if not args.as_json:
-                # Printed in the loop, not after it: a batch is minutes per image,
-                # and JSON is the only mode that has to buffer for a valid array.
-                head = f"--- {image}\n" if len(args.images) > 1 else ""
-                print(f"{head}Title: {title}\n\n{description}\n", flush=True)
-
-    if args.as_json:
-        print(json.dumps(done, indent=2, ensure_ascii=False))
-    return 1 if len(done) < len(args.images) else 0
+    return main_args()
 
 
 if __name__ == "__main__":
