@@ -1,3 +1,4 @@
+import json
 import threading
 import urllib.error
 import urllib.request
@@ -54,6 +55,64 @@ def _get(url):
             return r.status, r.read()
     except urllib.error.HTTPError as e:
         return e.code, b""
+
+
+def _post(url, data):
+    request = urllib.request.Request(url + "/ai", data=json.dumps(data).encode(),
+                                     headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=5) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read())
+
+
+def test_ai_accepts_only_catalog_objects_and_source(monkeypatch, tmp_path):
+    from publicator.llm_meta import VISION_MODELS
+    from publicator.webui import server as gallery
+    calls = []
+    monkeypatch.setattr(gallery, "thumb_for_ai", lambda *a: "thumb.png")
+    monkeypatch.setattr(gallery, "generate_metadata", lambda *a, **kw: (calls.append((a, kw)) or ("t", "d")))
+    model = VISION_MODELS[0]
+    base = dict(cache_dir=str(tmp_path), thumb_map={}, ai_model="claude-cli-opus",
+                openrouter_model=model["openrouter_name"], ai_timeout=3,
+                local_model_statuses={model["ollama_name"]: {"fit": True, "installed": False,
+                                                               "available": True, "reason": ""}})
+    url = _serve_once(**base)
+    assert _post(url, {"path": "a.png", "source": "openrouter", "model": model})[0] == 200
+    assert calls[-1][0][1:] == (model,)
+    assert calls[-1][1]["source"] == "openrouter"
+    url = _serve_once(**base)
+    assert _post(url, {"path": "a.png", "source": "openrouter",
+                       "model": {**model, "llmfit_name": "forged"}})[0] == 400
+    url = _serve_once(**base)
+    assert _post(url, {"path": "a.png", "source": "unknown", "model": model})[0] == 400
+    url = _serve_once(**base)
+    assert _post(url, {"path": "a.png", "source": "claude", "model": None})[0] == 200
+    assert calls[-1][1]["source"] == "claude"
+
+
+def test_ai_refuses_unfit_local_and_allows_install_on_use(monkeypatch, tmp_path):
+    from publicator.llm_meta import VISION_MODELS
+    from publicator.webui import server as gallery
+    calls = []
+    monkeypatch.setattr(gallery, "thumb_for_ai", lambda *a: "thumb.png")
+    monkeypatch.setattr(gallery, "generate_metadata", lambda *a, **kw: (calls.append((a, kw)) or ("t", "d")))
+    model = VISION_MODELS[0]
+    url = _serve_once(cache_dir=str(tmp_path), thumb_map={}, ai_model="claude-cli-opus",
+                      openrouter_model=model["openrouter_name"], ai_timeout=3,
+                      local_model_statuses={model["ollama_name"]: {"fit": False, "installed": False,
+                                                                     "available": False, "reason": "Too Tight"}})
+    request = {"path": "a.png", "source": "local", "model": model}
+    assert _post(url, request)[0] == 400
+    assert not calls
+
+    url = _serve_once(cache_dir=str(tmp_path), thumb_map={}, ai_model="claude-cli-opus",
+                      openrouter_model=model["openrouter_name"], ai_timeout=3,
+                      local_model_statuses={model["ollama_name"]: {"fit": True, "installed": False,
+                                                                     "available": True, "reason": ""}})
+    assert _post(url, request)[0] == 200
+    assert calls[-1][1]["source"] == "local" and calls[-1][1]["install_missing"] is True
 
 
 def test_thumbs_route_serves_a_rendered_name(tmp_path):

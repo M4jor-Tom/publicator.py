@@ -21,7 +21,7 @@ from publicator.images import (
     thumb_for_ai,
     thumb_name,
 )
-from publicator.llm_meta import DEFAULT_MODEL, generate_metadata
+from publicator.llm_meta import DEFAULT_MODEL, VISION_MODELS, generate_metadata, local_model_status
 from publicator.prompts import Exact, Nearest
 from publicator.prompts import from_config as prompt_archive_from_config
 from publicator.scheduling import existing_ts as compute_existing_ts, schedule_data, zone
@@ -54,6 +54,8 @@ class GalleryHandler(BaseHTTPRequestHandler):
     ai_model = DEFAULT_MODEL
     openrouter_model = ""
     ai_timeout = 300
+    vision_models = VISION_MODELS
+    local_model_statuses: dict[str, dict] = {}
     json_path = "publications.json"
     config: dict = {}
     schedules: list = []
@@ -149,7 +151,8 @@ class GalleryHandler(BaseHTTPRequestHandler):
             prompt_html=self._prompt_html(candidates + maybe),
             query=needle, skipped=skipped, truncated=truncated,
             search_enabled=self.archive is not None,
-            lineage_active=bool(lineage))
+            lineage_active=bool(lineage), vision_models=self.vision_models,
+            local_model_statuses=self.local_model_statuses)
 
     def _json_body(self) -> dict:
         length = int(self.headers.get("Content-length", 0))
@@ -229,14 +232,28 @@ class GalleryHandler(BaseHTTPRequestHandler):
             elif self.path == "/ai":
                 data = self._json_body()
                 path = data.get("path", "")
-                model = data.get("model") or self.ai_model
-                if model not in (self.ai_model, self.openrouter_model):
-                    self._send(400, {"error": f"model not allowed: {model}"}); return
+                source, posted_model = data.get("source"), data.get("model")
+                model = None
+                if source == "claude":
+                    if posted_model is not None:
+                        self._send(400, {"error": "Claude does not take a model object"}); return
+                elif source in ("local", "openrouter"):
+                    model = next((m for m in VISION_MODELS if m == posted_model), None)
+                    if model is None:
+                        self._send(400, {"error": "model object not allowed"}); return
+                    if source == "local":
+                        status = self.local_model_statuses.get(model["ollama_name"], {})
+                        if not status.get("fit") or not status.get("available"):
+                            self._send(400, {"error": status.get("reason") or "Local model unavailable"}); return
+                else:
+                    self._send(400, {"error": f"source not allowed: {source}"}); return
                 image_for_ai = thumb_for_ai(path, self.cache_dir, self.thumb_map.get(path))
-                log.debug("AI metadata: %s (model=%s, timeout=%ss)",
-                          image_for_ai, model, self.ai_timeout)
+                log.debug("AI metadata: %s (source=%s, timeout=%ss)",
+                          image_for_ai, source, self.ai_timeout)
                 try:
-                    title, desc = generate_metadata(image_for_ai, model, timeout=self.ai_timeout)
+                    title, desc = generate_metadata(
+                        image_for_ai, model, source=source, timeout=self.ai_timeout,
+                        install_missing=(source == "local"))
                 except RuntimeError as e:
                     log.debug("AI metadata failed: %s", e)
                     self._send(400, {"error": str(e)}); return
@@ -346,6 +363,10 @@ def serve(data_dir: str, candidate_paths: list[str], pending: list[dict],
     GalleryHandler.ai_model = args.ai_model
     GalleryHandler.openrouter_model = args.openrouter_model
     GalleryHandler.ai_timeout = args.ai_timeout
+    GalleryHandler.vision_models = VISION_MODELS
+    GalleryHandler.local_model_statuses = {
+        model["ollama_name"]: local_model_status(model) for model in VISION_MODELS
+    }
     GalleryHandler.json_path = args.json
     GalleryHandler.config = config
     GalleryHandler.schedules = schedule_data(config["schedule"])

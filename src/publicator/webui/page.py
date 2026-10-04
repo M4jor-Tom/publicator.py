@@ -124,10 +124,7 @@ PAGE_TEMPLATE = r"""<!DOCTYPE html>
   <button id="tab-gallery" class="tab on" onclick="showTab('gallery')">Gallery</button>
   <button id="tab-calendar" class="tab" onclick="showTab('calendar')">Calendar</button>
   <span id="queue-count">0 queued</span>
-  <select id="ai-model" title="AI model for Generate with AI">
-    <option value="__OPENROUTER_MODEL__">OpenRouter (free)</option>
-    <option value="__AI_MODEL__">Claude (subscription)</option>
-  </select>
+  <select id="ai-model" title="AI model for Generate with AI">__MODEL_OPTIONS__</select>
   <span id="stage-status"></span>
   <button id="stage-btn" onclick="stageQueue()" disabled>Add to publish pad</button>
   <button id="publish-btn" onclick="publishQueue()" disabled>Publish</button>
@@ -253,9 +250,14 @@ async function aiGen(cardId, path) {
   err.textContent = "";
   btn.disabled = true; btn.textContent = "Generating...";
   try {
-    const model = document.getElementById("ai-model").value;
+    const modelOption = document.getElementById("ai-model").selectedOptions[0];
+    const source = modelOption.dataset.source;
+    const model = modelOption.dataset.model ? JSON.parse(modelOption.dataset.model) : null;
+    if (source === "local" && modelOption.dataset.installed === "false") {
+      btn.textContent = `Installing ${modelOption.dataset.ollama}… then generating`;
+    }
     const r = await fetch("/ai", {method:"POST", headers:{"Content-Type":"application/json"},
-                                   body: JSON.stringify({path, model})});
+                                   body: JSON.stringify({path, source, model})});
     const d = await r.json();
     if (!r.ok || d.error) { err.textContent = d.error || ("HTTP " + r.status); return; }
     card.querySelector(".f-title").value = d.title || "";
@@ -413,7 +415,8 @@ def render_page(*, thumb_map, candidates, pending, existing_ts, timeline,
                 schedules, config, ai_model, openrouter_model,
                 prompt_html=None, query="", skipped=0,
                 maybe_candidates=None, search_enabled=True, truncated=False,
-                lineage_active=False) -> str:
+                lineage_active=False, vision_models=None,
+                local_model_statuses=None) -> str:
     """The whole page as HTML — gallery tab + calendar tab. Pure: no handler, no
     socket, no I/O beyond the paths it is handed, which is what makes it testable.
     `thumb_map` is {art path: cached thumbnail name} (see images.thumb_name).
@@ -510,8 +513,35 @@ def render_page(*, thumb_map, candidates, pending, existing_ts, timeline,
     page = page.replace("__EXISTING_TS__", json.dumps(existing_ts))
     page = page.replace("__SCHEDULES__", json.dumps(schedules))
     page = page.replace("__LABELS__", json.dumps(labels))
-    page = page.replace("__AI_MODEL__", html.escape(ai_model, quote=True))
-    page = page.replace("__OPENROUTER_MODEL__", html.escape(openrouter_model, quote=True))
+    if vision_models:
+        options = []
+        for model in vision_models:
+            posted = html.escape(json.dumps(model), quote=True)
+            selected = " selected" if model["openrouter_name"] == openrouter_model else ""
+            options.append(f'<option data-source="openrouter" data-model="{posted}" '
+                           f'value="openrouter:{html.escape(model["openrouter_name"], quote=True)}"{selected}>'
+                           f'OpenRouter (free) — {html.escape(model["ollama_name"])}</option>')
+            status = (local_model_statuses or {}).get(model["ollama_name"], {})
+            reason = html.escape(str(status.get("reason", "")), quote=True)
+            disabled = not status.get("fit") or not status.get("available")
+            label = f'Local — {model["ollama_name"]}'
+            if disabled:
+                label += f' ({html.escape(str(status.get("reason") or "Unavailable"))})'
+            elif not status.get("installed"):
+                label += " (Install on use)"
+            attrs = (f' disabled title="{reason}"' if disabled else "")
+            options.append(f'<option data-source="local" data-model="{posted}" '
+                           f'data-ollama="{html.escape(model["ollama_name"], quote=True)}" '
+                           f'data-installed="{str(bool(status.get("installed"))).lower()}"{attrs}>'
+                           f'{label}</option>')
+        options.append(f'<option data-source="claude" value="claude">'
+                       f'Claude (subscription) — {html.escape(ai_model)}</option>')
+        model_options = "".join(options)
+    else:
+        model_options = (f'<option data-source="openrouter" value="{html.escape(openrouter_model, quote=True)}">'
+                        f'OpenRouter (free)</option><option data-source="claude" '
+                        f'value="{html.escape(ai_model, quote=True)}">Claude (subscription)</option>')
+    page = page.replace("__MODEL_OPTIONS__", model_options)
     # Server-side search: a plain GET form, no JS — the same reason scheduling
     # is server-side. Unarchived prompts are excluded from matching and the
     # count is stated, so the 86% gap stays visible instead of quietly

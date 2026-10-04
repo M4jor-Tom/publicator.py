@@ -23,6 +23,25 @@ def test_page_offers_both_models():
     assert "__AI_MODEL__" not in page and "__OPENROUTER_MODEL__" not in page
 
 
+def test_page_renders_source_aware_paired_models_and_fit_reasons():
+    from publicator.llm_meta import VISION_MODELS
+    statuses = {
+        VISION_MODELS[0]["ollama_name"]: {"fit": True, "installed": False,
+                                                  "available": True, "reason": ""},
+        VISION_MODELS[1]["ollama_name"]: {"fit": False, "installed": False,
+                                                  "available": False, "reason": '<Too Tight & limited>'},
+    }
+    page = _render(vision_models=VISION_MODELS, local_model_statuses=statuses,
+                   openrouter_model=VISION_MODELS[1]["openrouter_name"])
+    assert 'data-source="openrouter"' in page
+    assert f'value="openrouter:{VISION_MODELS[1]["openrouter_name"]}" selected' in page
+    assert 'data-source="local"' in page
+    assert 'data-model=' in page
+    assert 'Install on use' in page
+    assert 'disabled title="&lt;Too Tight &amp; limited&gt;"' in page
+    assert "<Too Tight & limited>" not in page
+
+
 def test_page_renders_config_tiers_galleries():
     page = _render(candidates=["/t/a.png"],
                    config={"tiers": ["gold"], "galleries": ["Art"]})
