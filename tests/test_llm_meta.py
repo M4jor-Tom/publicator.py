@@ -1,4 +1,4 @@
-import json, subprocess, pytest
+import base64, json, subprocess, pytest
 from types import SimpleNamespace
 from publicator import llm_meta
 
@@ -101,11 +101,12 @@ def test_run_llm_timeout_raises():
 def test_generate_metadata_returns_title_desc():
     cap = {}
     title, desc = llm_meta.generate_metadata(
-        "/imgs/thumb.jpg",
+        "/imgs/thumb.jpg", None, source="claude",
         run=make_run(stdout='{"title": "Dawn", "description": "A quiet field."}', capture=cap))
     assert title == "Dawn" and desc == "A quiet field."
     # image reaches the model as a Read-able path in its own dir, not an attachment
     assert "thumb.jpg" in cap["stdin"]
+    assert cap["argv"][:3] == ["llm", "-m", llm_meta.DEFAULT_MODEL]
     i = cap["argv"].index("cwd")
     assert cap["argv"][i + 1] == "/imgs"
     j = cap["argv"].index("--schema")
@@ -114,24 +115,144 @@ def test_generate_metadata_returns_title_desc():
 
 def test_generate_metadata_empty_raises():
     with pytest.raises(RuntimeError, match="missing title/description"):
-        llm_meta.generate_metadata("/imgs/x.jpg",
+        llm_meta.generate_metadata("/imgs/x.jpg", None, source="claude",
                                     run=make_run(stdout='{"title": "", "description": "x"}'))
 
 
 def test_generate_metadata_openrouter_uses_attachment():
     cap = {}
+    option = {"ollama_name": "local-tag", "openrouter_name": "openrouter/google/gemini-2.0-flash-exp:free", "llmfit_name": "vendor/model"}
     title, desc = llm_meta.generate_metadata(
-        "/imgs/thumb.jpg", model="openrouter/google/gemini-2.0-flash-exp:free",
+        "/imgs/thumb.jpg", option, source="openrouter",
         run=make_run(stdout='{"title": "Dawn", "description": "A quiet field."}', capture=cap))
     assert title == "Dawn" and desc == "A quiet field."
     argv = cap["argv"]
-    assert argv[:3] == ["llm", "-m", "openrouter/google/gemini-2.0-flash-exp:free"]
+    assert argv[:3] == ["llm", "-m", option["openrouter_name"]]
     i = argv.index("-a")
     assert argv[i + 1].endswith("thumb.jpg")      # image as attachment, absolute path
     assert "allowedTools" not in argv and "-o" not in argv  # no claude-cli Read path
     j = argv.index("--schema")
     assert json.loads(argv[j + 1]) == llm_meta.TITLE_DESC_SCHEMA
     assert "attached" in cap["stdin"].lower()      # attachment prompt, not "read the file"
+
+
+def test_vision_models_keep_explicit_provider_ids():
+    assert llm_meta.VISION_MODELS == [
+        {"ollama_name": "gemma4:26b-a4b",
+         "openrouter_name": "openrouter/google/gemma-4-26b-a4b-it:free",
+         "llmfit_name": "google/gemma-4-26B-A4B-it"},
+        {"ollama_name": "gemma4:31b",
+         "openrouter_name": "openrouter/google/gemma-4-31b-it:free",
+         "llmfit_name": "google/gemma-4-31B-it"},
+    ]
+
+
+def test_generate_metadata_local_uses_ollama_attachment_schema_and_thumbnail(tmp_path, monkeypatch):
+    image = tmp_path / "thumb.jpg"
+    image.write_bytes(b"thumbnail")
+    option = llm_meta.VISION_MODELS[0]
+    monkeypatch.setattr(llm_meta, "prepare_local_model", lambda model, **kwargs: None)
+    calls = []
+
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def read(self):
+            return b'{"message":{"content":"{\\"title\\":\\"Dawn\\",\\"description\\":\\"A quiet field.\\"}"}}'
+
+    def urlopen(request, timeout):
+        calls.append((request, timeout))
+        return Response()
+
+    monkeypatch.setattr(llm_meta.urllib.request, "urlopen", urlopen)
+    assert llm_meta.generate_metadata(image, option, source="local", timeout=17) == ("Dawn", "A quiet field.")
+    request, timeout = calls[0]
+    body = json.loads(request.data)
+    assert request.full_url.endswith("/api/chat") and timeout == 17
+    assert body["model"] == option["ollama_name"]
+    assert body["messages"][0]["images"] == [base64.b64encode(b"thumbnail").decode("ascii")]
+    assert "attached artwork" in body["messages"][0]["content"]
+    assert body["format"] == llm_meta.TITLE_DESC_SCHEMA and body["stream"] is False
+
+
+def test_local_model_status_reads_llmfit_and_ollama_tags(monkeypatch):
+    option = llm_meta.VISION_MODELS[0]
+    monkeypatch.setattr(llm_meta.subprocess, "run", lambda argv, **kwargs: SimpleNamespace(
+        returncode=0, stdout=json.dumps({"models": [{"name": option["llmfit_name"], "fit_level": "Good", "notes": "Evaluator verdict."}], "system": {}}), stderr=""))
+
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def read(self): return b'{"models":[{"name":"gemma4:26b-a4b"}]}'
+
+    monkeypatch.setattr(llm_meta.urllib.request, "urlopen", lambda request, timeout: Response())
+    assert llm_meta.local_model_status(option) == {
+        "fit": True, "installed": True, "available": True, "reason": "Evaluator verdict."}
+
+
+@pytest.mark.parametrize(("fit_level", "fit", "reason"), [
+    ("Good", True, "ok"), ("Too Tight", False, "too large"),
+])
+def test_local_model_status_uses_llmfit_fit_level_and_notes(monkeypatch, fit_level, fit, reason):
+    option = llm_meta.VISION_MODELS[0]
+    monkeypatch.setattr(llm_meta.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(
+        returncode=0, stdout=json.dumps({"models": [{"name": option["llmfit_name"], "fit_level": fit_level, "notes": reason}], "system": {}}), stderr=""))
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def read(self): return b'{"models":[]}'
+    monkeypatch.setattr(llm_meta.urllib.request, "urlopen", lambda *args, **kwargs: Response())
+    result = llm_meta.local_model_status(option)
+    assert result["fit"] is fit and result["reason"] == reason
+    assert result["available"] is fit
+
+
+@pytest.mark.parametrize("stdout", ["not json", "{}", json.dumps({"models": [{"name": "other", "fit_level": "Good", "notes": ""}]} )])
+def test_local_model_status_fails_closed_for_bad_llmfit_output(monkeypatch, stdout):
+    monkeypatch.setattr(llm_meta.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=stdout, stderr=""))
+    result = llm_meta.local_model_status(llm_meta.VISION_MODELS[0])
+    assert result["fit"] is False and result["available"] is False
+
+
+def test_local_model_status_fails_closed_for_llmfit_exit(monkeypatch):
+    monkeypatch.setattr(llm_meta.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout="", stderr="llmfit failed"))
+    result = llm_meta.local_model_status(llm_meta.VISION_MODELS[0])
+    assert not result["fit"] and not result["available"]
+
+
+def test_ollama_installed_state_and_pull_api(monkeypatch):
+    option = llm_meta.VISION_MODELS[0]
+    calls = []
+    class Response:
+        def __init__(self, body): self.body = body
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def read(self): return self.body
+    def urlopen(request, timeout):
+        calls.append(request)
+        if request.full_url.endswith("/api/tags"):
+            return Response(b'{"models":[]}')
+        return Response(b'{"status":"success"}')
+    monkeypatch.setattr(llm_meta.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(llm_meta.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=json.dumps({"models": [{"name": option["llmfit_name"], "fit_level": "Good", "notes": "ok"}], "system": {}}), stderr=""))
+    llm_meta.prepare_local_model(option, install=True)
+    assert calls[0].method == "GET" and calls[0].full_url.endswith("/api/tags")
+    assert calls[1].method == "POST" and calls[1].full_url.endswith("/api/pull")
+    assert json.loads(calls[1].data) == {"model": option["ollama_name"], "stream": False}
+
+
+@pytest.mark.parametrize("body", [b"", b"not-json"])
+def test_ollama_chat_bad_response_fails(tmp_path, monkeypatch, body):
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"image")
+    monkeypatch.setattr(llm_meta, "prepare_local_model", lambda *args, **kwargs: None)
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def read(self): return body
+    monkeypatch.setattr(llm_meta.urllib.request, "urlopen", lambda *args, **kwargs: Response())
+    with pytest.raises(RuntimeError):
+        llm_meta.generate_metadata(image, llm_meta.VISION_MODELS[0], source="local")
 
 
 # --- 429 -> walk the other free vision models (ADR 0006) ----------------------

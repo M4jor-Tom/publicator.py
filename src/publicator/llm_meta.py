@@ -16,12 +16,15 @@ the free tier shares one upstream pool across every OpenRouter user, so backing
 off changes nothing that another vendor's model wouldn't fix instantly. A 429
 therefore walks the other free vision ids llm-openrouter lists; `_fallbacks`, ADR 0006.
 """
+import base64
 import functools
 import json
 import logging
 import os
 import subprocess
 import time
+import urllib.error
+import urllib.request
 
 log = logging.getLogger("publicator.llm")
 
@@ -29,7 +32,12 @@ DEFAULT_MODEL = "claude-cli-opus"  # llm-claude-cli's id (scenharnist's default)
 # ponytail: free :free ids churn on OpenRouter; this is the current free vision
 # model. Lives here, not in an app's argparse, so every entrypoint shares one id.
 OPENROUTER_MODEL = "openrouter/google/gemma-4-26b-a4b-it:free"
+VISION_MODELS = [
+    {"ollama_name": "gemma4:26b-a4b", "openrouter_name": "openrouter/google/gemma-4-26b-a4b-it:free", "llmfit_name": "google/gemma-4-26B-A4B-it"},
+    {"ollama_name": "gemma4:31b", "openrouter_name": "openrouter/google/gemma-4-31b-it:free", "llmfit_name": "google/gemma-4-31B-it"},
+]
 DEFAULT_TIMEOUT = 300  # seconds — a vision call is slow through either provider
+OLLAMA_URL = "http://localhost:11434"
 
 # Somebody else exhausted the vendor, not you (`upstream_provider_shared_pool`,
 # `is_byok: false`). The text is the openai SDK's `f"Error code: {status} - ..."`;
@@ -178,16 +186,105 @@ def run_llm(model, prompt, *, schema=None, cwd=None, attach=None, run=None, time
     return out if schema is None else _loads_json(out)
 
 
-def generate_metadata(image_path, model=DEFAULT_MODEL, *, run=None, timeout=DEFAULT_TIMEOUT):
-    """(title, description) for an artwork, via the key-free `llm` vision path."""
+def _ollama_request(path, *, method="GET", data=None, timeout=DEFAULT_TIMEOUT):
+    request = urllib.request.Request(
+        OLLAMA_URL + path, data=data,
+        headers={"Content-Type": "application/json"} if data is not None else {},
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read()
+    except (OSError, urllib.error.URLError) as e:
+        raise RuntimeError(f"Ollama is unavailable at {OLLAMA_URL}: {e}") from e
+    try:
+        return json.loads(raw)
+    except (ValueError, TypeError) as e:
+        raise RuntimeError(f"Ollama returned invalid JSON from {path}") from e
+
+
+def local_model_status(model_option):
+    """Report the llmfit verdict and Ollama's own installed-model inventory."""
+    try:
+        result = subprocess.run(
+            ["llmfit", "info", model_option["llmfit_name"], "--json"],
+            capture_output=True, text=True,
+        )
+        if result.returncode:
+            raise RuntimeError((result.stderr or "llmfit failed").strip())
+        report = json.loads(result.stdout)
+        model = next(m for m in report["models"] if m["name"] == model_option["llmfit_name"])
+        fit_level = model["fit_level"]
+        reason = str(model.get("notes", ""))
+        fit = fit_level == "Good"
+        if not fit and not reason:
+            reason = f"llmfit fit_level: {fit_level}"
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError, StopIteration) as e:
+        return {"fit": False, "installed": False, "available": False,
+                "reason": str(e) or "llmfit could not assess this model"}
+    if not fit:
+        return {"fit": False, "installed": False, "available": False, "reason": reason}
+    try:
+        tags = _ollama_request("/api/tags")
+        installed = any(m.get("name") == model_option["ollama_name"] for m in tags["models"])
+    except (RuntimeError, KeyError, TypeError) as e:
+        return {"fit": True, "installed": False, "available": False, "reason": str(e)}
+    return {"fit": True, "installed": installed, "available": True, "reason": reason}
+
+
+def prepare_local_model(model_option, *, install):
+    status = local_model_status(model_option)
+    if not status["fit"]:
+        raise RuntimeError(f"Local model does not fit: {status['reason']}")
+    if not status["available"]:
+        raise RuntimeError(f"Ollama is unavailable: {status['reason']}")
+    if not status["installed"]:
+        if not install:
+            raise RuntimeError(f"Local model {model_option['ollama_name']} is not installed")
+        result = _ollama_request("/api/pull", method="POST", data=json.dumps(
+            {"model": model_option["ollama_name"], "stream": False}).encode())
+        if result.get("status") != "success":
+            raise RuntimeError(f"Ollama failed to pull {model_option['ollama_name']}: {result!r}")
+
+
+def _local_metadata(image_path, model_option, *, timeout):
+    try:
+        with open(image_path, "rb") as image:
+            encoded = base64.b64encode(image.read()).decode("ascii")
+    except OSError as e:
+        raise RuntimeError(f"cannot read AI image {image_path}: {e}") from e
+    result = _ollama_request("/api/chat", method="POST", data=json.dumps({
+        "model": model_option["ollama_name"],
+        "messages": [{"role": "user", "content": _PROMPT_ATTACH, "images": [encoded]}],
+        "format": TITLE_DESC_SCHEMA,
+        "stream": False,
+    }).encode(), timeout=timeout)
+    try:
+        return _loads_json(result["message"]["content"])
+    except (KeyError, TypeError) as e:
+        raise RuntimeError(f"Ollama returned an invalid chat response: {result!r}") from e
+
+
+def generate_metadata(image_path, model_option: dict[str, str] | None, *, source: str,
+                      run=None, timeout=DEFAULT_TIMEOUT, install_missing=False) -> tuple[str, str]:
+    """Return validated title/description using the selected metadata provider."""
     abspath = os.path.abspath(image_path)
-    if model.startswith("openrouter/"):
-        obj = run_llm(model, _PROMPT_ATTACH, schema=TITLE_DESC_SCHEMA,
-                      attach=abspath, run=run, timeout=timeout)
-    else:
-        obj = run_llm(model, _PROMPT.format(name=os.path.basename(image_path)),
+    if source == "local":
+        if model_option is None:
+            raise ValueError("local generation requires a model option")
+        prepare_local_model(model_option, install=install_missing)
+        obj = _local_metadata(abspath, model_option, timeout=timeout)
+    elif source == "openrouter":
+        if model_option is None:
+            raise ValueError("OpenRouter generation requires a model option")
+        obj = run_llm(model_option["openrouter_name"], _PROMPT_ATTACH,
+                      schema=TITLE_DESC_SCHEMA, attach=abspath, run=run, timeout=timeout)
+    elif source == "claude":
+        obj = run_llm(DEFAULT_MODEL, _PROMPT.format(name=os.path.basename(image_path)),
                       schema=TITLE_DESC_SCHEMA, cwd=os.path.dirname(abspath),
                       run=run, timeout=timeout)
+    else:
+        raise ValueError(f"unknown metadata source: {source}")
     title = str(obj.get("title", "")).strip()
     description = str(obj.get("description", "")).strip()
     if not title or not description:
