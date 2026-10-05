@@ -1,32 +1,32 @@
-# AI metadata (title/description via llm CLI)
+# AI metadata (title/description via llm CLI and Ollama)
 
-- **Does:** Generates a DeviantArt title + description for an artwork via the `llm` CLI with a JSON schema, routing by model-id prefix: key-free `claude-cli-opus` via the Read tool, or `openrouter/*` via `-a` + `$OPENROUTER_KEY`. A rate-limited free model is swapped for another that llm-openrouter lists, not retried.
-- **Run:** `nix run .#generate-meta -- [--model ID | --openrouter] [--timeout S] [--json] [-v] IMAGE...` (no data dir; `claude` comes from flake runtimeInputs, `$OPENROUTER_KEY` from the environment)
-- **Run:** `nix run .#publish-next -- [--ai-model ID] [--openrouter-model ID] [--ai-timeout S] [-v]` (header `select#ai-model` + "Generate with AI" button → `POST /ai {path, model}`)
-- **Code:** `src/publicator/llm_meta.py` (`generate_metadata`, `run_llm`, `_attempt`, `_fallbacks`, `free_vision_models`, `DEFAULT_MODEL`, `OPENROUTER_MODEL`, `NO_SCHEMA_SUPPORT`, `_NO_SCHEMA`, `RATE_LIMITED`, `FREE_MODELS_ARGV`), `src/publicator/apps/generate_meta.py` (`main`), `src/publicator/images.py` (`thumb_for_ai`, `ensure_thumb`), `src/publicator/webui/server.py` (`GalleryHandler.do_POST` `/ai` branch, `GalleryHandler.ai_model`, `GalleryHandler.openrouter_model`), `src/publicator/webui/page.py` (`PAGE_TEMPLATE`, `aiGen`, `render_page`), `src/publicator/apps/publish_next.py` (`main`), `flake.nix` (vendored `llm-claude-cli` 0.1.3, `ps.llm-openrouter`, `apps.generate-meta`)
-- **Tests:** `tests/test_llm_meta.py` (offline, one injected `run=` seam for both the `llm` calls and the model listing: provider argv, schema retry + memo, the 429 walk and its vendor ordering, the timeout budget, fail-open, error raises), `tests/test_llm_meta_openrouter.py` (live through `SCHEMALESS_VISION_MODEL`; skips offline, asserts key online, 3 attempts), `tests/test_page.py::test_page_offers_both_models` (both model ids present in the header select)
-- **Config:** none; model ids are module constants in `src/publicator/llm_meta.py` with CLI overrides on both apps. ADR 0005: not `publicator.toml` keys because generate-meta runs with no data dir.
-- **Data:** `.thumbs/<sha512[:32]><ext>` (gallery `cache_dir`; the `-resize 300x300>` output the model sees; generate-meta uses a `TemporaryDirectory` instead), `$OPENROUTER_KEY` (read at runtime by llm-openrouter, never stored), `$HOME/.claude` (logged-in `claude` CLI session, outside repo and data dir)
-- **Decisions:** `docs/adr/0005-retry-without-schema-when-a-model-rejects-it.md`, `docs/adr/0006-walk-the-free-vision-catalogue-on-a-429.md`
+- **Does:** Generates title + description for publications marked with `[[PUBLICATOR:TODO_GENERATE]]`, or for a gallery image, using local Ollama, OpenRouter free, or Claude. OpenRouter 429s walk its dynamic free vision catalogue; local fit decisions come from llmfit.
+- **Run:** `nix run .#generate-meta -- --data-dir ../Art --source {local,openrouter,claude} [--model MODEL] [--timeout S] [-y] [-v]` (publication-driven, no image arguments; source required; local requires a model; `-y` accepts missing-model installation)
+- **Run:** `nix run .#publish-next -- [--ai-model ID] [--openrouter-model ID] [--ai-timeout S] [-v]` (selector + Generate with AI → `POST /ai {path, source, model}`; model is a catalog object or null for Claude)
+- **Code:** `src/publicator/llm_meta.py` (`generate_metadata`, `VISION_MODELS`, `local_model_status`, `prepare_local_model`, `run_llm`, `_attempt`, `_fallbacks`), `src/publicator/apps/generate_meta.py` (`generate_pending`, `main_args`), `src/publicator/images.py` (`thumb_for_ai`, `ensure_thumb`), `src/publicator/webui/server.py` (`GalleryHandler.do_POST` `/ai`, local status), `src/publicator/webui/page.py` (`aiGen`, `render_page`), `src/publicator/apps/publish_next.py` (`main`), `flake.nix` (Ollama, llmfit, llm providers)
+- **Tests:** `tests/test_llm_meta.py` (provider routing, Ollama and llmfit behavior, schema retry, 429 fallback); `tests/test_generate_meta.py` (marker selection, consent, writes and failures); `tests/test_page.py` and `tests/test_server.py` (model options and endpoint)
+- **Config:** no model IDs in `publicator.toml`; paired model objects explicitly map `ollama_name`, `openrouter_name`, and `llmfit_name` in `llm_meta.VISION_MODELS`. llmfit owns fit classification; non-Good or unassessable models are unavailable. Ollama must already be running; publicator does not start its daemon.
+- **Data:** `publications.json` exact sentinel in `description` and/or DeviantArt `urlElsePublicationName`; `<data-dir>/.thumbs/` for AI thumbnails; `$OPENROUTER_KEY` at runtime; `$HOME/.claude` logged-in session.
+- **Decisions:** `docs/adr/0005-retry-without-schema-when-a-model-rejects-it.md`, `docs/adr/0006-walk-the-free-vision-catalogue-on-a-429.md`, `docs/adr/0007-local-vision-models-with-ollama-and-llmfit.md`
 - **Verify:** `nix develop -c pytest tests/test_llm_meta.py -q`
 - **Verify:** `nix develop -c pytest tests/test_page.py -q`
 - **Verify:** `nix develop -c pytest tests/test_llm_meta_openrouter.py -q` (live; needs network + `$OPENROUTER_KEY`)
 - **Verify:** `env -u OPENROUTER_KEY nix develop -c pytest tests/test_llm_meta_openrouter.py -q` (must be RED when online, not skipped)
-- **Verify:** `nix run .#generate-meta -- --openrouter path/to/art.png` (end to end through the schema fallback)
+- **Verify:** `nix run .#generate-meta -- --data-dir ../Art --source openrouter` (publication-driven; requires marked records and `$OPENROUTER_KEY`; local generation additionally requires a running Ollama service)
 
 ## How it works
 
-1. Entry: `aiGen(cardId, path)` in `page.py` reads `select#ai-model` and POSTs `/ai {path, model}`; or `generate_meta.main` parses `IMAGE...` with `--model` / `--openrouter` (exclusive; the latter is `store_const` of `OPENROUTER_MODEL` into `model`).
-2. `GalleryHandler.do_POST` `/ai`: `model = data.get("model") or self.ai_model`; anything outside `(self.ai_model, self.openrouter_model)` gets `400 {"error": "model not allowed: ..."}`.
-3. Caller downscales: `images.thumb_for_ai(path, cache_dir, name)` calls `ensure_thumb` (`convert path -resize 300x300> thumb` on a miss, `shutil.copy2` on `CalledProcessError`/`FileNotFoundError`) and returns the original path on `OSError`.
-4. `generate_metadata(image_path, model, *, run, timeout)`: `openrouter/` prefix → `run_llm(model, _PROMPT_ATTACH, schema=TITLE_DESC_SCHEMA, attach=abspath)`; else `run_llm(model, _PROMPT.format(name=basename), schema=..., cwd=dirname(abspath))`.
-5. `_attempt` argv: `attach` set → `llm -m M -a IMG`; else `llm -m M -o allowedTools Read -o cwd DIR -o timeout T`. `run` defaults to `partial(_default_run, timeout=timeout)`: `subprocess.run(argv, input=prompt, capture_output=True, text=True, timeout)`.
+1. Entry: `aiGen(cardId, path)` posts selected `{path, source, model}` (`model` is null for Claude). `generate_meta.main_args` requires `--source`, reads `publications.json`, and selects records with the exact marker in either supported field; no positional image args.
+2. `GalleryHandler.do_POST` `/ai` canonicalizes full model objects against `VISION_MODELS`, accepts only local/OpenRouter/Claude source, and rejects unknown objects. Local requests also require current fit and service availability.
+3. Both callers downscale through `images.thumb_for_ai`; batch generation uses `<data-dir>/.thumbs` rather than a temporary directory.
+4. `generate_metadata(image_path, model_option, *, source, ...)`: local uses Ollama's vision API, OpenRouter uses the object's explicit `openrouter_name` with `-a`, and Claude keeps the Read-path `llm` invocation. All share the title/description prompt and schema.
+5. `local_model_status` asks `llmfit info <llmfit_name> --json` and checks installed tags through Ollama. GUI generation pulls a missing fitting model on use; CLI asks `[Y/n]` (Enter=yes), while `-y` bypasses consent.
 6. `_attempt` schema: builds `in_prompt = prompt + _JSON_FALLBACK` once. `model in _NO_SCHEMA` → one call with `in_prompt`, no `--schema`. Else `--schema` + bare prompt; `rc != 0` with `NO_SCHEMA_SUPPORT` in stderr → `_NO_SCHEMA.add(model)`, re-run.
 7. `_invoke(run, argv, prompt, timeout)` wraps `run`, converts `subprocess.TimeoutExpired` to `RuntimeError("llm timed out after {timeout}s")`, and logs argv, prompt, elapsed/rc at DEBUG (`-v` via `publicator.setup_logging`).
 8. `run_llm` holds a `deadline = monotonic() + timeout` for the WHOLE call and loops `_fallbacks(model, run)` — the model, then (for `openrouter/` ids only) every other free vision id from `llm openrouter models --free --json`, same-vendor last — handing each attempt only the remaining seconds, breaking on `rc == 0`, a stderr without `RATE_LIMITED`, or a spent budget; a swap logs at INFO. Still `rc != 0` after the last candidate raises `RuntimeError("llm failed ({rc}): {stderr}")`. With a schema, `_loads_json` parses stdout's outermost `{...}` (fences tolerated); `JSONDecodeError` → `RuntimeError("llm returned non-JSON with schema")`.
 9. `generate_metadata` strips `title`/`description`; either empty raises `RuntimeError("AI reply missing title/description: ...")`; returns `(title, description)`.
 10. `do_POST` maps `RuntimeError` to `400 {"error"}`, else `200 {"title", "description"}`; `aiGen` writes them into the card's `.f-title`/`.f-description`, or `d.error || "HTTP <status>"` into `.err`.
-11. `generate_meta.main` prints a `Title:` block per image (flush=True) unless `--json`, which buffers one array; a failed image prints `{image}: {e}` to stderr and the loop continues; exit 1 if `len(done) < len(images)`.
+11. `generate_pending` resolves each marked publication's art via `entries.find_art_path`, replaces only fields still equal to the sentinel, and calls `atomic_write_json` after each successful record. A failure restores that record's old fields, reports UUID/path/error, continues the batch, and makes the CLI exit nonzero.
 
 ## Invariants
 
@@ -39,12 +39,12 @@
 - **`timeout` budgets the whole call, not each attempt.** Otherwise the walk turns one 300 s ceiling into N x 2 x 300 s on a synchronous `/ai` the gallery tab blocks on (ADR 0006); `run_llm` `deadline`, `tests/test_llm_meta.py::test_run_llm_stops_walking_once_the_timeout_budget_is_spent`.
 - **Candidates come from `llm-openrouter`'s cache, never from a direct fetch of openrouter.ai.** `register_models` mints the ids `llm -m` accepts from that same copy, so a listed candidate always resolves; a fresher list could offer one that answers `Unknown model`, which is not a 429 and would abort the walk (ADR 0006 alternative G); `llm_meta.FREE_MODELS_ARGV`.
 - **Both recoveries live under `run_llm` (`_attempt` owns `--schema`, the loop owns `-m`); callers never know about either.** Hoisting would rebuild argv per caller (ADR 0005 alternative E, ADR 0006 alternative F); `rg -n -- '--schema' src/` hits only `src/publicator/llm_meta.py`.
-- **Every AI caller hands the model a thumbnail via `images.thumb_for_ai`, never the full-res file.** Same visual info for a fraction of tokens on a 300px-bound call; `server.py` `/ai` branch, `src/publicator/apps/generate_meta.py` inside a `TemporaryDirectory`.
-- Relies on `/ai` accepting only `ai_model` and `openrouter_model` (HTTP 400 otherwise, since the id reaches subprocess argv), owned by `docs/features/gallery-ui.md`.
+- **Every AI caller hands the model a thumbnail via `images.thumb_for_ai`.** Same visual info for a fraction of tokens on a 300px-bound call; both gallery and batch use the data-dir `.thumbs` cache.
+- **`/ai` accepts explicit provider sources and canonical catalog objects only.** Local/OpenRouter objects must exactly match `VISION_MODELS`; Claude accepts no model object, and local fit/availability is enforced server-side (`docs/features/gallery-ui.md`).
 - **Permissive JSON parsing (outermost `{...}`) still raises on unparseable output; empty title/description also raises.** Permissive parsing must not decay into returning `{}` (ADR 0005); `tests/test_llm_meta.py::test_run_llm_bad_json_with_schema_raises`, `::test_generate_metadata_empty_raises`.
 - **The live OpenRouter test skips ONLY when offline (with a warning); online with no `$OPENROUTER_KEY` fails.** A credential-gated skip rots unnoticed; `tests/test_llm_meta_openrouter.py::test_openrouter_generates_title_and_description` (`_online()` gate, then `assert os.environ.get("OPENROUTER_KEY")`).
 - **The live test targets a model that does NOT advertise `structured_outputs` (`SCHEMALESS_VISION_MODEL`).** Its purpose is to exercise the fallback end to end; `tests/test_llm_meta_openrouter.py` docstring.
-- **`OPENROUTER_MODEL`/`DEFAULT_MODEL` are module constants (CLI-overridable), not `publicator.toml` keys.** generate-meta runs with no data dir (ADR 0005 "Neutral"); imported as argparse defaults by `src/publicator/apps/publish_next.py` and `src/publicator/apps/generate_meta.py`.
+- **Provider IDs are explicit catalog values, not derived from another provider's name.** Local/OpenRouter selection resolves against `VISION_MODELS`; Claude retains its module model. The CLI's OpenRouter default is `OPENROUTER_MODEL`; local requires explicit `--model`.
 - Relies on the header select listing OpenRouter (free) first as gallery default while the server default (`ai_model`, used when the body omits `model`) stays `claude-cli-opus` (commit d3153d5), owned by `docs/features/gallery-ui.md`.
 
 ## Gotchas
@@ -59,12 +59,12 @@
 - Everything stubs through the one `run=` seam, the listing included; `free_vision_models` takes an already-parsed list, so it tests with a literal. The plugin's own cache is on disk (1 h, shared across processes) and serves its last good copy when openrouter.ai is down, so the listing needs neither a key nor a network.
 - Any non-schema, non-429 exit becomes a RuntimeError in the card's `.err` line or on generate-meta's stderr. `Unknown model` stays in that bucket on purpose (ADR 0006 alternative E): a dead id must be loud, not papered over.
 - `thumb_for_ai` degrades to the full-res file: `ensure_thumb` copies when `convert` is absent/fails, and an unwritable cache dir (`OSError`) returns the original. Costlier, not broken.
-- generate-meta's flake app adds only `[ claude ]` as extra runtimeInputs (the `app` helper adds `python`; no imagemagick — dev shell and publish-next have it), so outside the dev shell the model may get the original.
-- The vision call is slow (default timeout 300 s per image); generate-meta streams each result unless `--json`, which must buffer for a valid array.
+- The `generate-meta` app includes Ollama and llmfit in its runtime closure; the Ollama service itself must be started separately. Batch uses persistent `<data-dir>/.thumbs`; without ImageMagick, the existing thumbnail fallback may pass the original image.
+- The vision call is slow (default timeout 300 s per image); the publication-driven batch processes each marked record and atomically saves successful results one at a time.
 - The claude-cli path needs `claude` on PATH and a logged-in subscription; the flake apps add it via runtimeInputs, a bare `python -m publicator.apps...` outside nix does not.
 - llm-claude-cli 0.1.3 is vendored from PyPI in `flake.nix` (hash-pinned); llm-openrouter comes from nixpkgs `ps.llm-openrouter`. No `llm install` state anywhere.
 
 ## Open items
 
-- generate-meta's flake app lists no imagemagick, so its `thumb_for_ai` downscale only happens if `convert` is already on the caller's PATH: is the copy fallback acceptable, or should `pkgs.imagemagick` join its runtimeInputs?
+- Batch local generation requires an already-running Ollama service; publicator does not manage its lifecycle.
 - Gallery default selection (OpenRouter, first `<option>`) and server fallback default (`ai_model` = claude) differ by design; `test_page_offers_both_models` asserts presence only, so a reorder would go unnoticed.
