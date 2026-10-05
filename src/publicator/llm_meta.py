@@ -23,7 +23,6 @@ import logging
 import os
 import subprocess
 import time
-import urllib.error
 import urllib.request
 
 log = logging.getLogger("publicator.llm")
@@ -195,7 +194,7 @@ def _ollama_request(path, *, method="GET", data=None, timeout=DEFAULT_TIMEOUT):
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             raw = response.read()
-    except (OSError, urllib.error.URLError) as e:
+    except OSError as e:
         raise RuntimeError(f"Ollama is unavailable at {OLLAMA_URL}: {e}") from e
     try:
         return json.loads(raw)
