@@ -515,12 +515,14 @@ def render_page(*, thumb_map, candidates, pending, existing_ts, timeline,
     page = page.replace("__LABELS__", json.dumps(labels))
     if vision_models:
         options = []
+        router_model = next((m for m in vision_models
+                             if m["openrouter_name"] == openrouter_model), vision_models[0])
+        posted = html.escape(json.dumps(router_model), quote=True)
+        options.append(f'<option data-source="openrouter" data-model="{posted}" '
+                       f'value="openrouter:{html.escape(router_model["openrouter_name"], quote=True)}" selected>'
+                       'OpenRouter (free)</option>')
         for model in vision_models:
             posted = html.escape(json.dumps(model), quote=True)
-            selected = " selected" if model["openrouter_name"] == openrouter_model else ""
-            options.append(f'<option data-source="openrouter" data-model="{posted}" '
-                           f'value="openrouter:{html.escape(model["openrouter_name"], quote=True)}"{selected}>'
-                           f'OpenRouter (free) — {html.escape(model["ollama_name"])}</option>')
             status = (local_model_statuses or {}).get(model["ollama_name"], {})
             reason = html.escape(str(status.get("reason", "")), quote=True)
             disabled = not status.get("fit") or not status.get("available")

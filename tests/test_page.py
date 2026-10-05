@@ -23,7 +23,7 @@ def test_page_offers_both_models():
     assert "__AI_MODEL__" not in page and "__OPENROUTER_MODEL__" not in page
 
 
-def test_page_renders_source_aware_paired_models_and_fit_reasons():
+def test_page_renders_one_openrouter_choice_and_all_local_models():
     from publicator.llm_meta import VISION_MODELS
     statuses = {
         VISION_MODELS[0]["ollama_name"]: {"fit": True, "installed": False,
@@ -33,9 +33,9 @@ def test_page_renders_source_aware_paired_models_and_fit_reasons():
     }
     page = _render(vision_models=VISION_MODELS, local_model_statuses=statuses,
                    openrouter_model=VISION_MODELS[1]["openrouter_name"])
-    assert 'data-source="openrouter"' in page
+    assert page.count('data-source="openrouter"') == 1
+    assert page.count('data-source="local"') == len(VISION_MODELS)
     assert f'value="openrouter:{VISION_MODELS[1]["openrouter_name"]}" selected' in page
-    assert 'data-source="local"' in page
     assert 'data-model=' in page
     assert 'Install on use' in page
     assert 'disabled title="&lt;Too Tight &amp; limited&gt;"' in page
