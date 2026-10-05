@@ -101,6 +101,8 @@
         #   nix run .#generate-meta -- [--openrouter] IMAGE...
         # `claude` for the key-free path; no browsers (this one never publishes).
         generate-meta = app "generate-meta" "generate_meta" [ claude pkgs.ollama pkgs.llmfit pkgs.imagemagick ] false;
+        # Host-fit verdicts for configured local vision models; no Ollama daemon needed.
+        vision-models = app "vision-models" "vision_models" [ pkgs.llmfit ] false;
         validate = app "validate" "validate" [ ] false;
         # First state=unpublished entry's path/title/schedule (used by the skill).
         echo-first = app "echo-first" "echo_first" [ ] false;

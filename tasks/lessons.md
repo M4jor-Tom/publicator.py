@@ -13,3 +13,11 @@ Install UX: the GUI may auto-install on local generation but must indicate the i
 Rule: preserve this GUI/CLI consent difference and the CLI's yes-by-default prompt for Ollama downloads.
 Workflow: user requested design and plan artifacts in `/tmp`, self-reviewed and approved before execution, with implementation delegated subagent-driven.
 Rule: follow explicit artifact-location and self-approval instructions; don't add another user gate after the user directs execution.
+
+## 2026-10-05 — source the OpenRouter key before the online test suite
+The live OpenRouter test correctly fails when the network is up but `$OPENROUTER_KEY` is unset. The user pointed out the host setup script at `~/set_open_router_key.sh`.
+Rule: source that script in the test command's shell before running the full suite; never print or persist the key value.
+
+## 2026-10-05 — stage new modules before testing a Git-backed Nix app
+The flake's `src = ./.` omits untracked files, so a new app module can be missing from the built runtime even when `nix run` builds successfully. I only verified this app while its module was temporarily staged, then unstaged it.
+Rule: stage or commit newly added source files before validating a Git-backed `nix run`, and disclose any temporary staging used for verification.

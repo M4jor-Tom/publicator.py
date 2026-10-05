@@ -46,6 +46,7 @@ nix run <this>#login          # one-time DeviantArt sign-in in a REAL Firefox (s
 nix run <this>#publish-next   # the gallery UI: review picked/, AI metadata, schedule, batch-publish
 nix run <this>#da-publish -- --data-dir <dir> [--uuid <id> | --all] [--headless]   # publish the first pending entry, one by uuid, or all
 nix run <this>#generate-meta -- [--openrouter] IMAGE...   # AI title/description only, no gallery, no data dir
+nix run <this>#vision-models  # host-fit verdicts for configured local vision models
 nix run <this>#validate       # validate publications.json against publicationsSchema.json
 nix run <this>#echo-first     # path/title/schedule of the first state=unpublished entry
 nix run <this>#check-steps    # cheap CI drift guard (no browser/data deps)
@@ -64,7 +65,7 @@ invariants, gotchas). Read the feature file before touching its code.
 the logic; `webui/{page,server,calendar_view,prompt_view}.py` is the UI (a pure `render_page`
 plus the `ThreadingHTTPServer` that calls it, and the calendar tab's own pure
 renderer); `apps/{publish_next,da_publish,
-validate,echo_first,pw_daemon,generate_meta,prompt_audit}.py` are the thin CLI entry points the flake's
+validate,echo_first,pw_daemon,generate_meta,vision_models,prompt_audit}.py` are the thin CLI entry points the flake's
 `nix run` apps invoke. Code assets (the JSON schema) resolve via `__file__`
 inside the package; the tags file, like all data + runtime state, still
 resolves against CWD/`--data-dir`, per the code/data split above.

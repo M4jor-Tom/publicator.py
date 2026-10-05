@@ -202,8 +202,8 @@ def _ollama_request(path, *, method="GET", data=None, timeout=DEFAULT_TIMEOUT):
         raise RuntimeError(f"Ollama returned invalid JSON from {path}") from e
 
 
-def local_model_status(model_option):
-    """Report the llmfit verdict and Ollama's own installed-model inventory."""
+def local_model_fit(model_option):
+    """Report llmfit's host-fit verdict without requiring an Ollama service."""
     try:
         result = subprocess.run(
             ["llmfit", "info", model_option["llmfit_name"], "--json"],
@@ -214,21 +214,30 @@ def local_model_status(model_option):
         report = json.loads(result.stdout)
         model = next(m for m in report["models"] if m["name"] == model_option["llmfit_name"])
         fit_level = model["fit_level"]
-        reason = str(model.get("notes", ""))
+        notes = model.get("notes", "")
+        reason = "; ".join(map(str, notes)) if isinstance(notes, list) else str(notes or "")
         fit = fit_level == "Good"
         if not fit and not reason:
             reason = f"llmfit fit_level: {fit_level}"
+        return {"fit": fit, "fit_level": fit_level, "reason": reason}
     except (OSError, RuntimeError, ValueError, KeyError, TypeError, StopIteration) as e:
-        return {"fit": False, "installed": False, "available": False,
+        return {"fit": False, "fit_level": "Unavailable",
                 "reason": str(e) or "llmfit could not assess this model"}
-    if not fit:
-        return {"fit": False, "installed": False, "available": False, "reason": reason}
+
+
+def local_model_status(model_option):
+    """Report the host-fit verdict and Ollama's installed-model inventory."""
+    fit_status = local_model_fit(model_option)
+    if not fit_status["fit"]:
+        return {"fit": False, "installed": False, "available": False,
+                "reason": fit_status["reason"]}
     try:
         tags = _ollama_request("/api/tags")
         installed = any(m.get("name") == model_option["ollama_name"] for m in tags["models"])
     except (RuntimeError, KeyError, TypeError) as e:
         return {"fit": True, "installed": False, "available": False, "reason": str(e)}
-    return {"fit": True, "installed": installed, "available": True, "reason": reason}
+    return {"fit": True, "installed": installed, "available": True,
+            "reason": fit_status["reason"]}
 
 
 def prepare_local_model(model_option, *, install):

@@ -183,6 +183,32 @@ def test_generate_metadata_local_uses_ollama_attachment_schema_and_thumbnail(tmp
     assert body["format"] == llm_meta.TITLE_DESC_SCHEMA and body["stream"] is False
 
 
+def test_local_model_fit_joins_llmfit_note_lists(monkeypatch):
+    option = llm_meta.VISION_MODELS[0]
+    monkeypatch.setattr(llm_meta.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(
+        returncode=0,
+        stdout=json.dumps({"models": [{"name": option["llmfit_name"], "fit_level": "Good", "notes": ["Fits.", "Enough RAM."]}]}),
+        stderr=""))
+
+    assert llm_meta.local_model_fit(option)["reason"] == "Fits.; Enough RAM."
+
+
+def test_local_model_fit_reads_llmfit_without_ollama(monkeypatch):
+    option = llm_meta.VISION_MODELS[0]
+    calls = []
+    monkeypatch.setattr(llm_meta.subprocess, "run", lambda argv, **kwargs: (
+        calls.append(argv) or SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"models": [{"name": option["llmfit_name"], "fit_level": "Good", "notes": "Fits."}]}),
+            stderr="")))
+    monkeypatch.setattr(llm_meta.urllib.request, "urlopen",
+                        lambda *args, **kwargs: pytest.fail("fit check must not require Ollama"))
+
+    assert llm_meta.local_model_fit(option) == {
+        "fit": True, "fit_level": "Good", "reason": "Fits."}
+    assert calls == [["llmfit", "info", option["llmfit_name"], "--json"]]
+
+
 def test_local_model_status_reads_llmfit_and_ollama_tags(monkeypatch):
     option = llm_meta.VISION_MODELS[0]
     monkeypatch.setattr(llm_meta.subprocess, "run", lambda argv, **kwargs: SimpleNamespace(
