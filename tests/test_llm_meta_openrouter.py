@@ -58,8 +58,11 @@ def test_openrouter_generates_title_and_description(tmp_path):
     # shot is a coin flip. Retry so a red run means OUR bug, not OpenRouter's weather.
     for _ in range(3):
         try:
-            title, description = llm_meta.generate_metadata(
-                str(art), SCHEMALESS_VISION_MODEL, timeout=90)
+            metadata = llm_meta.run_llm(
+                SCHEMALESS_VISION_MODEL, llm_meta._PROMPT_ATTACH,
+                schema=llm_meta.TITLE_DESC_SCHEMA, attach=str(art), timeout=90)
+            title = metadata["title"].strip()
+            description = metadata["description"].strip()
             break
         except RuntimeError as e:
             last = e
