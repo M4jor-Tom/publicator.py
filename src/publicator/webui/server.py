@@ -253,7 +253,8 @@ class GalleryHandler(BaseHTTPRequestHandler):
                 try:
                     title, desc = generate_metadata(
                         image_for_ai, model, source=source, timeout=self.ai_timeout,
-                        install_missing=(source == "local"))
+                        install_missing=(source == "local"),
+                        **({"claude_model": self.ai_model} if source == "claude" else {}))
                 except RuntimeError as e:
                     log.debug("AI metadata failed: %s", e)
                     self._send(400, {"error": str(e)}); return

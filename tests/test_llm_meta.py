@@ -113,6 +113,14 @@ def test_generate_metadata_returns_title_desc():
     assert json.loads(cap["argv"][j + 1]) == llm_meta.TITLE_DESC_SCHEMA
 
 
+def test_generate_metadata_uses_configured_claude_model():
+    cap = {}
+    llm_meta.generate_metadata(
+        "/imgs/thumb.jpg", None, source="claude", claude_model="claude-custom-opus",
+        run=make_run(stdout='{"title": "Dawn", "description": "A quiet field."}', capture=cap))
+    assert cap["argv"][:3] == ["llm", "-m", "claude-custom-opus"]
+
+
 def test_generate_metadata_empty_raises():
     with pytest.raises(RuntimeError, match="missing title/description"):
         llm_meta.generate_metadata("/imgs/x.jpg", None, source="claude",

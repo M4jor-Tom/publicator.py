@@ -266,7 +266,8 @@ def _local_metadata(image_path, model_option, *, timeout):
 
 
 def generate_metadata(image_path, model_option: dict[str, str] | None, *, source: str,
-                      run=None, timeout=DEFAULT_TIMEOUT, install_missing=False) -> tuple[str, str]:
+                      claude_model: str | None = None, run=None, timeout=DEFAULT_TIMEOUT,
+                      install_missing=False) -> tuple[str, str]:
     """Return validated title/description using the selected metadata provider."""
     abspath = os.path.abspath(image_path)
     if source == "local":
@@ -280,7 +281,8 @@ def generate_metadata(image_path, model_option: dict[str, str] | None, *, source
         obj = run_llm(model_option["openrouter_name"], _PROMPT_ATTACH,
                       schema=TITLE_DESC_SCHEMA, attach=abspath, run=run, timeout=timeout)
     elif source == "claude":
-        obj = run_llm(DEFAULT_MODEL, _PROMPT.format(name=os.path.basename(image_path)),
+        obj = run_llm(claude_model if claude_model is not None else DEFAULT_MODEL,
+                      _PROMPT.format(name=os.path.basename(image_path)),
                       schema=TITLE_DESC_SCHEMA, cwd=os.path.dirname(abspath),
                       run=run, timeout=timeout)
     else:

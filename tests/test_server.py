@@ -74,7 +74,7 @@ def test_ai_accepts_only_catalog_objects_and_source(monkeypatch, tmp_path):
     monkeypatch.setattr(gallery, "thumb_for_ai", lambda *a: "thumb.png")
     monkeypatch.setattr(gallery, "generate_metadata", lambda *a, **kw: (calls.append((a, kw)) or ("t", "d")))
     model = VISION_MODELS[0]
-    base = dict(cache_dir=str(tmp_path), thumb_map={}, ai_model="claude-cli-opus",
+    base = dict(cache_dir=str(tmp_path), thumb_map={}, ai_model="claude-custom-opus",
                 openrouter_model=model["openrouter_name"], ai_timeout=3,
                 local_model_statuses={model["ollama_name"]: {"fit": True, "installed": False,
                                                                "available": True, "reason": ""}})
@@ -90,6 +90,8 @@ def test_ai_accepts_only_catalog_objects_and_source(monkeypatch, tmp_path):
     url = _serve_once(**base)
     assert _post(url, {"path": "a.png", "source": "claude", "model": None})[0] == 200
     assert calls[-1][1]["source"] == "claude"
+    assert calls[-1][1]["claude_model"] == "claude-custom-opus"
+    assert calls[-1][0][1] is None
 
 
 def test_ai_refuses_unfit_local_and_allows_install_on_use(monkeypatch, tmp_path):
