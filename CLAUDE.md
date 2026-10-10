@@ -113,10 +113,11 @@ with the shape in the prompt and remembers the verdict per model (see
 supports structured outputs — the free ones churn; rationale and the rejected
 alternatives are in `docs/adr/0005`. A **429 is a different beast**: the
 `:free` tier shares one upstream pool per vendor, so backing off is useless
-and `run_llm` instead walks the other free vision ids that `llm-openrouter`
-lists (same vendor last — and from the plugin's cache, so they are ids `llm -m`
-can actually resolve), logging at INFO which model answered —
-`docs/adr/0006`. A dead id (`Unknown model`) still fails loudly, by design.
+and `run_llm` walks the other free vision ids after any failed OpenRouter
+attempt (same vendor last, using the plugin's cache so ids resolve through
+`llm -m`), logging at INFO which model answered. It does not silently switch to
+Claude or local Ollama; after the catalogue is exhausted, the last error is
+reported (`docs/adr/0008`).
 Every AI caller downscales through
 `images.thumb_for_ai` first.
 

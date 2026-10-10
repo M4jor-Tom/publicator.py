@@ -48,7 +48,7 @@ OLLAMA_URL = "http://localhost:11434"
 
 # Ask the plugin, never openrouter.ai: `register_models` mints the ids `llm -m`
 # accepts from this same 1h disk cache, so a listed candidate always resolves --
-# and it needs no key and survives an outage. ADR 0006 alternative G.
+# and it needs no key and survives an outage.
 FREE_MODELS_ARGV = ["llm", "openrouter", "models", "--free", "--json"]
 
 # `llm` raises this when --schema meets a model that lacks `structured_outputs`

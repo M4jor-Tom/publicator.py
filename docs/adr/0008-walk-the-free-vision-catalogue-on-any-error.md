@@ -9,8 +9,8 @@
 
 ## Context
 
-ADR [[0006]] advances through OpenRouter's dynamic free vision catalogue only
-when a candidate returns HTTP 429. Other failures—including stale requested IDs,
+The previous behavior advanced through OpenRouter's dynamic free vision
+catalogue only when a candidate returned HTTP 429. Other failures—including stale requested IDs,
 transient transport errors, and malformed structured output—stop the walk even
 when other catalogue candidates remain. The model list comes from the same
 `llm-openrouter` cache that `llm -m` resolves, so fallback IDs are usable without
@@ -75,7 +75,7 @@ per-image timeout.
 ### Current state
 
 Implemented in `run_llm`; unit tests cover a non-429 error, timeout, malformed
-structured output, and missing metadata followed by a successful fallback. ADR [[0006]] is superseded.
+structured output, and missing metadata followed by a successful fallback. This replaces the earlier 429-only behavior.
 
 ### Key files / entry points
 
@@ -105,5 +105,4 @@ nix develop -c pytest tests/test_llm_meta.py -q
 
 ### Related
 
-- [[0006]] — superseded; originally walked only on 429.
 - [[0005]] — schema fallback remains inside `_attempt`.

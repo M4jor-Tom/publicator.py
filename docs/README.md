@@ -31,8 +31,8 @@ links the ADRs that constrain it; do not reverse one without a new ADR.
 - [0003 Declare the filename grammar in publicator.toml](adr/0003-declare-the-filename-grammar-in-publicator-toml.md)
 - [0004 Fail open when prompt archiving fails](adr/0004-fail-open-when-prompt-archiving-fails.md)
 - [0005 Retry without --schema when a model rejects it](adr/0005-retry-without-schema-when-a-model-rejects-it.md)
-- [0006 Walk the free vision catalogue on a 429](adr/0006-walk-the-free-vision-catalogue-on-a-429.md)
 - [0007 Local vision models with Ollama and llmfit](adr/0007-local-vision-models-with-ollama-and-llmfit.md)
+- [0008 Walk the free vision catalogue after any failed model attempt](adr/0008-walk-the-free-vision-catalogue-on-any-error.md)
 
 ## Not built yet
 

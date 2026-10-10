@@ -338,7 +338,7 @@ def test_ollama_chat_bad_response_fails(tmp_path, monkeypatch, body):
         llm_meta.generate_metadata(image, llm_meta.VISION_MODELS[0], source="local")
 
 
-# --- OpenRouter catalogue fallback (originally 429-only in ADR 0006) ----------
+# --- OpenRouter free-vision catalogue fallback -------------------------------
 
 def test_free_vision_models_keeps_only_the_ids_that_take_images():
     assert llm_meta.free_vision_models([
