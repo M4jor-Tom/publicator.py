@@ -65,8 +65,12 @@ def validate_publications(data, config):
         for a in p.get("apparitions", []):
             if a.get("platformName") != "deviantart":
                 continue
-            if "tier" in a and a["tier"] not in tiers:
-                raise ValueError(f"{p.get('uuid')}: tier {a['tier']!r} not in publicator.toml")
+            selected_tiers = a.get("tiers", [])
+            if "tier" in a:
+                selected_tiers = [*selected_tiers, a["tier"]]
+            for tier in selected_tiers:
+                if tier not in tiers:
+                    raise ValueError(f"{p.get('uuid')}: tier {tier!r} not in publicator.toml")
             for g in a.get("galleries", []):
                 if g not in galleries:
                     raise ValueError(f"{p.get('uuid')}: gallery {g!r} not in publicator.toml")

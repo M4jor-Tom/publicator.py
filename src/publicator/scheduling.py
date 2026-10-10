@@ -28,7 +28,7 @@ def zone(schedule: dict) -> ZoneInfo:
 
 
 def schedule_profiles(schedule: dict) -> list[dict]:
-    """Validated cadence: [{name, day: <Python weekday, 0=Mon>, hour, per_slot}, ...].
+    """Validated cadence: [{name, day: <Python weekday, 0=Mon>, hour, per_slot, default_tiers}, ...].
     Reads schedule['profiles']; a flat day/hour/per_slot config becomes one 'default'
     profile, an empty dict the built-in default. Only frequency='weekly' is
     implemented; profiles need distinct (day, hour). Internal to schedule_data —
@@ -48,12 +48,16 @@ def schedule_profiles(schedule: dict) -> list[dict]:
         per_slot = int(p.get("per_slot", 2))
         if per_slot < 1:
             raise ValueError(f"schedule.per_slot must be >= 1, got {per_slot}")
+        default_tiers = p.get("default_tiers", [])
+        if not isinstance(default_tiers, list) or not all(isinstance(t, str) for t in default_tiers):
+            raise ValueError("schedule.default_tiers must be a list of tier names")
         key = (WEEKDAY[day], hour)
         if key in seen:
             raise ValueError(f"schedule profiles collide on (day={day}, hour={hour})")
         seen.add(key)
         out.append({"name": str(p.get("name", "default")),
-                    "day": WEEKDAY[day], "hour": hour, "per_slot": per_slot})
+                    "day": WEEKDAY[day], "hour": hour, "per_slot": per_slot,
+                    "default_tiers": default_tiers})
     if not out:
         raise ValueError("schedule.profiles is empty")
     return out
@@ -76,16 +80,25 @@ def profile_slots(profile: dict, tz: ZoneInfo, start: int) -> list[int]:
     return slots
 
 
-def schedule_data(schedule: dict, now: int | None = None) -> list[dict]:
-    """Client scheduling payload: per profile, its upcoming canonical slot
-    instants. ALL weekday/hour/timezone math lives here (Python zoneinfo) so the
-    browser never reads a clock — it only counts occupancy by exact-timestamp
-    equality, immune to the private-window UTC spoof."""
+def schedule_data(schedule: dict, now: int | None = None,
+                  allowed_tiers: list[str] | None = None) -> list[dict]:
+    """Client scheduling payload: each profile's upcoming slots and tier defaults.
+    ALL weekday/hour/timezone math lives here (Python zoneinfo) so the browser
+    never reads a clock. If supplied, `allowed_tiers` validates profile defaults."""
     tz = zone(schedule)
     start = int(now if now is not None else time.time())
+    profiles = schedule_profiles(schedule)
+    if allowed_tiers is not None:
+        allowed = set(allowed_tiers)
+        for p in profiles:
+            unknown = set(p["default_tiers"]) - allowed
+            if unknown:
+                raise ValueError(f"schedule profile {p['name']!r} has unconfigured default tiers: "
+                                 f"{sorted(unknown)}")
     return [{"name": p["name"], "per_slot": p["per_slot"],
+             "default_tiers": p["default_tiers"],
              "slots": profile_slots(p, tz, start)}
-            for p in schedule_profiles(schedule)]
+            for p in profiles]
 
 
 def ts_labels(tz: ZoneInfo, tss) -> dict[int, str]:

@@ -89,8 +89,8 @@ def _pending_art(basename: str) -> Path | None:
 
 
 def load_pending_entries(json_path: str) -> list[dict]:
-    """Existing state=unpublished DA entries -> queue dicts
-    {uuid, path, title, scheduleTs}. Skips entries whose art can't be found."""
+    """Existing state=unpublished DA entries -> queue dicts with tier lists.
+    Skips entries whose art can't be found."""
     try:
         with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -116,7 +116,7 @@ def load_pending_entries(json_path: str) -> list[dict]:
             "description": p.get("description", ""),
             "scheduleTs": app.get("apparitionTimestampIfDifferentThanSubmission"),
             "price": app.get("priceIfNotFree"),
-            "tier": app.get("tier"),
+            "tiers": app.get("tiers", [app["tier"]] if app.get("tier") else []),
             "galleries": app.get("galleries", []),
         })
     return out
@@ -303,13 +303,14 @@ def _pick_in_combo(page, combo, text) -> None:
 
 
 def _step_tier(page, e):
-    tier = e.get("tier")
-    if not tier:
+    tiers = e.get("tiers")
+    if not tiers:
         return
     # get_by_text is case-insensitive: DA flips "Subscribers"/"subscribers" between releases.
     combo = page.get_by_text("Submit to your subscribers").locator('xpath=following::*[@role="combobox"][1]')
     combo.scroll_into_view_if_needed()
-    _pick_in_combo(page, combo, tier)
+    for tier in tiers:
+        _pick_in_combo(page, combo, tier)
 
 
 def _step_galleries(page, e):
@@ -342,7 +343,7 @@ STEPS: list[tuple[str, object]] = [
     ('Drop all the pre-filled tags in the "Tags" field', _step_clear_tags),
     ('Copy the content of the tags file (<data-dir>/<"tags" path>, per the top-level "tags" key of publicator.toml) into the "Tags" field', _step_add_tags),
     ('If the piece has a price, tick "Sell as Premium Download" and set the price', _step_premium),
-    ("Set the subscription tier <pub.tier>", _step_tier),
+    ("Set the subscription tiers <pub.tiers>", _step_tier),
     ("Add to galleries <pub.galleries>", _step_galleries),
     ("Schedule publication for the <pub.schedule>", _step_schedule),
 ]

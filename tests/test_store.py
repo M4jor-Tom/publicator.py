@@ -20,10 +20,11 @@ def img(tmp_path):
     return str(p)
 
 
-def test_write_publications_appends_an_unpublished_entry(tmp_path, img):
+def test_write_publications_appends_an_unpublished_entry_with_multiple_tiers(tmp_path, img):
     jp = str(tmp_path / "publications.json")
     uuids = store.write_publications(
-        [{"path": img, "title": "t", "description": "d", "scheduleTs": _TUE_2000}], jp, _CFG)
+        [{"path": img, "title": "t", "description": "d", "scheduleTs": _TUE_2000,
+          "tiers": ["gold", "silver"]}], jp, _CFG | {"tiers": ["gold", "silver"]})
     assert len(uuids) == 1
     rows = json.loads(open(jp).read())
     assert len(rows) == 1 and rows[0]["uuid"] == uuids[0]
@@ -31,6 +32,7 @@ def test_write_publications_appends_an_unpublished_entry(tmp_path, img):
     assert app["state"] == STATE_UNPUBLISHED
     assert app["apparitionTimestampIfDifferentThanSubmission"] == _TUE_2000
     assert app["urlElsePublicationName"] == "t"
+    assert app["tiers"] == ["gold", "silver"] and "tier" not in app
 
 
 def test_write_publications_falls_back_to_load_config_when_none(tmp_path, monkeypatch, img):
@@ -55,19 +57,21 @@ def test_apply_update_sets_then_clears_optional_fields(tmp_path, img):
     uuids = store.write_publications(
         [{"path": img, "title": "t", "description": "d", "scheduleTs": _TUE_2000}], jp, _CFG)
     rows = json.loads(open(jp).read())
+    rows[0]["apparitions"][0]["tier"] = "gold"  # existing publication format
 
     store.apply_update(rows, uuids[0],
                        {"title": "T2", "description": "D2", "scheduleTs": _TUE_2000 + 604800,
-                        "price": 3, "tier": "gold", "galleries": ["Art"]}, _PARIS)
+                        "price": 3, "tiers": ["gold", "silver"], "galleries": ["Art"]}, _PARIS)
     app = rows[0]["apparitions"][0]
     assert app["urlElsePublicationName"] == "T2" and app["priceIfNotFree"] == 3.0
-    assert app["tier"] == "gold" and app["galleries"] == ["Art"]
+    assert app["tiers"] == ["gold", "silver"] and "tier" not in app
+    assert app["galleries"] == ["Art"]
 
     store.apply_update(rows, uuids[0],
                        {"title": "T3", "description": "D3", "scheduleTs": _TUE_2000 + 604800},
                        _PARIS)
     app = rows[0]["apparitions"][0]
-    assert "priceIfNotFree" not in app and "tier" not in app and "galleries" not in app
+    assert "priceIfNotFree" not in app and "tiers" not in app and "galleries" not in app
 
 
 def test_apply_update_raises_on_unknown_uuid():

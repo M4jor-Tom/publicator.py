@@ -116,6 +116,14 @@ def _pubs(**apparition):
 def test_validate_accepts_configured_tier_and_gallery():
     validate_publications(_pubs(tier="gold", galleries=["Art"]),
                           {"tiers": ["gold"], "galleries": ["Art"]})
+    validate_publications(_pubs(tiers=["gold", "silver"], galleries=["Art"]),
+                          {"tiers": ["gold", "silver"], "galleries": ["Art"]})
+
+
+def test_validate_rejects_unconfigured_member_of_tier_list():
+    with pytest.raises(ValueError, match="tier"):
+        validate_publications(_pubs(tiers=["gold", "missing"]),
+                              {"tiers": ["gold"], "galleries": []})
 
 
 def test_validate_rejects_tier_absent_from_config():

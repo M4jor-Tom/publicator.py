@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -50,6 +51,41 @@ def test_optional_steps_are_no_ops_when_unset():
     deviantart._step_premium(_NoPage(), {"price": None})
     deviantart._step_tier(_NoPage(), {})
     deviantart._step_galleries(_NoPage(), {})
+
+
+def test_step_tier_selects_every_requested_tier(monkeypatch):
+    selected = []
+
+    class Combo:
+        def scroll_into_view_if_needed(self):
+            pass
+
+    class Section:
+        def get_by_text(self, *_args, **_kwargs):
+            return self
+
+        def locator(self, _selector):
+            return Combo()
+
+    monkeypatch.setattr(deviantart, "_pick_in_combo",
+                        lambda _page, _combo, tier: selected.append(tier))
+    deviantart._step_tier(Section(), {"tiers": ["gold", "silver"]})
+    assert selected == ["gold", "silver"]
+
+
+def test_load_pending_entries_normalizes_legacy_and_multiple_tiers(tmp_path):
+    configure(str(tmp_path), {})
+    (tmp_path / "multi-tier-art.png").write_bytes(b"art")
+    rows = []
+    for uuid, fields in (("legacy", {"tier": "gold"}),
+                         ("multiple", {"tiers": ["gold", "silver"]})):
+        rows.append({"uuid": uuid, "description": "d", "files": [{"basename": "multi-tier-art.png"}],
+                     "apparitions": [{"platformName": "deviantart", "state": "unpublished",
+                                      "urlElsePublicationName": uuid, **fields}]})
+    json_path = tmp_path / "publications.json"
+    json_path.write_text(json.dumps(rows))
+    pending = deviantart.load_pending_entries(str(json_path))
+    assert [entry["tiers"] for entry in pending] == [["gold"], ["gold", "silver"]]
 
 
 def test_configure_resolves_tags_file_under_data_dir(tmp_path):

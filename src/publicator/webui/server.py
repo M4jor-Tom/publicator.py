@@ -399,7 +399,8 @@ def serve(data_dir: str, candidate_paths: list[str], pending: list[dict],
     }
     GalleryHandler.json_path = args.json
     GalleryHandler.config = config
-    GalleryHandler.schedules = schedule_data(config["schedule"])
+    GalleryHandler.schedules = schedule_data(
+        config["schedule"], allowed_tiers=config.get("tiers", []))
     GalleryHandler.archive = prompt_archive_from_config(data_dir, config)
     GalleryHandler.publicable_dirs = publicable_dirs or []
 

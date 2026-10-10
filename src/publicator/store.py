@@ -51,7 +51,7 @@ def write_publications(entries: list[dict], json_path: str, config: dict | None 
         }
         price = e.get("price")
         set_or_pop(apparition, "priceIfNotFree", float(price) if price not in (None, "") else None)
-        set_or_pop(apparition, "tier", e.get("tier") or None)
+        set_or_pop(apparition, "tiers", e.get("tiers"))
         set_or_pop(apparition, "galleries", list(e["galleries"]) if e.get("galleries") else None)
         u = str(uuid.uuid4())
         new_uuids.append(u)
@@ -90,7 +90,7 @@ def set_or_pop(d, k, v):
 
 def apply_update(pubs, uuid_, fields, zone: ZoneInfo):
     """Patch the publication (and its DA apparition) with uuid_ in place.
-    Cleared price/tier/galleries are removed. Raises KeyError if not found.
+    Cleared price/tiers/galleries are removed. Raises KeyError if not found.
     `zone` resolves the naive 'schedule' string (see resolve_ts)."""
     for p in pubs:
         if p.get("uuid") == uuid_:
@@ -103,5 +103,6 @@ def apply_update(pubs, uuid_, fields, zone: ZoneInfo):
     app["apparitionTimestampIfDifferentThanSubmission"] = resolve_ts(fields, zone)
     price = fields.get("price")
     set_or_pop(app, "priceIfNotFree", float(price) if price not in (None, "") else None)
-    set_or_pop(app, "tier", fields.get("tier") or None)
+    set_or_pop(app, "tiers", fields.get("tiers"))
+    app.pop("tier", None)  # migrate the legacy singular field on edit
     set_or_pop(app, "galleries", list(fields["galleries"]) if fields.get("galleries") else None)

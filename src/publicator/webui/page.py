@@ -49,6 +49,10 @@ PAGE_TEMPLATE = r"""<!DOCTYPE html>
   .form label { font-size: 12px; color: #aaa; }
   .form input, .form textarea, .promptsearch input { background: #1a1a1a; color: #eee; border: 1px solid #444;
                                 border-radius: 4px; padding: 6px; font-family: inherit; font-size: 13px; }
+  .form fieldset { border: 0; margin: 0; padding: 0; }
+  .form legend { padding: 0; font-size: 12px; color: #aaa; }
+  .form fieldset label { display: inline-flex; align-items: center; gap: 4px; margin-right: 8px; }
+  .form input[type=checkbox] { padding: 0; }
   .form textarea { min-height: 70px; resize: vertical; }
   .form-actions { display: flex; gap: 6px; margin-top: 4px; }
   .form-actions button, .ai-actions button { flex: 1; padding: 8px; border: none; border-radius: 4px;
@@ -140,12 +144,12 @@ __CARDS__</div>
 </main>
 <script>
 const EXISTING_TS = __EXISTING_TS__;   // already-scheduled background instants (occupancy)
-const SCHEDULES = __SCHEDULES__;       // [{name, per_slot, slots:[ts,...]}]  slots: upcoming canonical instants, ascending
+const SCHEDULES = __SCHEDULES__;       // [{name, per_slot, default_tiers, slots:[ts,...]}]  slots: upcoming instants
 const LABELS = __LABELS__;             // {ts: "YYYY-MM-DDTHH:MM"} wall clock in the schedule TZ, browser-TZ-proof
 const PENDING = __PENDING__;           // already-queued entries from publications.json
 const TODO_GENERATE = __TODO_GENERATE__;
 
-const queue = []; // [{cardId, path, title, description, price, scheduleTs, tier, galleries, uuid?}]
+const queue = []; // [{cardId, path, title, description, price, scheduleTs, tiers, galleries, uuid?}]
 const aiFailures = new Map(); // cardId -> hosted providers that failed this session
 function isAiPending(e) { return e && (e.title === TODO_GENERATE || e.description === TODO_GENERATE); }
 // >>> AI provider fallback core
@@ -184,10 +188,16 @@ function localInputToTs(s) {             // known slot -> exact instant (TZ-proo
                             : Math.floor(new Date(s).getTime() / 1000);  // ponytail: custom time assumes browser TZ
 }
 // <<< scheduler core <<<
-function applyPreset(sel, cardId) {      // preset change -> refill the picker
+function setTierChecks(form, tiers) {
+  const selected = new Set(tiers || []);
+  form.querySelectorAll(".f-tier").forEach(cb => { cb.checked = selected.has(cb.value); });
+}
+function applyPreset(sel, cardId) {      // preset change -> refill the picker and tier defaults
   if (sel.value === "__custom__") return;
   const card = document.getElementById(cardId);
-  card.querySelector(".f-schedule").value = tsToLocalInput(nextSlotForProfile(profileByName(sel.value)));
+  const profile = profileByName(sel.value);
+  card.querySelector(".f-schedule").value = tsToLocalInput(nextSlotForProfile(profile));
+  setTierChecks(card.querySelector(".form"), profile.default_tiers);
 }
 
 function showTab(name) {                 // two tabs, one page: no routing, no reload
@@ -232,12 +242,13 @@ function openForm(cardId) {
     q(".f-price").value = (entry.price == null) ? "" : entry.price;
     q(".f-schedule").value = entry.scheduleTs ? tsToLocalInput(entry.scheduleTs) : "";
     if (presetEl) presetEl.value = presetForTs(entry.scheduleTs);
-    if (q(".f-tier")) q(".f-tier").value = entry.tier || "";
+    setTierChecks(form, entry.tiers);
     form.querySelectorAll(".f-gallery").forEach(cb => cb.checked = (entry.galleries || []).includes(cb.value));
   } else {
     const p = SCHEDULES[0];
     if (presetEl) presetEl.value = p.name;
     q(".f-schedule").value = tsToLocalInput(nextSlotForProfile(p));
+    setTierChecks(form, p.default_tiers);
   }
   form.style.display = "flex";
   card.querySelector(".actions").style.display = "none";
@@ -346,8 +357,8 @@ function readForm(card) {
     if (isNaN(p) || p < 0) { err.textContent = "price must be >= 0"; return null; }
     out.price = p;
   }
-  const tierEl = g(".f-tier");
-  if (tierEl && tierEl.value) out.tier = tierEl.value;
+  const tiers = [...card.querySelectorAll(".f-tier:checked")].map(cb => cb.value);
+  if (tiers.length) out.tiers = tiers;
   const gals = [...card.querySelectorAll(".f-gallery:checked")].map(cb => cb.value);
   if (gals.length) out.galleries = gals;
   return out;
@@ -359,7 +370,7 @@ async function saveCard(cardId, path) {
   if (!fields) return false;
   const entry = queue.find(e => e.cardId === cardId);
   if (entry) {                       // re-edit
-    Object.assign(entry, {price: undefined, tier: undefined, galleries: undefined}, fields);
+    Object.assign(entry, {price: undefined, tiers: undefined, galleries: undefined}, fields);
     if (entry.uuid) {
       const btn = card.querySelector(".btn-save");
       btn.disabled = true; btn.textContent = "Saving...";
@@ -426,7 +437,7 @@ async function publishQueue() {
 for (const p of PENDING) {
   queue.push({cardId: p.cardId, uuid: p.uuid, path: p.path,
               title: p.title, description: p.description, scheduleTs: p.scheduleTs, price: p.price,
-              tier: p.tier, galleries: p.galleries});
+              tiers: p.tiers, galleries: p.galleries});
 }
 refreshCount();
 </script>
@@ -437,13 +448,14 @@ refreshCount();
 def tier_gallery_fields(config):
     if not config.get("tiers") and not config.get("galleries"):
         return ""
-    tiers = "".join(f'<option value="{html.escape(t, quote=True)}">{html.escape(t)}</option>'
+    tiers = "".join(f'<label><input type="checkbox" class="f-tier" '
+                    f'value="{html.escape(t, quote=True)}"> {html.escape(t)}</label>'
                     for t in config.get("tiers", []))
     gals = "".join(f'<label><input type="checkbox" class="f-gallery" '
                    f'value="{html.escape(g, quote=True)}"> {html.escape(g)}</label>'
                    for g in config.get("galleries", []))
-    return (f'<label>Tier <select class="f-tier"><option value="">(none)</option>{tiers}</select></label>'
-            f'<div class="galleries"><span>Galleries</span>{gals}</div>')
+    tier_field = f'<fieldset class="tiers"><legend>Tiers</legend>{tiers}</fieldset>' if tiers else ""
+    return (tier_field + f'<div class="galleries"><span>Galleries</span>{gals}</div>')
 
 
 def preset_options(schedules):
@@ -522,7 +534,8 @@ def render_page(*, thumb_map, candidates, pending, existing_ts, timeline,
         pending_js.append({"cardId": cid, "uuid": e["uuid"], "path": e["path"],
                            "title": e["title"], "description": e.get("description"),
                            "scheduleTs": ts, "price": e.get("price"),
-                           "tier": e.get("tier"), "galleries": e.get("galleries", [])})
+                           "tiers": e.get("tiers", []),
+                           "galleries": e.get("galleries", [])})
     # Add-able cards: new picks from picked/.
     def candidate_card(idx, orig_path):
         filename = os.path.basename(orig_path)

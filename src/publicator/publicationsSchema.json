@@ -43,10 +43,11 @@
                 "apparitionTimestampIfDifferentThanSubmission": { "type": "integer" },
                 "priceIfNotFree": { "type": "number", "minimum": 0 },
                 "tier": { "type": "string" },
+                "tiers": { "type": "array", "items": { "type": "string" } },
                 "galleries": { "type": "array", "items": { "type": "string" } }
             },
             "if": { "properties": { "platformName": { "const": "deviantart" } } },
-            "else": { "properties": { "tier": false, "galleries": false } }
+            "else": { "properties": { "tier": false, "tiers": false, "galleries": false } }
         }
     }
 }

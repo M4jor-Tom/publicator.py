@@ -57,26 +57,43 @@ def _next_slot_for(schedules, existing_ts, profile_name, tz):
     return int(out.stdout.strip())
 
 
-def test_profiles_normalize_day_names_to_python_weekdays():
+def test_profiles_normalize_day_names_to_python_weekdays_and_default_tiers():
     assert scheduling.schedule_profiles({"profiles": [
-        {"name": "free", "day": "tuesday", "hour": 20, "per_slot": 2}]}) == \
-        [{"name": "free", "day": 1, "hour": 20, "per_slot": 2}]
+        {"name": "paid", "day": "wednesday", "hour": 20, "per_slot": 2,
+         "default_tiers": ["gold", "silver"]}]}) == \
+        [{"name": "paid", "day": 2, "hour": 20, "per_slot": 2,
+          "default_tiers": ["gold", "silver"]}]
+
+
+def test_schedule_data_carries_profile_tier_defaults():
+    profile = scheduling.schedule_data({"timezone": "UTC", "profiles": [
+        {"name": "paid", "day": "wednesday", "default_tiers": ["gold", "silver"]}]},
+        now=0)[0]
+    assert profile["default_tiers"] == ["gold", "silver"]
+
+
+def test_schedule_data_rejects_tier_defaults_missing_from_allow_list():
+    with pytest.raises(ValueError, match="silver"):
+        scheduling.schedule_data({"profiles": [
+            {"name": "paid", "default_tiers": ["gold", "silver"]}]},
+            allowed_tiers=["gold"])
 
 
 def test_flat_config_becomes_one_default_profile():
     assert scheduling.schedule_profiles({"day": "friday", "hour": 18, "per_slot": 1}) == \
-        [{"name": "default", "day": 4, "hour": 18, "per_slot": 1}]
+        [{"name": "default", "day": 4, "hour": 18, "per_slot": 1, "default_tiers": []}]
 
 
 def test_empty_config_falls_back_to_tuesday_2000():
     assert scheduling.schedule_profiles({}) == \
-        [{"name": "default", "day": 1, "hour": 20, "per_slot": 2}]
+        [{"name": "default", "day": 1, "hour": 20, "per_slot": 2, "default_tiers": []}]
 
 
 @pytest.mark.parametrize("bad,exc", [
     ({"profiles": [{"frequency": "monthly"}]}, NotImplementedError),
     ({"profiles": [{"day": "tuesday", "per_slot": 0}]}, ValueError),
     ({"profiles": [{"day": "someday"}]}, ValueError),
+    ({"profiles": [{"default_tiers": "gold"}]}, ValueError),
     ({"profiles": [{"name": "a", "day": "tuesday", "hour": 20},
                    {"name": "b", "day": "tuesday", "hour": 20}]}, ValueError),
     ({"profiles": []}, ValueError),

@@ -10,7 +10,7 @@ from publicator.webui.page import PAGE_TEMPLATE, render_page
 
 PENDING = [{"uuid": "00000000-0000-4000-8000-000000000001", "path": "/t/a.png",
             "title": "Tickler", "description": "d", "scheduleTs": 1800000000,
-            "price": None, "tier": None, "galleries": []}]
+            "price": None, "tiers": [], "galleries": []}]
 
 
 def _render(**overrides):
@@ -87,11 +87,42 @@ def test_page_renders_one_openrouter_choice_and_all_local_models():
     assert "<Too Tight & limited>" not in page
 
 
-def test_page_renders_config_tiers_galleries():
+def test_page_renders_config_tiers_galleries_as_checkboxes():
     page = _render(candidates=["/t/a.png"],
                    config={"tiers": ["gold"], "galleries": ["Art"]})
-    assert 'class="f-tier"' in page and ">gold<" in page
+    assert '<input type="checkbox" class="f-tier" value="gold">' in page
+    assert '<select class="f-tier"' not in page
     assert 'class="f-gallery"' in page and 'value="Art"' in page
+
+
+def test_schedule_preset_selects_its_default_tiers():
+    if not shutil.which("node"):
+        pytest.skip("node is not installed")
+    core = PAGE_TEMPLATE[PAGE_TEMPLATE.index("// >>> scheduler core"):
+                         PAGE_TEMPLATE.index("// <<< scheduler core")]
+    start = PAGE_TEMPLATE.index("function setTierChecks(")
+    end = PAGE_TEMPLATE.index("\nfunction showTab", start)
+    setup = """
+      const SCHEDULES = [
+        {name: "free", per_slot: 2, slots: [1000], default_tiers: []},
+        {name: "paid", per_slot: 2, slots: [2000], default_tiers: ["gold", "silver"]}
+      ];
+      const EXISTING_TS = [], LABELS = {2000: "2026-01-01T20:00"}, queue = [];
+    """
+    harness = setup + core + PAGE_TEMPLATE[start:end] + """
+      const boxes = [{value: "gold", checked: false},
+                     {value: "silver", checked: false},
+                     {value: "bronze", checked: true}];
+      const schedule = {value: ""};
+      const form = {querySelectorAll: () => boxes};
+      const card = {querySelector: s => s === ".form" ? form : schedule};
+      const document = {getElementById: () => card};
+      applyPreset({value: "paid"}, "card");
+      console.log(JSON.stringify(boxes.filter(b => b.checked).map(b => b.value)));
+    """
+    result = subprocess.run(["node", "-e", harness], check=True, capture_output=True,
+                            text=True, env=os.environ.copy())
+    assert json.loads(result.stdout) == ["gold", "silver"]
 
 
 def test_page_renders_schedule_presets():
