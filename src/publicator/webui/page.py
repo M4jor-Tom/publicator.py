@@ -10,6 +10,7 @@ import os
 import urllib.parse
 from datetime import datetime
 
+from publicator.llm_meta import TODO_GENERATE
 from publicator.scheduling import ts_labels, zone
 from publicator.webui.calendar_view import render_calendar
 
@@ -50,9 +51,12 @@ PAGE_TEMPLATE = r"""<!DOCTYPE html>
                                 border-radius: 4px; padding: 6px; font-family: inherit; font-size: 13px; }
   .form textarea { min-height: 70px; resize: vertical; }
   .form-actions { display: flex; gap: 6px; margin-top: 4px; }
-  .form-actions button { flex: 1; padding: 8px; border: none; border-radius: 4px;
-                         cursor: pointer; font-size: 13px; }
+  .form-actions button, .ai-actions button { flex: 1; padding: 8px; border: none; border-radius: 4px;
+                                               cursor: pointer; font-size: 13px; }
+  .ai-actions { display: flex; gap: 6px; }
   .btn-ai { background: #7b3ec1; color: white; }
+  .btn-ai-later { background: #66522f; color: white; }
+  .ai-pending { color: #e0a800; font-size: 12px; }
   .btn-save { background: #4caf50; color: white; }
   .btn-cancel { background: #555; color: white; }
   .err { color: #ff8080; font-size: 12px; min-height: 14px; }
@@ -139,9 +143,19 @@ const EXISTING_TS = __EXISTING_TS__;   // already-scheduled background instants 
 const SCHEDULES = __SCHEDULES__;       // [{name, per_slot, slots:[ts,...]}]  slots: upcoming canonical instants, ascending
 const LABELS = __LABELS__;             // {ts: "YYYY-MM-DDTHH:MM"} wall clock in the schedule TZ, browser-TZ-proof
 const PENDING = __PENDING__;           // already-queued entries from publications.json
+const TODO_GENERATE = __TODO_GENERATE__;
 
 const queue = []; // [{cardId, path, title, description, price, scheduleTs, tier, galleries, uuid?}]
-
+const aiFailures = new Map(); // cardId -> hosted providers that failed this session
+function isAiPending(e) { return e && (e.title === TODO_GENERATE || e.description === TODO_GENERATE); }
+// >>> AI provider fallback core
+const HOSTED_AI_SOURCES = ["claude", "openrouter"];
+function aiFailureCanDefer(failed, source, canDefer, pending) {
+  if (!canDefer || !HOSTED_AI_SOURCES.includes(source)) return false;
+  failed.add(source);
+  return !pending && HOSTED_AI_SOURCES.every(s => failed.has(s));
+}
+// <<< AI provider fallback core
 // >>> scheduler core (sliced verbatim by tests/test_scheduling.py) >>>
 // Slots are absolute instants generated server-side in the schedule's timezone,
 // so nothing here reads the browser clock — `firefox --private-window` spoofing
@@ -197,10 +211,13 @@ document.getElementById("calendar-tab").addEventListener("click", e => {
 
 function refreshCount() {
   const onPad = queue.filter(e => e.uuid).length; // entries persisted to publications.json
+  const needsAi = queue.filter(isAiPending).length;
   document.getElementById("queue-count").textContent = queue.length + " queued";
-  document.getElementById("publish-btn").disabled = queue.length === 0;
+  document.getElementById("publish-btn").disabled = queue.length === 0 || needsAi > 0;
   document.getElementById("stage-btn").disabled = queue.length === onPad; // nothing fresh to stage
-  document.getElementById("stage-status").textContent = onPad ? onPad + " on pad" : "";
+  document.getElementById("stage-status").textContent = [
+    onPad ? onPad + " on pad" : "", needsAi ? needsAi + " need AI metadata" : ""
+  ].filter(Boolean).join(" · ");
 }
 
 function openForm(cardId) {
@@ -210,8 +227,8 @@ function openForm(cardId) {
   const q = sel => form.querySelector(sel);
   const presetEl = q(".f-preset");
   if (entry) {
-    q(".f-title").value = entry.title || "";
-    q(".f-description").value = entry.description || "";
+    q(".f-title").value = entry.title === TODO_GENERATE ? "" : (entry.title || "");
+    q(".f-description").value = entry.description === TODO_GENERATE ? "" : (entry.description || "");
     q(".f-price").value = (entry.price == null) ? "" : entry.price;
     q(".f-schedule").value = entry.scheduleTs ? tsToLocalInput(entry.scheduleTs) : "";
     if (presetEl) presetEl.value = presetForTs(entry.scheduleTs);
@@ -247,7 +264,8 @@ async function aiGen(cardId, path) {
   const card = document.getElementById(cardId);
   const err = card.querySelector(".err");
   const btn = card.querySelector(".btn-ai");
-  err.textContent = "";
+  const later = card.querySelector(".btn-ai-later");
+  err.textContent = ""; later.hidden = true;
   btn.disabled = true; btn.textContent = "Generating...";
   try {
     const modelOption = document.getElementById("ai-model").selectedOptions[0];
@@ -259,7 +277,16 @@ async function aiGen(cardId, path) {
     const r = await fetch("/ai", {method:"POST", headers:{"Content-Type":"application/json"},
                                    body: JSON.stringify({path, source, model})});
     const d = await r.json();
-    if (!r.ok || d.error) { err.textContent = d.error || ("HTTP " + r.status); return; }
+    if (!r.ok || d.error) {
+      err.textContent = d.error || ("HTTP " + r.status);
+      const failed = aiFailures.get(cardId) || new Set();
+      later.hidden = !aiFailureCanDefer(
+        failed, source, d.can_defer === true,
+        isAiPending(queue.find(e => e.cardId === cardId)));
+      if (d.can_defer === true) aiFailures.set(cardId, failed);
+      return;
+    }
+    aiFailures.delete(cardId);
     card.querySelector(".f-title").value = d.title || "";
     card.querySelector(".f-description").value = d.description || "";
   } catch (e) {
@@ -267,6 +294,37 @@ async function aiGen(cardId, path) {
   } finally {
     btn.disabled = false; btn.textContent = "Generate with AI";
   }
+}
+
+async function markAiLater(cardId, path) {
+  const card = document.getElementById(cardId);
+  const title = card.querySelector(".f-title");
+  const description = card.querySelector(".f-description");
+  if ((title.value.trim() || description.value.trim()) &&
+      (title.value !== TODO_GENERATE || description.value !== TODO_GENERATE) &&
+      !confirm("AI generation later will replace the current title and description. Continue?")) return;
+  title.value = description.value = TODO_GENERATE;
+  if (!await saveCard(cardId, path)) return;
+
+  const entry = queue.find(e => e.cardId === cardId);
+  if (!entry.uuid) {
+    const {cardId: _cardId, ...data} = entry;
+    try {
+      const r = await fetch("/stage", {method:"POST", headers:{"Content-Type":"application/json"},
+                                        body: JSON.stringify({entries:[data]})});
+      const d = await r.json();
+      if (!r.ok || d.error) throw new Error(d.error || ("HTTP " + r.status));
+      entry.uuid = d.uuids[0];
+      card.querySelector(".btn-del")?.remove();
+    } catch (e) {
+      openForm(cardId);
+      card.querySelector(".err").textContent = "Could not save AI marker: " + String(e);
+      return;
+    }
+  }
+  card.querySelector(".btn-ai-later").hidden = true;
+  card.querySelector(".err").textContent = "";
+  refreshCount();
 }
 
 function readForm(card) {
@@ -298,7 +356,7 @@ function readForm(card) {
 async function saveCard(cardId, path) {
   const card = document.getElementById(cardId);
   const fields = readForm(card);
-  if (!fields) return;
+  if (!fields) return false;
   const entry = queue.find(e => e.cardId === cardId);
   if (entry) {                       // re-edit
     Object.assign(entry, {price: undefined, tier: undefined, galleries: undefined}, fields);
@@ -309,9 +367,9 @@ async function saveCard(cardId, path) {
                                         body: JSON.stringify({uuid: entry.uuid, ...fields})});
       const d = await r.json();
       btn.disabled = false; btn.textContent = "Save changes";
-      if (!r.ok || d.error) { card.querySelector(".err").textContent = d.error || ("HTTP " + r.status); return; }
+      if (!r.ok || d.error) { card.querySelector(".err").textContent = d.error || ("HTTP " + r.status); return false; }
     }
-    card.querySelector(".name").lastChild.textContent = " " + fields.title;
+    card.querySelector(".name").lastChild.textContent = " " + (isAiPending(entry) ? entry.path.split("/").pop() : fields.title);
   } else {                           // first save of a candidate
     queue.push({cardId, path, ...fields});
     card.classList.add("queued");
@@ -322,9 +380,11 @@ async function saveCard(cardId, path) {
       card.querySelector(".name").prepend(b, " ");
     }
   }
+  card.querySelector(".ai-pending").hidden = !isAiPending(queue.find(e => e.cardId === cardId));
   card.querySelector(".form").style.display = "none";
   card.querySelector(".actions").style.display = "flex";
   refreshCount();
+  return true;
 }
 
 async function stageQueue() {
@@ -344,7 +404,7 @@ async function stageQueue() {
     const del = card && card.querySelector(".btn-del");
     if (del) del.remove();
   });
-  refreshCount(); // recomputes "N on pad" and disables stage-btn (nothing fresh left)
+  refreshCount(); // recomputes queue/pad/AI counts and disables stage-btn when nothing is fresh
 }
 
 async function publishQueue() {
@@ -402,7 +462,10 @@ def card_form_html(cid, js_path, tg, save_label, preset_opts):
     <label>Schedule preset <select class="f-preset" onchange="applyPreset(this, '{cid}')">{preset_opts}</select></label>
     <label>Schedule <input type="datetime-local" class="f-schedule"></label>
     {tg}
-    <button class="btn-ai" onclick="aiGen('{cid}', {js_path})">Generate with AI</button>
+    <div class="ai-actions">
+      <button class="btn-ai" onclick="aiGen('{cid}', {js_path})">Generate with AI</button>
+      <button class="btn-ai-later" hidden onclick="markAiLater('{cid}', {js_path})">Mark for later</button>
+    </div>
     <div class="err"></div>
     <div class="form-actions">
       <button class="btn-save" onclick="saveCard('{cid}', {js_path})">{save_label}</button>
@@ -436,7 +499,8 @@ def render_page(*, thumb_map, candidates, pending, existing_ts, timeline,
     # Pre-queued cards: entries already in publications.json (state=unpublished).
     for idx, e in enumerate(pending):
         safe_rel = html.escape(thumb_map.get(e["path"], ""), quote=True)
-        safe_title = html.escape(e["title"], quote=True)
+        ai_pending = e.get("title") == TODO_GENERATE or e.get("description") == TODO_GENERATE
+        safe_title = html.escape(os.path.basename(e["path"]) if ai_pending else e["title"], quote=True)
         view_href = html.escape("/original?path=" + urllib.parse.quote(e["path"]), quote=True)
         ts = e.get("scheduleTs")
         sched = (datetime.fromtimestamp(ts, tz).strftime("%a %d %b %Y %H:%M")
@@ -446,6 +510,7 @@ def render_page(*, thumb_map, candidates, pending, existing_ts, timeline,
         cards.append(f"""<div class="card queued" id="{cid}">
   <img src="/thumbs/{safe_rel}" alt="{safe_title}">
   <div class="name"><span class="badge">queued</span> {safe_title}</div>
+  <div class="ai-pending"{"" if ai_pending else " hidden"}>AI metadata pending</div>
   <div class="sched">{html.escape(sched)}</div>
   <div class="actions">
     <a class="btn-view" href="{view_href}" target="_blank" rel="noopener">View</a>
@@ -470,6 +535,7 @@ def render_page(*, thumb_map, candidates, pending, existing_ts, timeline,
         return f"""<div class="card" id="{cid}">
   <img src="/thumbs/{safe_rel}" alt="{safe_name}">
   <div class="name">{safe_name}</div>
+  <div class="ai-pending" hidden>AI metadata pending</div>
   <div class="actions">
     <a class="btn-view" href="{view_href}" target="_blank" rel="noopener">View</a>
     <button class="btn-add" onclick="openForm('{cid}')">Add</button>
@@ -510,6 +576,7 @@ def render_page(*, thumb_map, candidates, pending, existing_ts, timeline,
     page = page.replace("__CALENDAR__", render_calendar(timeline, tz=tz, anchors=anchors,
                                                         prompts=prompt_html))
     page = page.replace("__PENDING__", json.dumps(pending_js))
+    page = page.replace("__TODO_GENERATE__", json.dumps(TODO_GENERATE))
     page = page.replace("__EXISTING_TS__", json.dumps(existing_ts))
     page = page.replace("__SCHEDULES__", json.dumps(schedules))
     page = page.replace("__LABELS__", json.dumps(labels))

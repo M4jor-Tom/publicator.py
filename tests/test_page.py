@@ -1,5 +1,12 @@
+import json
+import os
+import shutil
+import subprocess
+
+import pytest
+
 from publicator.scheduling import schedule_data
-from publicator.webui.page import render_page
+from publicator.webui.page import PAGE_TEMPLATE, render_page
 
 PENDING = [{"uuid": "00000000-0000-4000-8000-000000000001", "path": "/t/a.png",
             "title": "Tickler", "description": "d", "scheduleTs": 1800000000,
@@ -14,6 +21,34 @@ def _render(**overrides):
     return render_page(**kwargs)
 
 
+def _ai_defer_core_js():
+    start = PAGE_TEMPLATE.index("// >>> AI provider fallback core")
+    end = PAGE_TEMPLATE.index("// <<< AI provider fallback core")
+    return PAGE_TEMPLATE[start:end]
+
+
+def test_defer_requires_both_hosted_failures_and_no_local_fit():
+    if not shutil.which("node"):
+        pytest.skip("node is not installed")
+    harness = _ai_defer_core_js() + """
+      const failed = new Set();
+      const first = aiFailureCanDefer(failed, "openrouter", true, false);
+      const second = aiFailureCanDefer(failed, "claude", true, false);
+      const fitting = aiFailureCanDefer(new Set(), "claude", false, false);
+      const pending = aiFailureCanDefer(new Set(["claude", "openrouter"]), "claude", true, true);
+      console.log(JSON.stringify([first, second, fitting, pending]));
+    """
+    result = subprocess.run(["node", "-e", harness], check=True, capture_output=True,
+                            text=True, env=os.environ.copy())
+    assert json.loads(result.stdout) == [False, True, False, False]
+
+
+def test_page_renders_the_defer_action_hidden_until_provider_failure():
+    page = _render(candidates=["/t/a.png"])
+    assert '<button class="btn-ai-later" hidden' in page
+    assert "Mark for later" in page
+
+
 def test_page_offers_both_models():
     page = _render(ai_model="claude-cli-opus",
                    openrouter_model="openrouter/google/gemini-2.0-flash-exp:free")
@@ -21,6 +56,16 @@ def test_page_offers_both_models():
     assert "claude-cli-opus" in page
     assert "openrouter/google/gemini-2.0-flash-exp:free" in page
     assert "__AI_MODEL__" not in page and "__OPENROUTER_MODEL__" not in page
+
+
+def test_page_labels_persisted_ai_markers_without_showing_the_sentinel_as_title():
+    from publicator.apps.generate_meta import TODO_GENERATE
+
+    pending = [{**PENDING[0], "title": TODO_GENERATE, "description": TODO_GENERATE}]
+    page = _render(pending=pending)
+    assert '<div class="ai-pending">AI metadata pending</div>' in page
+    assert 'class="name"><span class="badge">queued</span> a.png' in page
+    assert "__TODO_GENERATE__" not in page
 
 
 def test_page_renders_one_openrouter_choice_and_all_local_models():

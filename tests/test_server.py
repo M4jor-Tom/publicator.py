@@ -57,8 +57,8 @@ def _get(url):
         return e.code, b""
 
 
-def _post(url, data):
-    request = urllib.request.Request(url + "/ai", data=json.dumps(data).encode(),
+def _post(url, data, endpoint="/ai"):
+    request = urllib.request.Request(url + endpoint, data=json.dumps(data).encode(),
                                      headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(request, timeout=5) as r:
@@ -92,6 +92,124 @@ def test_ai_accepts_only_catalog_objects_and_source(monkeypatch, tmp_path):
     assert calls[-1][1]["source"] == "claude"
     assert calls[-1][1]["claude_model"] == "claude-custom-opus"
     assert calls[-1][0][1] is None
+
+
+def test_ai_failure_offers_defer_only_when_no_local_model_fits(monkeypatch, tmp_path):
+    from publicator.llm_meta import ProviderUnavailable, VISION_MODELS
+    from publicator.webui import server as gallery
+
+    monkeypatch.setattr(gallery, "thumb_for_ai", lambda *a: "thumb.png")
+
+    def provider_failed(*_args, **_kwargs):
+        raise ProviderUnavailable("provider failed")
+
+    monkeypatch.setattr(gallery, "generate_metadata", provider_failed)
+    statuses = {m["ollama_name"]: {"fit": False, "fit_level": "Too Tight"}
+                for m in VISION_MODELS}
+    base = dict(cache_dir=str(tmp_path), thumb_map={}, ai_model="claude-cli-opus",
+                openrouter_model="", ai_timeout=3, vision_models=VISION_MODELS,
+                local_model_statuses=statuses)
+    url = _serve_once(**base)
+    status, body = _post(url, {"path": "a.png", "source": "claude", "model": None})
+    assert status == 400 and body["can_defer"] is True
+
+    statuses[VISION_MODELS[0]["ollama_name"]] = {"fit": True, "fit_level": "Good"}
+    url = _serve_once(**base)
+    status, body = _post(url, {"path": "a.png", "source": "claude", "model": None})
+    assert status == 400 and body["can_defer"] is False
+
+    statuses.update({m["ollama_name"]: {"fit": False, "fit_level": "Unavailable"}
+                     for m in VISION_MODELS})
+    url = _serve_once(**base)
+    status, body = _post(url, {"path": "a.png", "source": "claude", "model": None})
+    assert status == 400 and body["can_defer"] is False
+
+    statuses.update({m["ollama_name"]: {"fit": False, "fit_level": ""}
+                     for m in VISION_MODELS})
+    url = _serve_once(**base)
+    status, body = _post(url, {"path": "a.png", "source": "claude", "model": None})
+    assert status == 400 and body["can_defer"] is False
+
+
+def test_ai_invalid_metadata_does_not_offer_defer(monkeypatch, tmp_path):
+    from publicator.llm_meta import VISION_MODELS
+    from publicator.webui import server as gallery
+
+    monkeypatch.setattr(gallery, "thumb_for_ai", lambda *a: "thumb.png")
+
+    def invalid_output(*_args, **_kwargs):
+        raise RuntimeError("invalid model output")
+
+    monkeypatch.setattr(gallery, "generate_metadata", invalid_output)
+    statuses = {m["ollama_name"]: {"fit": False} for m in VISION_MODELS}
+    url = _serve_once(cache_dir=str(tmp_path), thumb_map={}, ai_model="claude-cli-opus",
+                      openrouter_model="", ai_timeout=3, vision_models=VISION_MODELS,
+                      local_model_statuses=statuses)
+    status, body = _post(url, {"path": "a.png", "source": "claude", "model": None})
+    assert status == 400 and "can_defer" not in body
+
+
+def test_publish_refuses_entries_with_ai_metadata_markers(monkeypatch, tmp_path):
+    from publicator.apps.generate_meta import TODO_GENERATE
+    from publicator.webui import server as gallery
+
+    calls = []
+    monkeypatch.setattr(gallery, "publish_batch",
+                        lambda *a, **kw: calls.append(a) or (1, 0, None))
+    url = _serve_once(json_path=str(tmp_path / "publications.json"), config={})
+    status, body = _post(url, {"entries": [{"uuid": "u", "title": TODO_GENERATE,
+                                             "description": TODO_GENERATE}]}, "/publish")
+    assert status == 400 and "AI metadata" in body["error"]
+    assert calls == []
+
+
+def test_publish_checks_persisted_markers_not_client_metadata(monkeypatch, tmp_path):
+    from publicator.apps.generate_meta import TODO_GENERATE
+    from publicator.webui import server as gallery
+
+    marked_art = tmp_path / "marked.png"
+    marked_art.write_bytes(b"marked art")
+    new_art = tmp_path / "new.png"
+    new_art.write_bytes(b"new art")
+    json_path = tmp_path / "publications.json"
+    url = _serve_once(json_path=str(json_path), config={})
+    status, staged = _post(url, {"entries": [{
+        "path": str(marked_art), "title": TODO_GENERATE, "description": TODO_GENERATE,
+        "scheduleTs": 1800000000,
+    }]}, "/stage")
+    assert status == 200
+    saved = json_path.read_text()
+    url = _serve_once(json_path=str(json_path), config={})
+    calls = []
+    monkeypatch.setattr(gallery, "publish_batch",
+                        lambda *a, **kw: calls.append(a) or (1, 0, None))
+
+    status, body = _post(url, {"entries": [
+        {"uuid": staged["uuids"][0], "title": "client title", "description": "client description"},
+        {"path": str(new_art), "title": "new title", "description": "new description",
+         "scheduleTs": 1800000060},
+    ]}, "/publish")
+
+    assert status == 400 and "AI metadata" in body["error"]
+    assert calls == []
+    assert json_path.read_text() == saved
+
+
+def test_stage_persists_markers_for_later_generation(tmp_path):
+    from publicator.apps.generate_meta import TODO_GENERATE
+
+    art = tmp_path / "picked.png"
+    art.write_bytes(b"art")
+    json_path = tmp_path / "publications.json"
+    url = _serve_once(json_path=str(json_path), config={})
+    status, body = _post(url, {"entries": [{
+        "path": str(art), "title": TODO_GENERATE, "description": TODO_GENERATE,
+        "scheduleTs": 1800000000,
+    }]}, "/stage")
+    row, = json.loads(json_path.read_text())
+    assert status == 200 and row["uuid"] == body["uuids"][0]
+    assert row["description"] == TODO_GENERATE
+    assert row["apparitions"][0]["urlElsePublicationName"] == TODO_GENERATE
 
 
 def test_ai_refuses_unfit_local_and_allows_install_on_use(monkeypatch, tmp_path):

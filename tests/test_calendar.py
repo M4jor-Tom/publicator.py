@@ -46,6 +46,15 @@ def test_timeline_titles_a_published_entry_from_its_url_slug(tmp_path):
     assert row["sha"] == "ab" * 64 and row["basename"] == "art.webp"
 
 
+def test_timeline_labels_entries_waiting_for_ai_metadata(tmp_path):
+    e = pub(description="[[PUBLICATOR:TODO_GENERATE]]")
+    e["apparitions"][0].update(
+        state="unpublished", urlElsePublicationName="[[PUBLICATOR:TODO_GENERATE]]")
+    row, = timeline(write_pubs(tmp_path, [e]))
+    assert row["title"] == "AI metadata pending"
+    assert row["url"] is None
+
+
 def test_timeline_falls_back_to_submission_timestamp(tmp_path):
     e = pub(submissionTimestamp=ts(2026, 3, 4))
     e["apparitions"][0].pop("apparitionTimestampIfDifferentThanSubmission")

@@ -9,12 +9,10 @@ from publicator import setup_logging
 from publicator import entries
 from publicator.images import thumb_for_ai
 from publicator.llm_meta import (
-    DEFAULT_TIMEOUT, OPENROUTER_MODEL, VISION_MODELS,
+    DEFAULT_TIMEOUT, OPENROUTER_MODEL, TODO_GENERATE, VISION_MODELS,
     generate_metadata, local_model_status,
 )
 from publicator.store import atomic_write_json
-
-TODO_GENERATE = "[[PUBLICATOR:TODO_GENERATE]]"
 
 
 def generate_pending(json_path, data_dir, *, source, model_option, timeout=DEFAULT_TIMEOUT, yes=False) -> tuple[int, int]:

@@ -21,6 +21,7 @@ import functools
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 import urllib.request
@@ -28,6 +29,13 @@ import urllib.request
 log = logging.getLogger("publicator.llm")
 
 DEFAULT_MODEL = "claude-cli-opus"  # llm-claude-cli's id (scenharnist's default); see `llm models`
+TODO_GENERATE = "[[PUBLICATOR:TODO_GENERATE]]"
+
+
+class ProviderUnavailable(RuntimeError):
+    """A provider call failed before returning usable metadata."""
+
+
 # ponytail: free :free ids churn on OpenRouter; this is the current free vision
 # model. Lives here, not in an app's argparse, so every entrypoint shares one id.
 OPENROUTER_MODEL = "openrouter/google/gemma-4-26b-a4b-it:free"
@@ -96,7 +104,9 @@ def _invoke(run, argv, prompt, timeout):
         cp = run(argv, prompt)
     except subprocess.TimeoutExpired as e:
         log.debug("llm timed out after %.1fs (limit %ss)", time.monotonic() - started, timeout)
-        raise RuntimeError(f"llm timed out after {timeout}s") from e
+        raise ProviderUnavailable(f"llm timed out after {timeout}s") from e
+    except OSError as e:
+        raise RuntimeError(f"could not start llm: {e}") from e
     log.debug("llm done in %.1fs rc=%d", time.monotonic() - started, cp.returncode)
     return cp
 
@@ -162,6 +172,16 @@ def _attempt(model, prompt, *, schema, cwd, attach, run, timeout):
     return cp
 
 
+def _provider_unavailable(stderr):
+    text = stderr.lower()
+    return (re.search(r"error code:\s*(?:408|429|5\d\d)\b", text) is not None or any(
+        marker in text for marker in (
+            "connection error", "connectionerror", "connecterror", "connecttimeout",
+            "connection refused", "connection reset", "name resolution",
+            "network is unreachable", "timed out", "service unavailable",
+        )))
+
+
 def run_llm(model, prompt, *, schema=None, cwd=None, attach=None, run=None, timeout=DEFAULT_TIMEOUT):
     # `timeout` budgets the whole call, not each attempt: the walk must not turn a
     # 300s ceiling into N x 300s on a request the gallery tab is blocking on.
@@ -177,7 +197,10 @@ def run_llm(model, prompt, *, schema=None, cwd=None, attach=None, run=None, time
             break
         log.info("%s is rate-limited upstream; trying the next free vision model", candidate)
     if cp.returncode != 0:
-        raise RuntimeError(f"llm failed ({cp.returncode}): {cp.stderr}")
+        error = f"llm failed ({cp.returncode}): {cp.stderr}"
+        if _provider_unavailable(cp.stderr or ""):
+            raise ProviderUnavailable(error)
+        raise RuntimeError(error)
     if candidate != model:      # the metadata did not come from the id you picked
         log.info("%s answered instead of the rate-limited %s", candidate, model)
     out = (cp.stdout or "").strip()
@@ -229,15 +252,13 @@ def local_model_status(model_option):
     """Report the host-fit verdict and Ollama's installed-model inventory."""
     fit_status = local_model_fit(model_option)
     if not fit_status["fit"]:
-        return {"fit": False, "installed": False, "available": False,
-                "reason": fit_status["reason"]}
+        return {**fit_status, "installed": False, "available": False}
     try:
         tags = _ollama_request("/api/tags")
         installed = any(m.get("name") == model_option["ollama_name"] for m in tags["models"])
     except (RuntimeError, KeyError, TypeError) as e:
-        return {"fit": True, "installed": False, "available": False, "reason": str(e)}
-    return {"fit": True, "installed": installed, "available": True,
-            "reason": fit_status["reason"]}
+        return {**fit_status, "installed": False, "available": False, "reason": str(e)}
+    return {**fit_status, "installed": installed, "available": True}
 
 
 def prepare_local_model(model_option, *, install):

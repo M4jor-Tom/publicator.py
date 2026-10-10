@@ -36,6 +36,7 @@ from publicator.entries import (
     format_schedule,
     set_data_dir,
 )
+from publicator.llm_meta import TODO_GENERATE
 from publicator.store import mark_state
 
 log = logging.getLogger("publicator.da")
@@ -464,6 +465,10 @@ def _session_authed(page) -> bool:
 def publish_batch(entries: list[dict], uuids: list[str],
                   json_path: str, headless: bool = False) -> tuple[int, int, str | None]:
     """Drive Firefox through DA submission for each entry. Returns (ok, failed, err)."""
+    if any(e.get("title") == TODO_GENERATE or e.get("description") == TODO_GENERATE
+           for e in entries):
+        return 0, len(entries), "AI metadata still marked for generation"
+
     from playwright.sync_api import sync_playwright
 
     log.debug("preparing Playwright session from %s", LOGIN_DIR)

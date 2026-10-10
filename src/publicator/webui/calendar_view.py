@@ -13,6 +13,8 @@ import re
 import time
 from datetime import date, datetime
 
+from publicator.llm_meta import TODO_GENERATE
+
 # ".../art/Haunted-Tower-1278691961" -> "Haunted-Tower" (trailing id dropped)
 SLUG = re.compile(r"/art/(.+?)(?:-\d+)?(?:\?|$)")
 
@@ -45,6 +47,8 @@ def timeline(json_path: str) -> list[dict]:
             if app.get("platformName") != "deviantart":
                 continue
             name = app.get("urlElsePublicationName", "")
+            description = p.get("description", "")
+            ai_pending = name == TODO_GENERATE or description == TODO_GENERATE
             f0 = (p.get("files") or [{}])[0]
             rows.append({
                 "uuid": p.get("uuid"),
@@ -52,7 +56,7 @@ def timeline(json_path: str) -> list[dict]:
                 # the publication's submission time.
                 "ts": int(app.get("apparitionTimestampIfDifferentThanSubmission")
                           or p.get("submissionTimestamp") or 0),
-                "title": entry_title(name, p.get("description", "")),
+                "title": "AI metadata pending" if ai_pending else entry_title(name, description),
                 "url": name if name.startswith("http") else None,
                 "state": app.get("state"),
                 "basename": f0.get("basename", ""),

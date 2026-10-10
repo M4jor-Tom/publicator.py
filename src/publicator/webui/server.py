@@ -21,7 +21,10 @@ from publicator.images import (
     thumb_for_ai,
     thumb_name,
 )
-from publicator.llm_meta import DEFAULT_MODEL, VISION_MODELS, generate_metadata, local_model_status
+from publicator.llm_meta import (
+    DEFAULT_MODEL, ProviderUnavailable, TODO_GENERATE, VISION_MODELS,
+    generate_metadata, local_model_status,
+)
 from publicator.prompts import Exact, Nearest
 from publicator.prompts import from_config as prompt_archive_from_config
 from publicator.scheduling import existing_ts as compute_existing_ts, schedule_data, zone
@@ -255,7 +258,17 @@ class GalleryHandler(BaseHTTPRequestHandler):
                         image_for_ai, model, source=source, timeout=self.ai_timeout,
                         install_missing=(source == "local"),
                         **({"claude_model": self.ai_model} if source == "claude" else {}))
-                except RuntimeError as e:
+                except ProviderUnavailable as e:
+                    log.debug("AI provider unavailable: %s", e)
+                    statuses = (self.local_model_statuses.get(m["ollama_name"], {})
+                                for m in self.vision_models)
+                    can_defer = bool(self.vision_models) and all(
+                        status.get("fit") is False
+                        and isinstance(status.get("fit_level"), str)
+                        and status["fit_level"].strip() not in ("", "Unavailable", "Good")
+                        for status in statuses)
+                    self._send(400, {"error": str(e), "can_defer": can_defer}); return
+                except (RuntimeError, OSError) as e:
                     log.debug("AI metadata failed: %s", e)
                     self._send(400, {"error": str(e)}); return
                 self._send(200, {"title": title, "description": desc})
@@ -265,6 +278,22 @@ class GalleryHandler(BaseHTTPRequestHandler):
                 entries = data.get("entries", []) or []
                 if not entries:
                     self._send(400, {"error": "empty queue"}); return
+                if any(e.get("title") == TODO_GENERATE or e.get("description") == TODO_GENERATE
+                       for e in entries):
+                    self._send(400, {"error": "AI metadata still marked for generation"}); return
+                existing_uuids = {e.get("uuid") for e in entries if e.get("uuid")}
+                if existing_uuids:
+                    with open(self.json_path, encoding="utf-8") as f:
+                        stored = {p.get("uuid"): p for p in json.load(f)}
+                    for uuid_ in existing_uuids:
+                        publication = stored.get(uuid_)
+                        if publication and (
+                            publication.get("description") == TODO_GENERATE or any(
+                                a.get("platformName") == "deviantart"
+                                and a.get("urlElsePublicationName") == TODO_GENERATE
+                                for a in publication.get("apparitions", []))
+                        ):
+                            self._send(400, {"error": "AI metadata still marked for generation"}); return
                 # Entries with a uuid are already in publications.json (the
                 # pre-queued pending set) — publish them as-is. The rest are new
                 # picks: append them first, then publish. Existing go first.

@@ -80,9 +80,21 @@ def test_run_llm_non_429_failure_is_not_retried():
     assert len(calls) == 1
 
 
-def test_run_llm_nonzero_raises():
-    with pytest.raises(RuntimeError, match="llm failed"):
-        llm_meta.run_llm("m", "hi", cwd="/w", run=make_run(returncode=1, stderr="boom"))
+@pytest.mark.parametrize("stderr", [
+    "Error code: 503 - unavailable", "Connection error: connection refused",
+])
+def test_run_llm_provider_errors_raise_provider_unavailable(stderr):
+    with pytest.raises(llm_meta.ProviderUnavailable, match="llm failed"):
+        llm_meta.run_llm("m", "hi", cwd="/w",
+                         run=make_run(returncode=1, stderr=stderr))
+
+
+@pytest.mark.parametrize("stderr", ["Unknown model: m", "Error code: 401 - missing API key"])
+def test_run_llm_configuration_errors_are_not_provider_unavailable(stderr):
+    with pytest.raises(RuntimeError) as error:
+        llm_meta.run_llm("m", "hi", cwd="/w",
+                         run=make_run(returncode=1, stderr=stderr))
+    assert type(error.value) is RuntimeError
 
 
 def test_run_llm_bad_json_with_schema_raises():
@@ -91,11 +103,19 @@ def test_run_llm_bad_json_with_schema_raises():
                          run=make_run(stdout="not json"))
 
 
-def test_run_llm_timeout_raises():
+def test_run_llm_timeout_raises_provider_unavailable():
     def run(argv, stdin):
         raise subprocess.TimeoutExpired(argv, 90)
-    with pytest.raises(RuntimeError, match="timed out"):
+    with pytest.raises(llm_meta.ProviderUnavailable, match="timed out"):
         llm_meta.run_llm("m", "hi", cwd="/w", run=run)
+
+
+def test_run_llm_command_start_error_is_not_provider_unavailable():
+    def run(argv, stdin):
+        raise FileNotFoundError("llm")
+    with pytest.raises(RuntimeError) as error:
+        llm_meta.run_llm("m", "hi", cwd="/w", run=run)
+    assert type(error.value) is RuntimeError
 
 
 def test_generate_metadata_returns_title_desc():
@@ -221,7 +241,8 @@ def test_local_model_status_reads_llmfit_and_ollama_tags(monkeypatch):
 
     monkeypatch.setattr(llm_meta.urllib.request, "urlopen", lambda request, timeout: Response())
     assert llm_meta.local_model_status(option) == {
-        "fit": True, "installed": True, "available": True, "reason": "Evaluator verdict."}
+        "fit": True, "fit_level": "Good", "installed": True, "available": True,
+        "reason": "Evaluator verdict."}
 
 
 @pytest.mark.parametrize(("fit_level", "fit", "reason"), [
@@ -237,7 +258,8 @@ def test_local_model_status_uses_llmfit_fit_level_and_notes(monkeypatch, fit_lev
         def read(self): return b'{"models":[]}'
     monkeypatch.setattr(llm_meta.urllib.request, "urlopen", lambda *args, **kwargs: Response())
     result = llm_meta.local_model_status(option)
-    assert result["fit"] is fit and result["reason"] == reason
+    assert result["fit"] is fit and result["fit_level"] == fit_level
+    assert result["reason"] == reason
     assert result["available"] is fit
 
 
@@ -252,6 +274,7 @@ def test_local_model_status_fails_closed_for_llmfit_exit(monkeypatch):
     monkeypatch.setattr(llm_meta.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout="", stderr="llmfit failed"))
     result = llm_meta.local_model_status(llm_meta.VISION_MODELS[0])
     assert not result["fit"] and not result["available"]
+    assert result["fit_level"] == "Unavailable"
 
 
 def test_ollama_installed_state_and_pull_api(monkeypatch):

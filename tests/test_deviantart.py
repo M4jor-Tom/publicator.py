@@ -20,6 +20,19 @@ def test_parse_schedule_rejects_garbage():
         parse_schedule("not a date")
 
 
+def test_publish_batch_refuses_unresolved_ai_metadata_before_starting_browser(monkeypatch):
+    from publicator.apps.generate_meta import TODO_GENERATE
+
+    calls = []
+    monkeypatch.setattr(deviantart, "_prepare_session_from_login",
+                        lambda: calls.append("session"))
+    result = deviantart.publish_batch(
+        [{"title": TODO_GENERATE, "description": TODO_GENERATE}], ["u"], "unused.json")
+    assert result[0:2] == (0, 1)
+    assert "AI metadata" in result[2]
+    assert calls == []
+
+
 def test_steps_map_to_callables():
     assert STEPS and all(callable(fn) for _, fn in STEPS)
 
