@@ -3,7 +3,7 @@
 | Field    | Value                                     |
 |----------|-------------------------------------------|
 | Date     | 2026-09-29                                |
-| Status   | Accepted                                  |
+| Status   | Superseded by 0008                      |
 | Deciders | theta (repo owner)                        |
 | Branch   | `master`                                  |
 | Commit   | `8fae9e2`                                 |
@@ -280,5 +280,6 @@ If that last command prints one id, the walk has nowhere to go.
 - [[0004]] — the fail-open precedent for a helper that must not become the
   failure it guards.
 - `docs/features/ai-metadata.md` — the feature doc, flow step 8 and invariants.
+- [[0008]] supersedes this ADR by walking on any failed OpenRouter candidate attempt.
 - `docs/features/gallery-ui.md` — the `/ai` allow-list, restated by this change.
 - Commit `a9d9500` — the churn fix that first recorded gemma's 429.

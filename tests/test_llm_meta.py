@@ -67,17 +67,26 @@ def test_run_llm_retries_without_schema_then_remembers_the_model(monkeypatch):
     assert len(calls) == 3 and "--schema" not in calls[2][0]
 
 
-def test_run_llm_non_429_failure_is_not_retried():
-    calls = []
+@pytest.mark.parametrize("failure", ["nonzero", "timeout", "invalid-json"])
+def test_run_llm_retries_after_any_candidate_failure(failure, monkeypatch):
+    monkeypatch.setattr(llm_meta, "_NO_SCHEMA", set())
+    tried = []
 
-    def run(argv, stdin):
-        calls.append(argv)
-        return SimpleNamespace(returncode=1, stdout="", stderr="Error: boom")
+    def attempt(argv, stdin):
+        tried.append(argv[2])
+        if argv[2] != GEMMA:
+            return SimpleNamespace(returncode=0, stdout='{"a": 1}', stderr="")
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(argv, 1)
+        if failure == "invalid-json":
+            return SimpleNamespace(returncode=0, stdout="not json", stderr="")
+        return SimpleNamespace(returncode=1, stdout="", stderr="Unknown model: stale id")
 
-    with pytest.raises(RuntimeError, match="boom"):
-        llm_meta.run_llm(GEMMA, "hi", schema={"type": "object"}, attach="/i.png", run=run)
-    # one call total: not retried, and the model listing was never even asked for
-    assert len(calls) == 1
+    result = llm_meta.run_llm(
+        GEMMA, "hi", schema={"type": "object"}, attach="/i.png",
+        run=with_listing([GEMMA, NVIDIA], attempt))
+    assert result == {"a": 1}
+    assert tried == [GEMMA, NVIDIA]
 
 
 @pytest.mark.parametrize("stderr", [
@@ -145,6 +154,23 @@ def test_generate_metadata_empty_raises():
     with pytest.raises(RuntimeError, match="missing title/description"):
         llm_meta.generate_metadata("/imgs/x.jpg", None, source="claude",
                                     run=make_run(stdout='{"title": "", "description": "x"}'))
+
+
+def test_openrouter_falls_back_when_model_returns_empty_metadata(monkeypatch):
+    monkeypatch.setattr(llm_meta, "_NO_SCHEMA", set())
+    tried = []
+
+    def attempt(argv, stdin):
+        model = argv[2]
+        tried.append(model)
+        metadata = ({"title": "", "description": ""} if model == GEMMA else
+                    {"title": "Fallback", "description": "A usable result."})
+        return SimpleNamespace(returncode=0, stdout=json.dumps(metadata), stderr="")
+
+    assert llm_meta.generate_metadata(
+        "/imgs/thumb.jpg", llm_meta.VISION_MODELS[0], source="openrouter",
+        run=with_listing([GEMMA, NVIDIA], attempt)) == ("Fallback", "A usable result.")
+    assert tried == [GEMMA, NVIDIA]
 
 
 def test_generate_metadata_openrouter_uses_attachment():
@@ -312,7 +338,7 @@ def test_ollama_chat_bad_response_fails(tmp_path, monkeypatch, body):
         llm_meta.generate_metadata(image, llm_meta.VISION_MODELS[0], source="local")
 
 
-# --- 429 -> walk the other free vision models (ADR 0006) ----------------------
+# --- OpenRouter catalogue fallback (originally 429-only in ADR 0006) ----------
 
 def test_free_vision_models_keeps_only_the_ids_that_take_images():
     assert llm_meta.free_vision_models([

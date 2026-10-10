@@ -13,8 +13,8 @@ instead of the Read-path prompt. Most of them also reject `--schema` — see
 
 A rate-limited `:free` model is a model-*selection* problem, not a timing one --
 the free tier shares one upstream pool across every OpenRouter user, so backing
-off changes nothing that another vendor's model wouldn't fix instantly. A 429
-therefore walks the other free vision ids llm-openrouter lists; `_fallbacks`, ADR 0006.
+off changes nothing that another vendor's model wouldn't fix instantly. OpenRouter
+walks the other free vision ids after any failed model attempt; `_fallbacks`, ADR 0008.
 """
 import base64
 import functools
@@ -45,11 +45,6 @@ VISION_MODELS = [
 ]
 DEFAULT_TIMEOUT = 300  # seconds — a vision call is slow through either provider
 OLLAMA_URL = "http://localhost:11434"
-
-# Somebody else exhausted the vendor, not you (`upstream_provider_shared_pool`,
-# `is_byok: false`). The text is the openai SDK's `f"Error code: {status} - ..."`;
-# matched in stderr like NO_SCHEMA_SUPPORT, a subprocess offering nothing better.
-RATE_LIMITED = "Error code: 429"
 
 # Ask the plugin, never openrouter.ai: `register_models` mints the ids `llm -m`
 # accepts from this same 1h disk cache, so a listed candidate always resolves --
@@ -120,6 +115,16 @@ def _loads_json(out):
         raise RuntimeError(f"llm returned non-JSON with schema: {out!r}") from e
 
 
+def _metadata_fields(obj):
+    if not isinstance(obj, dict):
+        raise RuntimeError(f"AI reply missing title/description: {obj!r}")
+    title = str(obj.get("title", "")).strip()
+    description = str(obj.get("description", "")).strip()
+    if not title or not description:
+        raise RuntimeError(f"AI reply missing title/description: {obj!r}")
+    return title, description
+
+
 def free_vision_models(catalogue):
     """The models in `catalogue` that take images, prefixed for `llm -m`. `--free`
     did the tier filter; this adds the vision clause, which has no plugin flag."""
@@ -129,7 +134,7 @@ def free_vision_models(catalogue):
 
 def _fallbacks(model, run):
     """`model`, then every other free vision id. A generator on purpose: `run_llm`
-    only asks for a second candidate after a 429, so the happy path lists nothing."""
+    only asks for alternatives after a failed attempt, so the happy path lists nothing."""
     yield model
     if not model.startswith("openrouter/"):
         return          # the claude-cli path has no sibling, nor a key to reach one
@@ -139,7 +144,7 @@ def _fallbacks(model, run):
     except (OSError, ValueError, KeyError, TypeError) as e:
         # Fail open (ADR 0004): the rescue path must never become the failure it
         # exists to rescue. Narrow on purpose — our own bugs still raise.
-        log.warning("cannot list free vision models (%s); no 429 fallback", e)
+        log.warning("cannot list free vision models (%s); no model fallback", e)
         return
     # The 429 is per upstream provider, so a sibling from the same vendor is the
     # likeliest to be saturated too — keep it, but try it last.
@@ -186,26 +191,34 @@ def run_llm(model, prompt, *, schema=None, cwd=None, attach=None, run=None, time
     # `timeout` budgets the whole call, not each attempt: the walk must not turn a
     # 300s ceiling into N x 300s on a request the gallery tab is blocking on.
     deadline = time.monotonic() + timeout
+    last_error = None
     for candidate in _fallbacks(model, run or functools.partial(_default_run, timeout=timeout)):
         left = max(1, int(deadline - time.monotonic()))
-        cp = _attempt(candidate, prompt, schema=schema, cwd=cwd, attach=attach,
-                      run=run or functools.partial(_default_run, timeout=left), timeout=left)
-        if cp.returncode == 0 or RATE_LIMITED not in (cp.stderr or ""):
-            break
-        if time.monotonic() >= deadline:
-            log.info("%ss budget spent; giving up the walk after %s", timeout, candidate)
-            break
-        log.info("%s is rate-limited upstream; trying the next free vision model", candidate)
-    if cp.returncode != 0:
-        error = f"llm failed ({cp.returncode}): {cp.stderr}"
-        if _provider_unavailable(cp.stderr or ""):
-            raise ProviderUnavailable(error)
-        raise RuntimeError(error)
-    if candidate != model:      # the metadata did not come from the id you picked
-        log.info("%s answered instead of the rate-limited %s", candidate, model)
-    out = (cp.stdout or "").strip()
-    log.debug("llm output: %s", out)
-    return out if schema is None else _loads_json(out)
+        try:
+            cp = _attempt(candidate, prompt, schema=schema, cwd=cwd, attach=attach,
+                          run=run or functools.partial(_default_run, timeout=left), timeout=left)
+            if cp.returncode != 0:
+                error = f"llm failed ({cp.returncode}): {cp.stderr}"
+                if _provider_unavailable(cp.stderr or ""):
+                    raise ProviderUnavailable(error)
+                raise RuntimeError(error)
+            out = (cp.stdout or "").strip()
+            result = out if schema is None else _loads_json(out)
+            if schema == TITLE_DESC_SCHEMA:
+                _metadata_fields(result)
+        except RuntimeError as e:
+            last_error = e
+            if time.monotonic() >= deadline:
+                log.info("%ss budget spent; giving up the walk after %s", timeout, candidate)
+                break
+            if candidate.startswith("openrouter/"):
+                log.info("%s failed; trying the next free vision model if available", candidate)
+            continue
+        if candidate != model:      # the metadata did not come from the id you picked
+            log.info("%s answered instead of the failed %s", candidate, model)
+        log.debug("llm output: %s", out)
+        return result
+    raise last_error
 
 
 def _ollama_request(path, *, method="GET", data=None, timeout=DEFAULT_TIMEOUT):
@@ -316,8 +329,4 @@ def generate_metadata(image_path, model_option: dict[str, str] | None, *, source
                       run=run, timeout=timeout)
     else:
         raise ValueError(f"unknown metadata source: {source}")
-    title = str(obj.get("title", "")).strip()
-    description = str(obj.get("description", "")).strip()
-    if not title or not description:
-        raise RuntimeError(f"AI reply missing title/description: {obj!r}")
-    return title, description
+    return _metadata_fields(obj)
