@@ -25,7 +25,7 @@
 9. `POST /ai` (`do_POST`): `thumb_for_ai(path, cache_dir, thumb_map.get(path))` = `ensure_thumb`, original path on `OSError`, then `llm_meta.generate_metadata`; batch `apps/generate_meta.generate_pending` uses the same function and `<data-dir>/.thumbs` cache.
 10. `GalleryHandler.search` (`?prompt=`/`?lineage=`) re-walks `publicable_dirs` with `collect_images`, filters by the prompt archive, caps each list at `SEARCH_LIMIT`, then sha512-hashes the survivors against `load_publicated_hashes`.
 11. `GalleryHandler._build_page` calls `_register_thumbs(exact + maybe)`, which hashes each path not yet in `thumb_map` and extends the class-level `thumb_map`/`thumb_src` before `render_page`.
-12. `deviantart._step_upload` (publish-next `publish_batch`, da-publish) calls `_resolve_art`: non-webp → as is; webp → `entries.find_art_path` (rglob `*<stem>*`, first `p.suffix != '.webp'`), else `convert` to `<tempdir>/<stem>.png`, `check=True`.
+12. `deviantart._step_upload` (publish-next `publish_batch`, da-publish) calls `_resolve_art`: non-webp → as is; webp → `entries.find_art_path` (rglob `*<stem>*`, first `p.suffix.lower() != '.webp'`), else `convert` to `<tempdir>/<stem>.png`, `check=True`.
 
 ## Invariants
 
@@ -52,7 +52,7 @@
 - A filtered page hashes at request time: up to `SEARCH_LIMIT` (200) exact plus 200 maybe survivors per load, and `_register_thumbs` hashes each new hit once more the first time it is rendered (`thumb_map` memoises later loads).
 - An unwritable `.thumbs/` makes every uncached `/thumbs` request 404 while `/ai` falls back to the original for the same misses (already-cached names still serve: `ensure_thumb` checks `exists()` first): pages look partly broken but AI does not.
 - Basename resolvers differ: `index_by_basename` (os.walk, exact name, no dot-dirs, first wins), `_pending_art` (rglob `*stem*` incl. dot-dirs, `is_file`, `suffix.lower()`, `None`), `find_art_path` (rglob incl. dot-dirs, no `is_file`, `SystemExit`).
-- `entries.find_art_path` tests `p.suffix != '.webp'` case-sensitively, so a `.WEBP` file passes as uploadable and `_resolve_art` (which lowercases) would then upload it.
+- WEBP exclusion is case-insensitive in both upload resolvers, including the shared sibling lookup. `tests/test_deviantart.py` safely stubs conversion to cover uppercase/mixed-case extensions and reuse of an existing PNG sibling.
 
 ## Open items
 

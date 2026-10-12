@@ -1,21 +1,28 @@
 import json
-from pathlib import Path
+import threading
+from uuid import NAMESPACE_URL, uuid5
 
 import pytest
 
+from publicator import store
 from publicator.apps import generate_meta
+from publicator.config import load_config, validate_publications
 from publicator.llm_meta import DEFAULT_MODEL, OPENROUTER_MODEL, VISION_MODELS
 
 
 MARKER = generate_meta.TODO_GENERATE
 
 
-def publication(uuid, basename, *, description=MARKER, title=MARKER):
+def publication(uuid, basename, *, description=MARKER, title=MARKER, apparitions=None):
     return {
-        "uuid": uuid,
+        "uuid": str(uuid5(NAMESPACE_URL, uuid)),
+        "submissionTimestamp": 1,
+        "apparitionTimestampIfDifferentThanSubmission": 1800000000,
+        "state": "SCHEDULED",
+        "title": title,
         "description": description,
         "files": [{"basename": basename}],
-        "apparitions": [{"platformName": "deviantart", "urlElsePublicationName": title}],
+        "apparitions": [] if apparitions is None else apparitions,
     }
 
 
@@ -30,18 +37,109 @@ def batch(tmp_path, monkeypatch, pubs, generated=None, *, source="openrouter", y
                                           model_option=model, yes=yes), json_path
 
 
-def test_only_exact_markers_are_replaced_and_other_publications_untouched(tmp_path, monkeypatch):
+def test_only_exact_top_level_markers_are_replaced_without_apparitions(tmp_path, monkeypatch):
     pubs = [publication("marked", "a.png"),
             publication("near", "b.png", description=MARKER + " ", title="todo_generate"),
             publication("plain", "c.png", description="keep", title="keep")]
     (counts, path) = batch(tmp_path, monkeypatch, pubs)
     result = json.loads(path.read_text())
     assert counts == (1, 0)
+    assert result[0]["title"] == "title"
     assert result[0]["description"] == "description"
-    assert result[0]["apparitions"][0]["urlElsePublicationName"] == "title"
     assert result[1]["description"] == MARKER + " "
-    assert result[1]["apparitions"][0]["urlElsePublicationName"] == "todo_generate"
+    assert result[1]["title"] == "todo_generate"
     assert result[2] == pubs[2]
+    assert result[0]["state"] == "SCHEDULED"
+    validate_publications(result, load_config(tmp_path))
+
+
+def test_generation_preserves_edit_during_provider_call(tmp_path, monkeypatch):
+    pub = publication("one", "a.png")
+    path = tmp_path / "publications.json"
+
+    def generated(*args, **kwargs):
+        store.save_publication_metadata(str(path), pub["uuid"], title="Manual title",
+                                        config=load_config(tmp_path))
+        return "Generated title", "Generated description"
+
+    counts, path = batch(tmp_path, monkeypatch, [pub], generated)
+    assert counts == (1, 0)
+    saved = store.load_publications(str(path))[0]
+    assert saved["title"] == "Manual title"
+    assert saved["description"] == "Generated description"
+    assert saved["state"] == "SCHEDULED"
+
+
+def test_generation_preserves_concurrent_store_edit_before_replacement(tmp_path, monkeypatch):
+    pub = publication("one", "a.png")
+    path = tmp_path / "publications.json"
+    original_replace = store.os.replace
+    generating_thread = threading.current_thread()
+    editor_started = threading.Event()
+    editor_done = threading.Event()
+    errors = []
+    editors = []
+
+    def edit():
+        editor_started.set()
+        try:
+            store.save_publication_metadata(str(path), pub["uuid"], description="Manual description",
+                                            config=load_config(tmp_path))
+        except Exception as error:
+            errors.append(error)
+        finally:
+            editor_done.set()
+
+    def replace(source, destination):
+        if threading.current_thread() is generating_thread and str(destination) == str(path):
+            editor = threading.Thread(target=edit)
+            editors.append(editor)
+            editor.start()
+            assert editor_started.wait(5)
+            # Without the shared mutation lock, the edit commits before this stale replacement.
+            editor_done.wait(1)
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(store.os, "replace", replace)
+    try:
+        counts, path = batch(tmp_path, monkeypatch, [pub])
+    finally:
+        for editor in editors:
+            editor.join(5)
+    assert editors and all(not editor.is_alive() for editor in editors)
+    assert not errors
+    assert counts == (1, 0)
+    saved = store.load_publications(str(path))[0]
+    assert saved["title"] == "title"
+    assert saved["description"] == "Manual description"
+    assert saved["state"] == "SCHEDULED"
+
+
+@pytest.mark.parametrize("invalid_field", ["uuid", "submissionTimestamp"])
+def test_generation_rejects_invalid_database_without_replacement(tmp_path, monkeypatch, invalid_field):
+    pub = publication("one", "a.png")
+    if invalid_field == "uuid":
+        pub["uuid"] = "short"
+    else:
+        pub.pop(invalid_field)
+    counts, path = batch(tmp_path, monkeypatch, [pub])
+    assert counts == (0, 1)
+    assert json.loads(path.read_text()) == [pub]
+
+
+@pytest.mark.parametrize("gallery, expected", [("Allowed", (1, 0)), ("Not allowed", (0, 1))])
+def test_generation_validates_using_data_directory_config(tmp_path, monkeypatch, gallery, expected):
+    (tmp_path / "publicator.toml").write_text('[deviantart]\ngalleries = ["Allowed"]\n')
+    pub = publication("one", "a.png", apparitions=[{
+        "platformName": "deviantart", "state": "unpublished", "galleries": [gallery],
+    }])
+    counts, path = batch(tmp_path, monkeypatch, [pub])
+    assert counts == expected
+    saved = store.load_publications(str(path))
+    if expected == (1, 0):
+        validate_publications(saved, load_config(tmp_path))
+    else:
+        assert saved == [pub]
 
 
 def test_success_is_written_before_next_record_and_failures_continue(tmp_path, monkeypatch):
@@ -65,6 +163,7 @@ def test_success_is_written_before_next_record_and_failures_continue(tmp_path, m
         model_option=next(m for m in VISION_MODELS if m["openrouter_name"] == OPENROUTER_MODEL)) == (2, 1)
     result = json.loads(json_path.read_text())
     assert [p["description"] for p in result] == ["description", MARKER, "description"]
+    assert [p["title"] for p in result] == ["title", MARKER, "title"]
 
 
 def test_lookup_failure_retains_markers_and_batch_returns_failure(tmp_path, monkeypatch):

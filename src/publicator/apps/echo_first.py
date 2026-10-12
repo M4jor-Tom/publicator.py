@@ -4,7 +4,7 @@ import argparse
 import sys
 
 from publicator.entries import (
-    deviantart_apparition,
+    effective_schedule_ts,
     find_art_path,
     first_unpublished,
     format_schedule,
@@ -17,13 +17,12 @@ def main() -> int:
     ap.add_argument("--data-dir", default=None,
                     help="publication database dir (publications.json + images); default: CWD")
     set_data_dir(ap.parse_args().data_dir)
-    pub = first_unpublished()
-    app = deviantart_apparition(pub)
-    ts = app.get("apparitionTimestampIfDifferentThanSubmission")
+    pub = first_unpublished("deviantart")
+    ts = effective_schedule_ts(pub)
     if ts is None:
         raise SystemExit(f"no apparitionTimestampIfDifferentThanSubmission on {pub['uuid']}")
     print(f"path: {find_art_path(pub['files'][0]['basename'])}")
-    print(f"title: {app['urlElsePublicationName']}")
+    print(f"title: {pub['title']}")
     print(f"schedule: {format_schedule(ts)}")
     return 0
 

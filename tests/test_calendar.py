@@ -26,30 +26,29 @@ def write_pubs(tmp_path, pubs):
 
 
 def pub(**over):
-    entry = {"uuid": "u1", "submissionTimestamp": ts(2026, 1, 6), "description": "d",
+    entry = {"uuid": "u1", "state": "APPEARED", "title": "Haunted Tower",
+             "submissionTimestamp": ts(2026, 1, 6), "description": "d",
+             "apparitionTimestampIfDifferentThanSubmission": ts(2026, 1, 6),
              "files": [{"basename": "art.webp", "sha512sum": "ab" * 64}],
              "apparitions": [{"platformName": "deviantart", "state": "published_or_scheduled",
-                              "urlElsePublicationName":
-                                  "https://www.deviantart.com/snoiot/art/Haunted-Tower-1278691961",
-                              "apparitionTimestampIfDifferentThanSubmission": ts(2026, 1, 6)}]}
+                              "url": "https://www.deviantart.com/snoiot/art/actual-title-1278691961"}]}
     entry.update(over)
     return entry
 
 
 # --- timeline -------------------------------------------------------------
 
-def test_timeline_titles_a_published_entry_from_its_url_slug(tmp_path):
-    row, = timeline(write_pubs(tmp_path, [pub()]))
-    assert row["title"] == "Haunted Tower"
-    assert row["url"] == "https://www.deviantart.com/snoiot/art/Haunted-Tower-1278691961"
+def test_timeline_uses_publication_title_and_apparition_url(tmp_path):
+    row, = timeline(write_pubs(tmp_path, [pub(title="Shared Title")]))
+    assert row["title"] == "Shared Title"
+    assert row["url"] == "https://www.deviantart.com/snoiot/art/actual-title-1278691961"
     assert row["state"] == "published_or_scheduled"
     assert row["sha"] == "ab" * 64 and row["basename"] == "art.webp"
 
 
 def test_timeline_labels_entries_waiting_for_ai_metadata(tmp_path):
-    e = pub(description="[[PUBLICATOR:TODO_GENERATE]]")
-    e["apparitions"][0].update(
-        state="unpublished", urlElsePublicationName="[[PUBLICATOR:TODO_GENERATE]]")
+    e = pub(title="[[PUBLICATOR:TODO_GENERATE]]", description="[[PUBLICATOR:TODO_GENERATE]]")
+    e["apparitions"][0] = {"platformName": "deviantart", "state": "unpublished"}
     row, = timeline(write_pubs(tmp_path, [e]))
     assert row["title"] == "AI metadata pending"
     assert row["url"] is None
@@ -57,38 +56,36 @@ def test_timeline_labels_entries_waiting_for_ai_metadata(tmp_path):
 
 def test_timeline_falls_back_to_submission_timestamp(tmp_path):
     e = pub(submissionTimestamp=ts(2026, 3, 4))
-    e["apparitions"][0].pop("apparitionTimestampIfDifferentThanSubmission")
+    e.pop("apparitionTimestampIfDifferentThanSubmission")
     row, = timeline(write_pubs(tmp_path, [e]))
     assert row["ts"] == ts(2026, 3, 4)
 
 
-def test_timeline_falls_back_to_the_description_when_the_slug_is_only_an_id(tmp_path):
-    e = pub(description="A lady and a bewildered monster")
-    e["apparitions"][0]["urlElsePublicationName"] = \
-        "https://www.deviantart.com/snoiot/art/1281297380?action=published"
-    row, = timeline(write_pubs(tmp_path, [e]))
-    assert row["title"] == "A lady and a bewildered monster"
-
-
 def test_timeline_keeps_a_queued_entry_as_plain_title_without_a_link(tmp_path):
-    e = pub()
-    e["apparitions"][0].update(state="unpublished", urlElsePublicationName="Tickled Pink")
+    e = pub(state="DESCRIBED", title="Tickled Pink")
+    e["apparitions"][0] = {"platformName": "deviantart", "state": "unpublished"}
     row, = timeline(write_pubs(tmp_path, [e]))
     assert row["title"] == "Tickled Pink"
     assert row["url"] is None
     assert row["state"] == "unpublished"
 
 
-def test_timeline_ignores_other_platforms_and_sorts_by_date(tmp_path):
-    late = pub(uuid="late")
-    late["apparitions"][0]["apparitionTimestampIfDifferentThanSubmission"] = ts(2026, 5, 1)
+def test_timeline_keeps_all_platforms_and_sorts_by_date(tmp_path):
+    late = pub(uuid="late", apparitionTimestampIfDifferentThanSubmission=ts(2026, 5, 1))
     early = pub(uuid="early")
     early["apparitions"] = [
         {"platformName": "pixiv", "state": "published_or_scheduled",
-         "urlElsePublicationName": "https://www.pixiv.net/en/artworks/1"},
+         "url": "https://www.pixiv.net/en/artworks/1"},
         early["apparitions"][0]]
+    early['apparitions'][1]['state'] = 'unpublished'
     rows = timeline(write_pubs(tmp_path, [late, early]))
-    assert [r["uuid"] for r in rows] == ["early", "late"]   # pixiv row dropped, sorted
+    assert [(r['uuid'], r['platformName']) for r in rows] == [
+        ('early', 'pixiv'), ('early', 'deviantart'), ('late', 'deviantart')]
+    assert rows[0]['url'] == 'https://www.pixiv.net/en/artworks/1'
+    assert rows[0]['title'] == rows[1]['title'] == early['title']
+    assert rows[0]['ts'] == rows[1]['ts'] == early['apparitionTimestampIfDifferentThanSubmission']
+    assert rows[0]['state'] == 'published_or_scheduled'
+    assert rows[1]['state'] == 'unpublished'
 
 
 def test_timeline_reads_the_legacy_sha_key(tmp_path):
@@ -119,7 +116,7 @@ def _render(rows, now=None, anchors=None, prompts=None):
 
 def row(**over):
     # `thumb` is stamped server-side (server.thumb_maps): the view never hashes.
-    r = {"uuid": "u1", "ts": ts(2026, 1, 6), "title": "Haunted Tower",
+    r = {"uuid": "u1", "platformName": "deviantart", "ts": ts(2026, 1, 6), "title": "Haunted Tower",
          "url": "https://da/art/Haunted-Tower", "state": "published_or_scheduled",
          "basename": "art.webp", "sha": "ab" * 64, "thumb": "ab" * 16 + ".webp"}
     r.update(over)
@@ -182,6 +179,15 @@ def test_a_prompt_bearing_event_keeps_its_deviantart_link_inside_the_panel():
     c = cell(page, "2026-01-06")
     assert 'href="https://da/art/Haunted-Tower"' in c and 'target="_blank"' in c
     assert "open on DeviantArt" in c
+
+
+def test_prompt_links_use_the_apparition_platform_and_escape_unknown_names():
+    for name, label in [('pixiv', 'Pixiv'), ('other<platform>', 'other&lt;platform&gt;')]:
+        page = _render([row(platformName=name, path='/d/art.webp')],
+                       prompts={'/d/art.webp': BLOCK})
+        assert f'open on {label} ↗' in page
+        assert 'open on DeviantArt' not in page
+        assert 'other<platform>' not in page
 
 
 def test_a_prompt_bearing_queued_event_still_reaches_its_gallery_card():

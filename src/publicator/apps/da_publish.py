@@ -6,7 +6,8 @@ import sys
 
 from publicator import setup_logging
 from publicator import deviantart
-from publicator.deviantart import check_steps, configure, load_pending_entries, publish_batch
+from publicator.deviantart import check_steps, configure, load_pending_entries
+from publicator.platforms import publish_selected
 
 
 def main() -> int:
@@ -49,8 +50,9 @@ def main() -> int:
 
     for entry in entries:
         print(f"publishing: {entry['title']}  [{entry['uuid']}]")
-    published, failed, err = publish_batch(
-        entries, [e["uuid"] for e in entries], json_path, headless=a.headless)
+    published, failed, err = publish_selected(
+        json_path, str(deviantart.DATA_DIR), platform_names=["deviantart"],
+        uuids=[e["uuid"] for e in entries], headless=a.headless)
     print(f"published={published} failed={failed}")
     if err:
         print(f"error: {err}", file=sys.stderr)

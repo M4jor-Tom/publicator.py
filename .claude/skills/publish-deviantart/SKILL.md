@@ -15,9 +15,9 @@ flag, or run them from anywhere and pass `--data-dir <path-to-art-data-dir>`
 nix run .#da-publish -- --data-dir <path-to-art-data-dir>
 ```
 
-Publishes ONE entry — the first `state=unpublished` in `publications.json` (add
-`--uuid <id>` to target a specific one). If it exits 0, the publication is done
-— stop here.
+Publishes ONE entry — the first `DESCRIBED` publication with an unpublished
+DeviantArt apparition in `publications.json` (add `--uuid <id>` to target a
+specific one). If it exits 0, the publication is done — stop here.
 
 If it exits non-zero, it prints `AUTOMATION FAILED: <reason>` to stderr and
 closes the browser cleanly. Fall through to the manual steps below to finish the
@@ -27,7 +27,8 @@ tripped it (so the next run doesn't fall through).
 ## Values for the current publication
 
 `<pub.path>` / `<pub.title>` / `<pub.schedule>` come from the first
-`state=unpublished` entry in `publications.json` (stdlib-only, no app needed):
+metadata-approved publication with an unpublished DeviantArt apparition in
+`publications.json` (stdlib-only, no app needed):
 
 ```sh
 nix run <publicator.py>#echo-first -- --data-dir .

@@ -7,22 +7,26 @@ from pathlib import Path
 
 from publicator import setup_logging
 from publicator import entries
+from publicator.config import load_config
 from publicator.images import thumb_for_ai
 from publicator.llm_meta import (
     DEFAULT_TIMEOUT, OPENROUTER_MODEL, TODO_GENERATE, VISION_MODELS,
     generate_metadata, local_model_status,
 )
-from publicator.store import atomic_write_json
+from publicator.store import merge_generated_metadata
+
+
+def _load(path):
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
 
 
 def generate_pending(json_path, data_dir, *, source, model_option, timeout=DEFAULT_TIMEOUT, yes=False) -> tuple[int, int]:
     """Generate every publication containing an exact metadata marker."""
     entries.set_data_dir(data_dir)
-    with open(json_path, encoding="utf-8") as f:
-        publications = json.load(f)
-    pending = [p for p in publications if p.get("description") == TODO_GENERATE or any(
-        a.get("platformName") == "deviantart" and a.get("urlElsePublicationName") == TODO_GENERATE
-        for a in p.get("apparitions", []))]
+    publications = _load(json_path)
+    pending = [p for p in publications
+               if p.get("title") == TODO_GENERATE or p.get("description") == TODO_GENERATE]
     if not pending:
         return 0, 0
 
@@ -49,13 +53,12 @@ def generate_pending(json_path, data_dir, *, source, model_option, timeout=DEFAU
                     return 0, len(pending)
             install_missing = True
 
+    config = load_config(data_dir)
     cache_dir = str(Path(data_dir) / ".thumbs")
     succeeded = failed = 0
     for pub in pending:
         uuid = pub.get("uuid", "<unknown>")
         art_path = "<unresolved>"
-        old_description = pub.get("description")
-        old_titles = [a.get("urlElsePublicationName") for a in pub.get("apparitions", [])]
         try:
             art_path = str(entries.find_art_path(pub["files"][0]["basename"]))
             image = thumb_for_ai(art_path, cache_dir)
@@ -63,25 +66,11 @@ def generate_pending(json_path, data_dir, *, source, model_option, timeout=DEFAU
                 image, model_option, source=source, timeout=timeout,
                 install_missing=install_missing,
             )
-            if pub.get("description") == TODO_GENERATE:
-                pub["description"] = description
-            for apparition in pub.get("apparitions", []):
-                if (apparition.get("platformName") == "deviantart"
-                        and apparition.get("urlElsePublicationName") == TODO_GENERATE):
-                    apparition["urlElsePublicationName"] = title
-            atomic_write_json(json_path, publications)
+            merge_generated_metadata(json_path, pub["uuid"], title=title,
+                                    description=description, config=config)
             succeeded += 1
             install_missing = False
         except (Exception, SystemExit) as e:
-            if old_description is None:
-                pub.pop("description", None)
-            else:
-                pub["description"] = old_description
-            for apparition, old_title in zip(pub.get("apparitions", []), old_titles):
-                if old_title is None:
-                    apparition.pop("urlElsePublicationName", None)
-                else:
-                    apparition["urlElsePublicationName"] = old_title
             print(f"{uuid} ({art_path}): {e}", file=sys.stderr)
             failed += 1
     print(f"Metadata generation: {succeeded} succeeded, {failed} failed")

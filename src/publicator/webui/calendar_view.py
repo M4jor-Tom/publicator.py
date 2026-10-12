@@ -9,31 +9,15 @@ window spoofs Date to UTC and would file a 00:30 Paris post on the day before).
 import calendar
 import html
 import json
-import re
 import time
 from datetime import date, datetime
 
+from publicator.entries import effective_schedule_ts
 from publicator.llm_meta import TODO_GENERATE
-
-# ".../art/Haunted-Tower-1278691961" -> "Haunted-Tower" (trailing id dropped)
-SLUG = re.compile(r"/art/(.+?)(?:-\d+)?(?:\?|$)")
-
-
-def entry_title(name: str, description: str) -> str:
-    """A human title for a row. Published apparitions store their DeviantArt URL
-    in urlElsePublicationName, so the title is recovered from the slug; a few old
-    ones have a bare numeric slug, which falls back to the description."""
-    if not name.startswith("http"):
-        return name                       # still queued: the plain title
-    m = SLUG.search(name)
-    slug = m.group(1).replace("-", " ").strip() if m else ""
-    if any(c.isalpha() for c in slug):
-        return slug
-    return description.strip().split("\n")[0]
 
 
 def timeline(json_path: str) -> list[dict]:
-    """Every DeviantArt apparition as a calendar row, ascending by date.
+    """Every stored apparition as a calendar row, ascending by date.
     Rows carry the stored sha512 so the view can name the cached thumbnail
     without hashing (or even touching) the file."""
     try:
@@ -44,20 +28,18 @@ def timeline(json_path: str) -> list[dict]:
     rows = []
     for p in data:
         for app in p.get("apparitions", []):
-            if app.get("platformName") != "deviantart":
-                continue
-            name = app.get("urlElsePublicationName", "")
+            title = p.get("title", "")
             description = p.get("description", "")
-            ai_pending = name == TODO_GENERATE or description == TODO_GENERATE
+            ai_pending = TODO_GENERATE in title or TODO_GENERATE in description
             f0 = (p.get("files") or [{}])[0]
             rows.append({
                 "uuid": p.get("uuid"),
+                "platformName": app.get("platformName"),
                 # Most entries carry their own instant; the oldest fall back to
                 # the publication's submission time.
-                "ts": int(app.get("apparitionTimestampIfDifferentThanSubmission")
-                          or p.get("submissionTimestamp") or 0),
-                "title": "AI metadata pending" if ai_pending else entry_title(name, description),
-                "url": name if name.startswith("http") else None,
+                "ts": int(effective_schedule_ts(p) or 0),
+                "title": "AI metadata pending" if ai_pending else title,
+                "url": app.get("url"),
                 "state": app.get("state"),
                 "basename": f0.get("basename", ""),
                 # Most of the back-catalogue stores the legacy key (as
@@ -75,7 +57,7 @@ def months_between(first: date, last: date):
 
 
 def event_html(row: dict, now: int, anchors: dict, prompts: dict, eid: str) -> str:
-    """One publication inside a day cell: its thumbnail, linking to DeviantArt
+    """One apparition inside a day cell: its thumbnail, linking to its platform
     once published, else to its card in the gallery tab. Rows whose art is no
     longer on disk carry no `thumb` and show their title instead.
 
@@ -99,8 +81,10 @@ def event_html(row: dict, now: int, anchors: dict, prompts: dict, eid: str) -> s
         if not href:
             return f'<span class="{cls}">{img}</span>'
         return f'<a class="{cls}" href="{html.escape(href, quote=True)}"{tab}>{img}</a>'
+    name = row["platformName"]
+    label = html.escape({"deviantart": "DeviantArt", "pixiv": "Pixiv"}.get(name, name))
     link = (f'<a href="{html.escape(href, quote=True)}"{tab}>'
-            f'{"open on DeviantArt ↗" if row["url"] else "go to its gallery card"}</a>'
+            f'{"open on " + label + " ↗" if row["url"] else "go to its gallery card"}</a>'
             if href else "")
     return (f'<button class="{cls}" popovertarget="{eid}">{img}</button>'
             f'<div id="{eid}" popover class="evpop">'

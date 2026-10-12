@@ -27,21 +27,26 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from publicator.config import load_config
+from jsonschema.exceptions import ValidationError
+
+from publicator.config import load_config, validate_publications
 from publicator.entries import (
+    PUBLICATION_STATE_DESCRIBED,
     STATE_PUBLISHED,
     STATE_UNPUBLISHED,
     deviantart_apparition,
+    effective_schedule_ts,
     find_art_path,
     format_schedule,
     set_data_dir,
 )
 from publicator.llm_meta import TODO_GENERATE
-from publicator.store import mark_state
+from publicator.store import load_publications, mark_state
 
 log = logging.getLogger("publicator.da")
 
 TAGS_FILE = None  # resolved by configure() from the top-level "tags" key of publicator.toml, under DATA_DIR
+CONFIG = None  # effective data-dir config shared by preflight and delivery persistence
 
 # The skill file is a repo asset, not a package one: src/publicator/deviantart.py
 # -> parents[2] is the repo root. Absent (e.g. an installed copy) -> check_steps
@@ -64,11 +69,12 @@ def configure(data_dir, config=None) -> Path:
     """Point this module (and the echo helpers) at a publication database dir.
     `config` is a pre-loaded publicator.toml dict; None -> load it here (for
     standalone callers). Returns the resolved DATA_DIR."""
-    global DATA_DIR, LOGIN_DIR, SESSION_DIR, TAGS_FILE
+    global DATA_DIR, LOGIN_DIR, SESSION_DIR, TAGS_FILE, CONFIG
     DATA_DIR = set_data_dir(data_dir)  # also points the echo helpers (find_art_path) at it
     LOGIN_DIR = DATA_DIR / ".deviantart-login"
     SESSION_DIR = DATA_DIR / ".deviantart-session"
-    tags = (config if config is not None else load_config(DATA_DIR)).get("tags")
+    CONFIG = config if config is not None else load_config(DATA_DIR)
+    tags = CONFIG.get("tags")
     TAGS_FILE = DATA_DIR / tags if tags else None
     return DATA_DIR
 
@@ -88,16 +94,38 @@ def _pending_art(basename: str) -> Path | None:
     return (non_webp[0] if non_webp else matches[0]).resolve()
 
 
+MAX_TITLE_LEN = 50
+
+
+def _metadata_error(entry: dict) -> str | None:
+    title = entry.get("title", "")
+    description = entry.get("description", "")
+    if not str(title).strip() or not str(description).strip():
+        return "title and description required"
+    if TODO_GENERATE in title or TODO_GENERATE in description:
+        return "AI metadata still marked for generation"
+    if len(title) > MAX_TITLE_LEN:
+        return f"DeviantArt title too long ({len(title)} > {MAX_TITLE_LEN})"
+    return None
+
+
 def load_pending_entries(json_path: str) -> list[dict]:
-    """Existing state=unpublished DA entries -> queue dicts with tier lists.
+    """Stored DESCRIBED/unpublished DA targets -> queue dicts with tier lists.
     Skips entries whose art can't be found."""
     try:
         with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return []
+    return _pending_entries(data)
+
+
+def _pending_entries(data: list[dict]) -> list[dict]:
+    """Resolve queue records from one publication snapshot."""
     out = []
     for p in data:
+        if p.get("state") != PUBLICATION_STATE_DESCRIBED:
+            continue
         try:
             app = deviantart_apparition(p)
             if app.get("state") != STATE_UNPUBLISHED:
@@ -112,9 +140,9 @@ def load_pending_entries(json_path: str) -> list[dict]:
         out.append({
             "uuid": p["uuid"],
             "path": str(art),
-            "title": app["urlElsePublicationName"],
+            "title": p.get("title", ""),
             "description": p.get("description", ""),
-            "scheduleTs": app.get("apparitionTimestampIfDifferentThanSubmission"),
+            "scheduleTs": effective_schedule_ts(p),
             "price": app.get("priceIfNotFree"),
             "tiers": app.get("tiers", [app["tier"]] if app.get("tier") else []),
             "galleries": app.get("galleries", []),
@@ -465,10 +493,28 @@ def _session_authed(page) -> bool:
 
 def publish_batch(entries: list[dict], uuids: list[str],
                   json_path: str, headless: bool = False) -> tuple[int, int, str | None]:
-    """Drive Firefox through DA submission for each entry. Returns (ok, failed, err)."""
-    if any(e.get("title") == TODO_GENERATE or e.get("description") == TODO_GENERATE
-           for e in entries):
-        return 0, len(entries), "AI metadata still marked for generation"
+    """Publish requested UUIDs using fresh stored approval, targets and metadata.
+
+    Caller queue contents are not authoritative. Returns (ok, failed, err).
+    """
+    config = CONFIG if CONFIG is not None else load_config(DATA_DIR)
+    try:
+        data = load_publications(json_path)
+        validate_publications(data, config)
+        pending = {e["uuid"]: e for e in _pending_entries(data)}
+        for u in uuids:
+            if u not in pending:
+                raise ValueError(f"publication {u} is not an eligible pending DeviantArt target")
+        entries = [pending[u] for u in dict.fromkeys(uuids)]
+    except (ValidationError, ValueError, OSError) as e:
+        return 0, len(uuids), str(e)
+
+    for e in entries:
+        err = _metadata_error(e)
+        if err:
+            return 0, len(entries), err
+    if not entries:
+        return 0, 0, None
 
     from playwright.sync_api import sync_playwright
 
@@ -500,10 +546,10 @@ def publish_batch(entries: list[dict], uuids: list[str],
         log.debug("DA session authed; publishing %d entr%s",
                   len(entries), "y" if len(entries) == 1 else "ies")
 
-        for entry, u in zip(entries, uuids):
+        for entry in entries:
             try:
                 submit_entry(page, entry)
-                mark_state(json_path, u, STATE_PUBLISHED)
+                mark_state(json_path, entry["uuid"], STATE_PUBLISHED, config=config)
                 published += 1
                 print(f"published: {entry['title']}", flush=True)
             except Exception as e:
