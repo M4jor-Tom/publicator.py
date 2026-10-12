@@ -114,6 +114,8 @@ def test_da_cli_uses_data_dir_config_for_external_json(tmp_path, monkeypatch, br
 def test_invalid_database_never_starts_browser(tmp_path, browser_stub, invalid, entrypoint):
     path = tmp_path / "publications.json"
     write_da_publication(path, tmp_path)
+    deviantart.configure(str(tmp_path), CFG)
+    pending = deviantart.load_pending_entries(str(path))
     rows = store.load_publications(str(path))
     if invalid == "uuid":
         rows[0]["uuid"] = "short"
@@ -126,8 +128,6 @@ def test_invalid_database_never_starts_browser(tmp_path, browser_stub, invalid, 
         with pytest.raises((ValidationError, ValueError)):
             platforms.publish_selected(str(path), str(tmp_path), config=CFG)
     else:
-        deviantart.configure(str(tmp_path), CFG)
-        pending = deviantart.load_pending_entries(str(path))
         result = deviantart.publish_batch(pending, [rows[0]["uuid"]], str(path))
         assert result[:2] == (0, 1)
         assert result[2]

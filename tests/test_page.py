@@ -63,6 +63,14 @@ def test_platform_table_accessible_locked_success_and_options():
     assert 'Publish selected' in page and 'Retry' in page
 
 
+def test_platform_options_do_not_select_obsolete_singular_tier():
+    page = _render(publications=[publication('DESCRIBED', apparitions=[{
+        'platformName': 'deviantart', 'state': 'unpublished', 'tier': 'gold'}])],
+        config={'tiers': ['gold']})
+    assert 'value="gold"' in page
+    assert 'value="gold" checked' not in page
+
+
 def test_ai_catalog_and_requested_fields_are_in_describe_only():
     from publicator.llm_meta import VISION_MODELS
     page = _render(publications=[publication()], vision_models=VISION_MODELS,

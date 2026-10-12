@@ -104,7 +104,7 @@ def test_load_pending_entries_uses_shared_metadata_and_skips_ineligible_rows(tmp
          "submissionTimestamp": 1, "files": [{"basename": "multi-tier-art.png"}],
          "apparitions": [{"platformName": "pixiv", "state": "unpublished"}]},
     ]
-    for uuid, fields in (("legacy", {"tier": "gold"}),
+    for uuid, fields in (("single", {"tiers": ["gold"]}),
                          ("multiple", {"tiers": ["gold", "silver"]})):
         rows.append({"uuid": uuid, "state": "DESCRIBED", "title": uuid, "description": "d",
                      "submissionTimestamp": 1,
@@ -116,9 +116,23 @@ def test_load_pending_entries_uses_shared_metadata_and_skips_ineligible_rows(tmp
     pending = deviantart.load_pending_entries(str(json_path))
     assert [(entry["uuid"], entry["title"], entry["scheduleTs"], entry["tiers"])
             for entry in pending] == [
-        ("legacy", "legacy", 1800000000, ["gold"]),
+        ("single", "single", 1800000000, ["gold"]),
         ("multiple", "multiple", 1800000000, ["gold", "silver"]),
     ]
+
+
+def test_load_pending_entries_rejects_singular_tier(tmp_path):
+    configure(str(tmp_path), {"tiers": ["gold"], "galleries": []})
+    (tmp_path / "art.png").write_bytes(b"art")
+    path = tmp_path / "publications.json"
+    path.write_text(json.dumps([{
+        "uuid": "00000000-0000-4000-8000-000000000001", "state": "DESCRIBED",
+        "title": "Title", "description": "Description", "submissionTimestamp": 1,
+        "files": [{"basename": "art.png"}],
+        "apparitions": [{"platformName": "deviantart", "state": "unpublished", "tier": "gold"}],
+    }]))
+    with pytest.raises(ValueError, match="obsolete tier"):
+        deviantart.load_pending_entries(str(path))
 
 
 def test_echo_first_uses_shared_title_date_and_skips_other_platforms(tmp_path, monkeypatch, capsys):

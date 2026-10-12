@@ -114,8 +114,8 @@ def _pubs(**apparition):
     }]
 
 
-def test_validate_accepts_configured_tier_and_gallery():
-    validate_publications(_pubs(tier="gold", galleries=["Art"]),
+def test_validate_accepts_configured_tiers_and_gallery():
+    validate_publications(_pubs(tiers=["gold"], galleries=["Art"]),
                           {"tiers": ["gold"], "galleries": ["Art"]})
     validate_publications(_pubs(tiers=["gold", "silver"], galleries=["Art"]),
                           {"tiers": ["gold", "silver"], "galleries": ["Art"]})
@@ -135,9 +135,20 @@ def test_validate_rejects_unconfigured_member_of_tier_list():
                               {"tiers": ["gold"], "galleries": []})
 
 
-def test_validate_rejects_tier_absent_from_config():
-    with pytest.raises(ValueError, match="tier"):
-        validate_publications(_pubs(tier="gold"), {"tiers": [], "galleries": []})
+@pytest.mark.parametrize("fields", [{"tier": "gold"}, {"tier": "gold", "tiers": ["gold"]}])
+def test_validate_rejects_singular_tier_even_if_configured(fields):
+    with pytest.raises(ValueError, match="obsolete tier"):
+        validate_publications(_pubs(**fields), {"tiers": ["gold"], "galleries": []})
+
+
+def test_schema_rejects_singular_tier():
+    import json
+    from jsonschema import validate
+    from jsonschema.exceptions import ValidationError
+    from publicator.config import SCHEMA
+
+    with pytest.raises(ValidationError):
+        validate(_pubs(tier="gold"), json.loads(SCHEMA.read_text()))
 
 
 def test_validate_rejects_gallery_absent_from_config():

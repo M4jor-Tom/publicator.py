@@ -70,10 +70,9 @@ def validate_publications(data, config):
     against config (the schema already forbids these fields on non-DA)."""
     for p in data:
         for a in p.get("apparitions", []):
-            if "urlElsePublicationName" in a:
-                raise ValueError(f"{p.get('uuid')}: obsolete urlElsePublicationName")
-            if "apparitionTimestampIfDifferentThanSubmission" in a:
-                raise ValueError(f"{p.get('uuid')}: obsolete apparitionTimestampIfDifferentThanSubmission")
+            for key in ("urlElsePublicationName", "apparitionTimestampIfDifferentThanSubmission", "tier"):
+                if key in a:
+                    raise ValueError(f"{p.get('uuid')}: obsolete {key}")
     _js_validate(instance=data, schema=_SCHEMA)
     tiers, galleries = set(config.get("tiers", [])), set(config.get("galleries", []))
     for p in data:
@@ -82,10 +81,7 @@ def validate_publications(data, config):
                 raise ValueError(f"{p.get('uuid')}: apparition url must be an HTTP(S) URL with a host")
             if a.get("platformName") != "deviantart":
                 continue
-            selected_tiers = a.get("tiers", [])
-            if "tier" in a:
-                selected_tiers = [*selected_tiers, a["tier"]]
-            for tier in selected_tiers:
+            for tier in a.get("tiers", []):
                 if tier not in tiers:
                     raise ValueError(f"{p.get('uuid')}: tier {tier!r} not in publicator.toml")
             for g in a.get("galleries", []):

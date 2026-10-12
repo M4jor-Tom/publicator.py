@@ -238,6 +238,20 @@ def test_marking_one_platform_success_does_not_complete_other_targets(tmp_path):
     assert store.load_publications(path)[0]["state"] == "APPEARED"
 
 
+def test_options_save_does_not_silently_convert_singular_tier(tmp_path):
+    uuid_ = "00000000-0000-4000-8000-000000000001"
+    path = tmp_path / "publications.json"
+    store.atomic_write_json(str(path), [{
+        "uuid": uuid_, "state": "DESCRIBED", "title": "T", "description": "D",
+        "submissionTimestamp": 1, "files": [],
+        "apparitions": [{"platformName": "deviantart", "state": "unpublished", "tier": "gold"}],
+    }])
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match="obsolete tier"):
+        store.save_platform_options(str(path), uuid_, "deviantart", {"tiers": ["gold"]}, _CFG)
+    assert path.read_bytes() == before
+
+
 def test_save_platform_options_selects_deviantart_not_first_platform(tmp_path):
     uuid_ = "00000000-0000-4000-8000-000000000001"
     pixiv = {"platformName": "pixiv", "state": "unpublished", "priceIfNotFree": 2}

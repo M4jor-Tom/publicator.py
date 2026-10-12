@@ -338,6 +338,4 @@ def save_platform_options(json_path: str, uuid_: str, platform: str, fields: dic
                 if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
                     raise ValueError(f"{key} must be a list of names")
                 set_or_pop(app, key, value)
-                if key == "tiers":
-                    app.pop("tier", None)
         _write_publications(json_path, data, config)

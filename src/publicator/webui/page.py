@@ -371,7 +371,7 @@ def render_page(*, thumb_map, candidates, publications, timeline, schedules, con
                 body += '<div class="options">'
                 body += f'<label>Price (optional) <input autocomplete="off" type="number" class="f-price" min="0" step="0.01" value="{escaped(app.get("priceIfNotFree", ""))}"></label>'
                 for key, cls in (('tiers', 'f-tier'), ('galleries', 'f-gallery')):
-                    selected = app.get(key, [app['tier']] if key == 'tiers' and app.get('tier') else [])
+                    selected = app.get(key, [])
                     body += f'<fieldset><legend>{key.capitalize()}</legend>'
                     for option in config.get(key, []):
                         body += f'<label><input autocomplete="off" type="checkbox" class="{cls}" value="{escaped(option)}"{" checked" if option in selected else ""}> {escaped(option)}</label>'

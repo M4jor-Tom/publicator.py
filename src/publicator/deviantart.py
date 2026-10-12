@@ -128,6 +128,8 @@ def _pending_entries(data: list[dict]) -> list[dict]:
             continue
         try:
             app = deviantart_apparition(p)
+            if "tier" in app:
+                raise ValueError(f"{p.get('uuid')}: obsolete tier")
             if app.get("state") != STATE_UNPUBLISHED:
                 continue
             art = _pending_art(p["files"][0]["basename"])
@@ -144,7 +146,7 @@ def _pending_entries(data: list[dict]) -> list[dict]:
             "description": p.get("description", ""),
             "scheduleTs": effective_schedule_ts(p),
             "price": app.get("priceIfNotFree"),
-            "tiers": app.get("tiers", [app["tier"]] if app.get("tier") else []),
+            "tiers": app.get("tiers", []),
             "galleries": app.get("galleries", []),
         })
     return out

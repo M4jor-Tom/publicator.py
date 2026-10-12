@@ -29,7 +29,7 @@ success, explicit backwards actions preserve saved content and pending selection
 ## Invariants
 
 - Publication `apparitionTimestampIfDifferentThanSubmission` is the only date override; historical records fall back to `submissionTimestamp`. No apparition-level override is allowed. `title` and `description` are shared across platforms.
-- Apparition delivery state remains `unpublished` / `published_or_scheduled`; optional `url` is an actual HTTP(S) URL. `urlElsePublicationName` is rejected, never written as a compatibility alias.
+- Apparition delivery state remains `unpublished` / `published_or_scheduled`; optional `url` is an actual HTTP(S) URL. `urlElsePublicationName` and singular `tier` are rejected, never normalized as compatibility aliases; only plural `tiers` is supported.
 - Blank or marker-bearing required metadata cannot advance or publish; the exact token is `[[PUBLICATOR:TODO_GENERATE]]`, blocked even inside other text. Generation itself does not approve metadata.
 - Every store mutation validates before same-directory temporary-file replacement. A standard-library thread lock plus advisory file lock protects short mutations; neither is held during AI/browser calls. Invalid JSON is an error, never an empty queue.
 - Delivery successes are persisted individually. Retry resolves fresh stored approved targets and skips successes. External submission and subsequent disk persistence cannot be one atomic transaction.
