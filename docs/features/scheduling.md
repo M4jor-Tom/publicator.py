@@ -1,56 +1,33 @@
 # Scheduling (slots and weekly profiles)
 
-- **Does:** Turns `[schedule]` weekly profiles into absolute slot instants (52 weeks, wall-clock hour in the schedule TZ) that pre-fill each card's picker and profile-specific tier checks, then resolves the saved wall-clock string to an epoch server-side.
-- **Run:** `nix run .#publish-next -- [--data-dir DIR] [--json FILE] [--port 8765]` (the only app exercising slot generation and the picker; no CLI flag controls scheduling, all cadence comes from `[schedule]`)
-- **Code:** `src/publicator/scheduling.py` (`SLOT_HORIZON_WEEKS`, `schedule_profiles`, `profile_slots`, `schedule_data`, `existing_ts`, `resolve_ts`), `src/publicator/store.py` (`write_publications`, `apply_update`, `atomic_write_json`), `src/publicator/config.py` (`load_config`), `src/publicator/webui/page.py` (`render_page`, `PAGE_TEMPLATE`, JS `nextSlotForProfile`), `src/publicator/webui/server.py` (`serve`, `GalleryHandler.existing_ts`, `GalleryHandler.schedules`), `src/publicator/deviantart.py` (`load_pending_entries`)
-- **Tests:** `tests/test_scheduling.py` (profile validation, tier defaults, `existing_ts`, `resolve_ts`, DST, node-driven browser-TZ regression; skips without node), `tests/test_store.py` (write/update persist `schedule` resolved in config TZ over `scheduleTs`; neither field raises), `tests/test_config.py` (flat and profiles `[schedule]` pass through verbatim; missing file gives `{}`), `tests/test_page.py` (preset `<select>`, preset tier defaults; `SCHEDULES`/`EXISTING_TS`/`LABELS` placeholders replaced)
-- **Config:** `publicator.toml` `[schedule]`: `timezone` (IANA, default `Europe/Paris`); `[[schedule.profiles]]`: `name` (default `default`), `day` (weekday name, case-insensitive, default `tuesday`), `hour` (int, default 20, wall clock in `timezone`), `per_slot` (int >= 1, default 2), `frequency` (`weekly` only), optional `default_tiers` (list of configured DeviantArt tier names to preselect in the UI). Flat keys without `profiles` = one `default` profile; absent table = Tuesday 20:00, per_slot 2.
-- **Data:** `publicator.toml` (`[schedule]` passed through by `load_config` as a dict, validated by `schedule_data` at gallery startup); `publications.json` (`apparitions[].apparitionTimestampIfDifferentThanSubmission`, epoch seconds; occupancy via `existing_ts`, queue via `load_pending_entries`, written via `atomic_write_json`)
-- **Decisions:** no ADR: a profile may seed its configured `default_tiers` in the UI; tier choices are otherwise independent of price, and an off-cadence custom timestamp counts toward no profile's occupancy (do not snap it to a slot)
-- **Verify:** `nix develop -c pytest tests/test_scheduling.py -q` (1 test skips if `node` is not on PATH)
-- **Verify:** `nix develop -c pytest tests/test_store.py -q`
-- **Verify:** `nix develop -c pytest tests/test_config.py -q`
-- **Verify:** `nix develop -c pytest tests/test_page.py -q`
+- **Does:** Repackages automatic PICKED date suggestions in persisted order; manual pins and approved dates reserve capacity and never move automatically.
+- **Run:** `nix run .#publish-next -- --data-dir DIR` (Schedule phase; weekly profiles are read-only)
+- **Code:** `src/publicator/scheduling.py` (`schedule_profiles`, `schedule_data`, `profile_slots`, `repack_publication_dates`, `resolve_ts`, `zone`), `src/publicator/store.py` (date edits/approval and repack mutation), `src/publicator/webui/server.py` (HTTP boundary), `src/publicator/webui/page.py` (native picker).
+- **Tests:** `tests/test_scheduling.py` (capacity, exhausted horizon, DST and historical occupancy), `tests/test_store.py` (manual pins, unpin/profile edits, frozen dates), `tests/test_server.py` (real HTTP repacks/approval).
+- **Config:** `[schedule] timezone` defaults to Europe/Paris; weekly `profiles` specify name, day, local hour, per_slot and optional DA default_tiers. Flat configuration remains one default profile. Profiles need distinct day/hour slots and valid configured tier names.
+- **Data:** Publication-level `apparitionTimestampIfDifferentThanSubmission`, `scheduleProfile`, `scheduleIsManual`; no platform is selected in Phase 2 and no second date field exists.
+- **Decisions:** All allocation/TZ conversion is Python-only. Explicit over-capacity dates stay chosen; off-cadence custom dates are never snapped to cadence.
+- **Verify:** `nix develop -c pytest tests/test_scheduling.py tests/test_store.py tests/test_server.py tests/test_page.py -q`
 
 ## How it works
 
-1. `config.load_config(data_dir)` returns the raw `[schedule]` table as `config['schedule']` (`dict(cfg.get('schedule', {}))`), unvalidated.
-2. `webui.server.serve` sets `GalleryHandler.existing_ts = scheduling.existing_ts(args.json)` and builds `GalleryHandler.schedules = scheduling.schedule_data(config['schedule'], allowed_tiers=config['tiers'])` once at startup; invalid profile tier defaults fail before serving.
-3. `scheduling.schedule_data` validates profiles via `schedule_profiles` and checks default tier names against `[deviantart].tiers`, then `profile_slots` builds 52 (`SLOT_HORIZON_WEEKS`) weekly `datetime(date, hour, tzinfo=tz)` epochs per profile, first one strictly after now.
-4. `scheduling.existing_ts` keeps apparition timestamps >= now whose state != `unpublished` (background occupancy); unpublished ones arrive via `deviantart.load_pending_entries` as `pending[].scheduleTs`.
-5. `webui.page.render_page` injects `SCHEDULES` (`[{name, per_slot, default_tiers, slots}]`), `EXISTING_TS`, `PENDING` and `LABELS` (`scheduling.ts_labels`: epoch to `YYYY-MM-DDTHH:MM` in schedule TZ, slots + pending); `preset_options` adds `(custom)` (`__custom__`).
-6. `render_page` calls `scheduling.zone` once and hands the `ZoneInfo` to `calendar_view.render_calendar(tz=...)`.
-7. JS `openForm` on a new card calls `nextSlotForProfile(SCHEDULES[0])`: first slot with `EXISTING_TS` + queue count < `per_slot` (last slot when full), filled via `tsToLocalInput` (`LABELS` lookup; browser `Date` only for an unlabeled custom instant); it checks that profile's `default_tiers`.
-8. `applyPreset` does the same on `<select>` change and replaces tier checks with that profile's `default_tiers`; choosing `(custom)` leaves current tier checks unchanged. `presetForTs` re-selects the profile whose slot list includes a stored ts, else `__custom__`.
-9. `readForm` sends `schedule` (the naive picker string) and `scheduleTs` (`localInputToTs`: `LABEL_TO_TS` lookup, else browser-local `Date` parse; used only for client-side occupancy/display).
-10. `/stage` calls `store.write_publications` for every entry, `/publish` only for queue entries without a uuid (staged ones publish as-is), `/update` calls `store.apply_update`; both resolve via `scheduling.resolve_ts` in `zone(config['schedule'])`.
-11. `scheduling.resolve_ts` prefers `schedule` (`fromisoformat` then `replace(tzinfo=tz)`), falls back to `scheduleTs` (non-UI callers), and raises `ValueError('schedule required')` if neither.
-12. The epoch is stored as `apparitions[].apparitionTimestampIfDifferentThanSubmission`; `validate_publications` then `atomic_write_json` persist it. Next startup: pending (`unpublished`, queue) or background (`published_or_scheduled`, `existing_ts`).
+Reserve each approved publication and each manual PICKED date once, regardless
+of apparition count; allocate remaining automatic PICKED items in stored order.
+Edits and repacking share one validated write. Approval freezes the date and
+advances to SCHEDULED. Choosing a preset or “Use suggested date” clears the pin;
+a custom picker edit pins the chosen instant.
 
 ## Invariants
 
-- **All weekday/hour/TZ math is server-side; the browser compares absolute epochs by equality, never its own clock.** private-window RFP spoofs `Date` to UTC and re-suggested full slots; `profile_slots`, `nextSlotForProfile` (no `Date`), `test_new_slot_packs_after_taken_slots_regardless_of_browser_tz` (node, 3 TZs).
-- **Every slot is the profile's hour in schedule-TZ wall clock across DST, never a fixed UTC offset.** 20:00 Paris stays 20:00 summer and winter; `profile_slots` rebuilds `datetime(day, hour, tzinfo=tz)` per week, `test_schedule_slots_stay_2000_paris_across_dst` asserts hours == `{20}` and two utcoffsets.
-- **On save, the naive `schedule` string resolved in the schedule TZ wins over the client `scheduleTs`.** a UTC-spoofed browser sends `scheduleTs` off; `resolve_ts` checks `schedule` first, `test_custom_schedule_resolves_in_config_timezone` (both writers), `test_resolve_ts_reads_a_naive_string_in_the_schedule_timezone`.
-- **Profiles need distinct `(day, hour)`, `per_slot >= 1`, a valid weekday, frequency `weekly`; tier defaults must be configured, and an empty profile list is rejected.** same-instant profiles would share one slot list, and invalid config must fail before serving; `schedule_profiles`, `schedule_data`, `test_invalid_profiles_are_rejected`, `test_schedule_data_rejects_tier_defaults_missing_from_allow_list`.
-- **Occupancy background = future, non-`unpublished` apparition timestamps; unpublished entries ride in the client queue.** counting a pending entry twice would double-book its slot, past ts never occupy a future slot and would bloat the payload; `existing_ts`, `test_existing_ts_keeps_only_future_scheduled_entries`.
-- **The JS between `// >>> scheduler core` and `// <<< scheduler core` in `PAGE_TEMPLATE` is self-contained (inputs `SCHEDULES`, `EXISTING_TS`, `LABELS`, queue; no DOM).** tests run it in node, a DOM ref or new global breaks them; `_schedule_core_js` slices by marker, `_next_slot_for` sets those four globals, `node -e`.
-- **The preset choice is never persisted; a stored ts's profile is re-derived by slot-list membership.** the ts alone identifies the slot; `presetForTs` (`SCHEDULES.find(s => s.slots.includes(ts))`), both writers store only `apparitionTimestampIfDifferentThanSubmission`, `publicationsSchema.json` has no profile field.
-- **Flat and profiles forms are both legal input to `schedule_profiles`.** back-compat with the pre-profiles single-cadence toml; `test_flat_config_becomes_one_default_profile`, `test_empty_config_falls_back_to_tuesday_2000`.
-- Relies on `load_config` passing `[schedule]` through as a plain dict (`{}` when absent), owned by `docs/features/config.md`.
+- A local 20:00 schedule stays 20:00 in the configured timezone across DST, not UTC 20:00. Native picker labels and saves use that timezone; the browser never reads `Date`, allocates slots, or converts epochs.
+- Approved SCHEDULED/DESCRIBED/APPEARED dates and manually pinned PICKED dates do not move during repacks. Historical dates without an override reserve their submissionTimestamp fallback.
+- Capacity applies to automatic allocation only. Explicit same-slot dates can exceed capacity and the UI reports this; off-cadence instants occupy no configured slot.
+- Exhausting the 52-week horizon leaves an automatic date absent, not silently overbooked. Approval is blocked until a date is chosen.
+- Explicit dates with no configured matching profile (including a removed preset) return to scheduling pinned as Custom. Manual edits preserve that profile absence/mismatch; only preset choice or “Use suggested date” assigns a valid profile. Returning without an override invents no date.
+- DA profile default_tiers initialize a later Phase 4 selection only; they are never instructions to choose a platform or overwrite historical options or profile-less Custom dates.
 
 ## Gotchas
 
-- `SLOT_HORIZON_WEEKS = 52`: when the horizon is full, `nextSlotForProfile` reuses the last slot (over-booking it) instead of rolling further; bump the constant to queue more than a year out (ponytail comments in `page.py` and `scheduling.py`).
-- A custom off-cadence picker time gets its client `scheduleTs` from the browser clock (`localInputToTs` fallback), so UI occupancy can be off by the UTC-spoof offset until reload; the persisted value is right because the server resolves `schedule`.
-- Slots and `existing_ts` are computed once at startup (`serve`, `now=time.time()`); a gallery left open across a slot boundary keeps offering a slot that has passed. Restart the app to refresh.
-- Stored timestamps are epoch seconds meaning local 20:00 in the schedule TZ; never compare them to UTC 20:00 or redo TZ math in JS. Tests build expected values with `datetime(..., tzinfo=ZoneInfo('Europe/Paris'))`.
-- The timestamp lives on the DeviantArt apparition (`entries.deviantart_apparition`); `store.apply_update` raises `KeyError` on an unknown uuid, which `/update` maps to 404.
-- The node test in `tests/test_scheduling.py` skips (not fails) without `node` on PATH: a green run without node has not exercised the client scheduler.
-- A bad `[schedule]` only fails at gallery startup (`schedule_profiles` via `serve`); `load_config` validates only `[prompts]`, and `nix run .#validate` (`load_config` + `validate_publications`) never touches `[schedule]`.
-- `schedule` must be `YYYY-MM-DDTHH:MM`; `resolve_ts` uses `fromisoformat`, so an offset-bearing string is accepted but `replace(tzinfo=tz)` overrides its offset (`'2026-10-15T20:00+00:00'` and `'2026-10-15T20:00'` both give 20:00 Paris).
-
-## Open items
-
-- The last-slot fallback when the 52-week horizon is full has no test (tests only assert `len(slots) == SLOT_HORIZON_WEEKS`; nothing exercises `slot ?? p.slots[p.slots.length - 1]`).
-- `schedule_profiles` does not range-check `hour`; the failure surfaces from `datetime()` inside `profile_slots` (`ValueError 'hour must be in 0..23'`, still at gallery startup) with a message that does not name the profile.
+- A schedule horizon is regenerated on request/mutation; stored suggestions move only on explicit repacks, not on GET. Increase SLOT_HORIZON_WEEKS if the queue legitimately exceeds a year.
+- `resolve_ts` prefers the naive `schedule` wall-clock string over `scheduleTs`; non-UI callers may supply an epoch. Offset-bearing strings are interpreted in the configured zone, not their embedded offset.
+- The calendar is read-only and uses the same timezone; it does not duplicate schedule controls.

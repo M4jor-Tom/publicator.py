@@ -5,12 +5,11 @@ timestamp equality; it never reads its own clock, because
 `firefox --private-window` with resist-fingerprinting spoofs Date to UTC.
 """
 
-import json
 import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from publicator.entries import STATE_UNPUBLISHED
+from publicator.entries import PUBLICATION_STATE_PICKED, effective_schedule_ts
 
 # ---------------------------------------------------------------------------
 # Schedule cadence — all weekday/hour/timezone math is done here server-side and
@@ -101,13 +100,6 @@ def schedule_data(schedule: dict, now: int | None = None,
             for p in profiles]
 
 
-def ts_labels(tz: ZoneInfo, tss) -> dict[int, str]:
-    """{ts: 'YYYY-MM-DDTHH:MM'} in the schedule timezone, so datetime-local inputs
-    show the intended wall clock regardless of the browser's timezone."""
-    return {ts: datetime.fromtimestamp(ts, tz).strftime("%Y-%m-%dT%H:%M")
-            for ts in set(tss)}
-
-
 def resolve_ts(fields: dict, tz: ZoneInfo) -> int:
     """Epoch for a save. Prefer the naive 'schedule' wall-clock string resolved in
     the schedule timezone (browser-TZ-proof — a private window spoofs Date to UTC,
@@ -121,22 +113,38 @@ def resolve_ts(fields: dict, tz: ZoneInfo) -> int:
     raise ValueError("schedule required")
 
 
-def existing_ts(json_path: str) -> list[int]:
-    """Future timestamps of already-scheduled apparitions (state != unpublished) —
-    the occupancy background the client packs new slots around. Unpublished
-    (pending) entries are excluded; they ride in the client queue instead.
-    Past timestamps are dropped: nextSlotForProfile only compares against slots
-    >= now, so they can never occupy a candidate slot, and this keeps the
-    embedded __EXISTING_TS__ payload from growing without bound over the years."""
-    try:
-        with open(json_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return []
-    out, now = [], time.time()
-    for entry in data:
-        for app in entry.get("apparitions", []):
-            ts = app.get("apparitionTimestampIfDifferentThanSubmission")
-            if ts and ts >= now and app.get("state") != STATE_UNPUBLISHED:
-                out.append(int(ts))
-    return out
+def _next_profile_slot(schedule_payload: list[dict], profile_name: str, occupancy: dict[int, int]) -> int | None:
+    profile = next((p for p in schedule_payload if p["name"] == profile_name), None)
+    if profile is None:
+        profile = schedule_payload[0]
+    for ts in profile["slots"]:
+        if occupancy.get(ts, 0) < profile["per_slot"]:
+            return ts
+    return None
+
+
+def repack_publication_dates(publications: list[dict], schedule: dict, now: int | None = None) -> None:
+    """Assign automatic PICKED dates in stored order without moving pinned/approved dates."""
+    payload = schedule_data(schedule, now=now)
+    if not payload:
+        return
+    default_profile = payload[0]["name"]
+    occupancy: dict[int, int] = {}
+    for pub in publications:
+        if pub.get("state") != PUBLICATION_STATE_PICKED or pub.get("scheduleIsManual"):
+            ts = effective_schedule_ts(pub)
+            if ts is not None:
+                occupancy[int(ts)] = occupancy.get(int(ts), 0) + 1
+
+    for pub in publications:
+        if pub.get("state") != PUBLICATION_STATE_PICKED or pub.get("scheduleIsManual"):
+            continue
+        profile = str(pub.get("scheduleProfile") or default_profile)
+        pub["scheduleProfile"] = profile
+        pub["scheduleIsManual"] = False
+        pub.pop("apparitionTimestampIfDifferentThanSubmission", None)
+        ts = _next_profile_slot(payload, profile, occupancy)
+        if ts is None:
+            continue
+        pub["apparitionTimestampIfDifferentThanSubmission"] = ts
+        occupancy[ts] = occupancy.get(ts, 0) + 1

@@ -1,14 +1,10 @@
 import json
-import os
-import shutil
-import subprocess
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
 
 from publicator import scheduling
-from publicator.webui.page import PAGE_TEMPLATE
 
 _TZ = "Europe/Paris"
 _PARIS = ZoneInfo(_TZ)
@@ -28,33 +24,6 @@ def _paris_tuesday_2000_epochs(count):
         d = (first + timedelta(days=7 * i)).date()
         out.append(int(datetime(d.year, d.month, d.day, 20, tzinfo=_PARIS).timestamp()))
     return out
-
-
-def _schedule_core_js():
-    """The live scheduling functions, sliced verbatim from the served page
-    between its marker comments."""
-    start = PAGE_TEMPLATE.index("// >>> scheduler core")
-    end = PAGE_TEMPLATE.index("// <<< scheduler core")
-    return PAGE_TEMPLATE[start:end]
-
-
-def _next_slot_for(schedules, existing_ts, profile_name, tz):
-    """Run the real client scheduler in Node under browser timezone `tz` and
-    return the epoch it would pre-fill the date picker with for `profile_name`.
-    LABELS is irrelevant to slot choice; an empty map keeps the harness honest."""
-    harness = (
-        f"const SCHEDULES = {json.dumps(schedules)};\n"
-        f"const EXISTING_TS = {json.dumps(existing_ts)};\n"
-        "const LABELS = {};\n"
-        "const queue = [];\n"
-        f"{_schedule_core_js()}\n"
-        f"console.log(nextSlotForProfile(profileByName({json.dumps(profile_name)})));\n"
-    )
-    out = subprocess.run(
-        ["node", "-e", harness], check=True, capture_output=True, text=True,
-        env={"TZ": tz, "PATH": os.environ["PATH"]},
-    )
-    return int(out.stdout.strip())
 
 
 def test_profiles_normalize_day_names_to_python_weekdays_and_default_tiers():
@@ -103,28 +72,24 @@ def test_invalid_profiles_are_rejected(bad, exc):
         scheduling.schedule_profiles(bad)
 
 
-def test_existing_ts_keeps_only_future_scheduled_entries(tmp_path):
-    jp = tmp_path / "publications.json"
-    future = int(datetime.now(_PARIS).timestamp()) + 86400
-    past = int(datetime.now(_PARIS).timestamp()) - 86400
-    jp.write_text(json.dumps([
-        {"apparitions": [{"state": "published_or_scheduled",
-                          "apparitionTimestampIfDifferentThanSubmission": future}]},
-        {"apparitions": [{"state": "published_or_scheduled",
-                          "apparitionTimestampIfDifferentThanSubmission": past}]},
-        {"apparitions": [{"state": "unpublished",
-                          "apparitionTimestampIfDifferentThanSubmission": future + 60}]},
-    ]))
-    assert scheduling.existing_ts(str(jp)) == [future]
-
-
-def test_existing_ts_tolerates_a_missing_file(tmp_path):
-    assert scheduling.existing_ts(str(tmp_path / "nope.json")) == []
-
-
 def test_resolve_ts_reads_a_naive_string_in_the_schedule_timezone():
     assert scheduling.resolve_ts({"schedule": "2026-10-15T20:00"}, _PARIS) == \
         int(datetime(2026, 10, 15, 20, tzinfo=_PARIS).timestamp())
+
+
+def test_repack_leaves_missing_suggestion_when_slots_are_exhausted(monkeypatch):
+    monkeypatch.setattr(scheduling, "SLOT_HORIZON_WEEKS", 1)
+    slot = int(datetime(2026, 1, 6, 20, tzinfo=ZoneInfo("UTC")).timestamp())
+    pubs = [
+        {"uuid": "frozen", "state": "SCHEDULED", "apparitionTimestampIfDifferentThanSubmission": slot},
+        {"uuid": "picked", "state": "PICKED", "scheduleProfile": "default", "scheduleIsManual": False},
+    ]
+
+    scheduling.repack_publication_dates(pubs, {"timezone": "UTC", "profiles": [
+        {"name": "default", "day": "tuesday", "hour": 20, "per_slot": 1},
+    ]}, now=slot - 3600)
+
+    assert "apparitionTimestampIfDifferentThanSubmission" not in pubs[1]
 
 
 def test_schedule_slots_stay_2000_paris_across_dst():
@@ -142,17 +107,8 @@ def test_schedule_slots_stay_2000_paris_across_dst():
     assert len(offsets) == 2, offsets
 
 
-def test_new_slot_packs_after_taken_slots_regardless_of_browser_tz(tmp_path):
-    """Regression: with 6 Tuesdays fully booked (Europe/Paris 20:00), a fresh
-    image must default to the 7th Tuesday — and it must do so no matter what
-    timezone the *browser* reports. `firefox --private-window` with resist-
-    fingerprinting spoofs Date to UTC, and the old wall-clock matching (getHours)
-    then failed to recognize the 18:00-UTC slots as taken, re-suggesting the very
-    next, already-full Tuesday. Slots are now server-generated absolute instants,
-    so occupancy is TZ-independent."""
-    if not shutil.which("node"):
-        pytest.skip("node required to exercise the client scheduler")
-
+def test_repack_packs_after_taken_slots_without_browser_clock(tmp_path, monkeypatch):
+    """Six full Tuesdays must reserve six slots; browser/host TZ cannot affect allocation."""
     weeks = _paris_tuesday_2000_epochs(7)
     taken, expected = weeks[:6], weeks[6]
 
@@ -160,29 +116,34 @@ def test_new_slot_packs_after_taken_slots_regardless_of_browser_tz(tmp_path):
     for i, ts in enumerate(taken):
         for slot in range(2):
             pubs.append({
-                "uuid": f"u{i}-{slot}", "description": "d",
+                "uuid": f"u{i}-{slot}", "state": "SCHEDULED", "description": "d",
                 "files": [{"basename": "img.png"}],
-                "apparitions": [{
-                    "platformName": "deviantart", "state": "published_or_scheduled",
-                    "urlElsePublicationName": "t",
-                    "apparitionTimestampIfDifferentThanSubmission": ts,
-                }],
+                "apparitionTimestampIfDifferentThanSubmission": ts,
             })
     pub_json = tmp_path / "publications.json"
     pub_json.write_text(json.dumps(pubs))
 
-    existing = scheduling.existing_ts(str(pub_json))
-    # Anchor slot generation just before the first Tuesday so its slot list starts
-    # exactly at weeks[0] — deterministic regardless of when the test runs.
-    schedules = scheduling.schedule_data(
-        {"timezone": _TZ, "profiles": [
-            {"name": "tuesday", "day": "tuesday", "hour": 20, "per_slot": 2},
-            {"name": "thursday", "day": "thursday", "hour": 20, "per_slot": 2}]},
-        now=weeks[0] - 3600)
-
     for tz in ("Europe/Paris", "UTC", "America/New_York"):
-        got = _next_slot_for(schedules, existing, "tuesday", tz)
-        assert got == expected, (
-            f"[browser TZ={tz}] picker defaulted to "
-            f"{datetime.fromtimestamp(got, _PARIS)}, expected "
-            f"{datetime.fromtimestamp(expected, _PARIS)} (first open Tuesday)")
+        monkeypatch.setenv("TZ", tz)
+        rows = json.loads(pub_json.read_text()) + [{"state": "PICKED", "scheduleProfile": "tuesday"}]
+        scheduling.repack_publication_dates(rows,
+            {"timezone": _TZ, "profiles": [
+                {"name": "tuesday", "day": "tuesday", "hour": 20, "per_slot": 2},
+                {"name": "thursday", "day": "thursday", "hour": 20, "per_slot": 2}]},
+            now=weeks[0] - 3600)
+        assert rows[-1]["apparitionTimestampIfDifferentThanSubmission"] == expected
+
+
+def test_repack_reserves_historical_submission_timestamp_without_override():
+    slot = int(datetime(2026, 1, 6, 20, tzinfo=ZoneInfo("UTC")).timestamp())
+    pubs = [
+        {"state": "APPEARED", "submissionTimestamp": slot, "apparitions": [
+            {"platformName": "deviantart", "state": "published_or_scheduled"},
+            {"platformName": "pixiv", "state": "published_or_scheduled"}]},
+        {"state": "PICKED", "submissionTimestamp": slot},
+    ]
+    scheduling.repack_publication_dates(pubs, {"timezone": "UTC", "profiles": [
+        {"name": "default", "day": "tuesday", "hour": 20, "per_slot": 1},
+    ]}, now=slot - 3600)
+    assert "apparitionTimestampIfDifferentThanSubmission" not in pubs[0]
+    assert pubs[1]["apparitionTimestampIfDifferentThanSubmission"] == slot + 7 * 86400

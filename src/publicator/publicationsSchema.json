@@ -5,11 +5,16 @@
     "$defs": {
         "Publication": {
             "type": "object",
-            "required": ["files", "submissionTimestamp", "description", "uuid"],
+            "required": ["files", "submissionTimestamp", "description", "title", "state", "uuid"],
             "properties": {
                 "uuid": { "type": "string", "minLength": 36, "maxLength": 36},
+                "state": { "type": "string", "enum": ["PICKED", "SCHEDULED", "DESCRIBED", "APPEARED"] },
+                "title": { "type": "string" },
                 "submissionTimestamp": { "type": "integer" },
                 "description": { "type": "string" },
+                "apparitionTimestampIfDifferentThanSubmission": { "type": "integer" },
+                "scheduleProfile": { "type": "string" },
+                "scheduleIsManual": { "type": "boolean" },
                 "files": {
                     "type": "array",
                     "items": { "$ref": "#/$defs/File" }
@@ -30,17 +35,23 @@
                     "type": "string",
                     "minLength": 128,
                     "maxLength": 128
+                },
+                "fileSha512sum": {
+                    "type": "string",
+                    "minLength": 128,
+                    "maxLength": 128
                 }
             }
         },
         "Apparition": {
             "type": "object",
-            "required": ["platformName", "urlElsePublicationName", "state"],
+            "required": ["platformName", "state"],
             "properties": {
-                "platformName": { "type": "string", "enum": ["deviantart", "pixiv"] },
+                "platformName": { "type": "string" },
                 "state": { "type": "string", "enum": ["unpublished", "published_or_scheduled"] },
-                "urlElsePublicationName": { "type": "string" },
-                "apparitionTimestampIfDifferentThanSubmission": { "type": "integer" },
+                "url": { "type": "string", "format": "uri", "pattern": "^[hH][tT][tT][pP][sS]?://" },
+                "urlElsePublicationName": false,
+                "apparitionTimestampIfDifferentThanSubmission": false,
                 "priceIfNotFree": { "type": "number", "minimum": 0 },
                 "tier": { "type": "string" },
                 "tiers": { "type": "array", "items": { "type": "string" } },

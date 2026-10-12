@@ -3,6 +3,7 @@ import json
 import re
 import tomllib
 from pathlib import Path
+from urllib.parse import urlparse
 
 from jsonschema import validate as _js_validate
 
@@ -56,13 +57,29 @@ def load_config(cwd="."):
     }
 
 
+def is_http_url(value: str) -> bool:
+    try:
+        parsed = urlparse(value)
+        return parsed.scheme in {"http", "https"} and bool(parsed.hostname)
+    except ValueError:
+        return False
+
+
 def validate_publications(data, config):
     """JSON-Schema validate, then enforce DA apparition tier/gallery values
     against config (the schema already forbids these fields on non-DA)."""
+    for p in data:
+        for a in p.get("apparitions", []):
+            if "urlElsePublicationName" in a:
+                raise ValueError(f"{p.get('uuid')}: obsolete urlElsePublicationName")
+            if "apparitionTimestampIfDifferentThanSubmission" in a:
+                raise ValueError(f"{p.get('uuid')}: obsolete apparitionTimestampIfDifferentThanSubmission")
     _js_validate(instance=data, schema=_SCHEMA)
     tiers, galleries = set(config.get("tiers", [])), set(config.get("galleries", []))
     for p in data:
         for a in p.get("apparitions", []):
+            if "url" in a and not is_http_url(a["url"]):
+                raise ValueError(f"{p.get('uuid')}: apparition url must be an HTTP(S) URL with a host")
             if a.get("platformName") != "deviantart":
                 continue
             selected_tiers = a.get("tiers", [])

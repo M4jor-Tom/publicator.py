@@ -100,14 +100,15 @@ def _pubs(**apparition):
     """One schema-valid publication; uuid is exactly 36 chars as the schema demands."""
     return [{
         "uuid": "00000000-0000-4000-8000-000000000001",
+        "state": "DESCRIBED",
+        "title": "t",
         "submissionTimestamp": 1700000000,
         "description": "d",
+        "apparitionTimestampIfDifferentThanSubmission": 1800000000,
         "files": [{"basename": "a.png", "sha512sum": "0" * 128}],
         "apparitions": [{
             "platformName": "deviantart",
             "state": "unpublished",
-            "urlElsePublicationName": "t",
-            "apparitionTimestampIfDifferentThanSubmission": 1800000000,
             **apparition,
         }],
     }]
@@ -118,6 +119,14 @@ def test_validate_accepts_configured_tier_and_gallery():
                           {"tiers": ["gold"], "galleries": ["Art"]})
     validate_publications(_pubs(tiers=["gold", "silver"], galleries=["Art"]),
                           {"tiers": ["gold", "silver"], "galleries": ["Art"]})
+
+
+def test_validate_rejects_obsolete_apparition_fields():
+    with pytest.raises(Exception, match="urlElsePublicationName"):
+        validate_publications(_pubs(urlElsePublicationName="old"), {"tiers": [], "galleries": []})
+    with pytest.raises(Exception, match="apparitionTimestampIfDifferentThanSubmission"):
+        validate_publications(_pubs(apparitionTimestampIfDifferentThanSubmission=1800000000),
+                              {"tiers": [], "galleries": []})
 
 
 def test_validate_rejects_unconfigured_member_of_tier_list():
@@ -134,3 +143,16 @@ def test_validate_rejects_tier_absent_from_config():
 def test_validate_rejects_gallery_absent_from_config():
     with pytest.raises(ValueError, match="gallery"):
         validate_publications(_pubs(galleries=["Art"]), {"tiers": [], "galleries": []})
+
+
+@pytest.mark.parametrize("url", ["", "A title", "javascript:alert(1)", "ftp://example.com/art",
+                                 "https:///art", "http://", "http://:80/art"])
+def test_validate_rejects_non_http_publication_urls(url):
+    with pytest.raises(Exception, match="url|URL|http"):
+        validate_publications(_pubs(url=url), {})
+
+
+@pytest.mark.parametrize("url", ["http://example.com/art/1", "https://example.com/art/1",
+                                 "HTTPS://example.com/art/1"])
+def test_validate_accepts_http_publication_urls(url):
+    validate_publications(_pubs(url=url), {})
