@@ -303,8 +303,11 @@ def select_publication_platforms(json_path: str, *, selected: bool,
                     if name == "deviantart":
                         profile = next((p for p in schedule_profiles(cfg.get("schedule", {}))
                                         if p["name"] == pub.get("scheduleProfile")), None)
-                        if profile and profile["default_tiers"]:
-                            app["tiers"] = list(profile["default_tiers"])
+                        if profile:
+                            if profile["default_tiers"]:
+                                app["tiers"] = list(profile["default_tiers"])
+                            if profile["default_price"] is not None:
+                                app["priceIfNotFree"] = profile["default_price"]
                     apps.append(app)
                     pub["state"] = PUBLICATION_STATE_DESCRIBED
                 elif not selected and app is not None:

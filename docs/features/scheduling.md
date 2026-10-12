@@ -4,7 +4,7 @@
 - **Run:** `nix run .#publish-next -- --data-dir DIR` (Schedule phase; weekly profiles are read-only)
 - **Code:** `src/publicator/scheduling.py` (`schedule_profiles`, `schedule_data`, `profile_slots`, `repack_publication_dates`, `resolve_ts`, `zone`), `src/publicator/store.py` (date edits/approval and repack mutation), `src/publicator/webui/server.py` (HTTP boundary), `src/publicator/webui/page.py` (native picker).
 - **Tests:** `tests/test_scheduling.py` (capacity, exhausted horizon, DST and historical occupancy), `tests/test_store.py` (manual pins, unpin/profile edits, frozen dates), `tests/test_server.py` (real HTTP repacks/approval).
-- **Config:** `[schedule] timezone` defaults to Europe/Paris; weekly `profiles` specify name, day, local hour, per_slot and optional DA default_tiers. Flat configuration remains one default profile. Profiles need distinct day/hour slots and valid configured tier names.
+- **Config:** `[schedule] timezone` defaults to Europe/Paris; weekly `profiles` specify name, day, local hour, per_slot and optional DA `default_tiers` / `default_price` (finite nonnegative number). Flat configuration remains one default profile. Profiles need distinct day/hour slots and valid configured tier names.
 - **Data:** Publication-level `apparitionTimestampIfDifferentThanSubmission`, `scheduleProfile`, `scheduleIsManual`; no platform is selected in Phase 2 and no second date field exists.
 - **Decisions:** All allocation/TZ conversion is Python-only. Explicit over-capacity dates stay chosen; off-cadence custom dates are never snapped to cadence.
 - **Verify:** `nix develop -c pytest tests/test_scheduling.py tests/test_store.py tests/test_server.py tests/test_page.py -q`
@@ -24,7 +24,7 @@ a custom picker edit pins the chosen instant.
 - Capacity applies to automatic allocation only. Explicit same-slot dates can exceed capacity and the UI reports this; off-cadence instants occupy no configured slot.
 - Exhausting the 52-week horizon leaves an automatic date absent, not silently overbooked. Approval is blocked until a date is chosen.
 - Explicit dates with no configured matching profile (including a removed preset) return to scheduling pinned as Custom. Manual edits preserve that profile absence/mismatch; only preset choice or “Use suggested date” assigns a valid profile. Returning without an override invents no date.
-- DA profile default_tiers initialize a later Phase 4 selection only; they are never instructions to choose a platform or overwrite historical options or profile-less Custom dates.
+- DA profile `default_tiers` and `default_price` initialize a new Phase 4 selection only (`tiers` and `priceIfNotFree`). Missing prices stay unset; an explicit zero is preserved. Defaults never choose a platform or overwrite an existing selection's options, and Custom dates with no matching profile receive neither default.
 
 ## Gotchas
 

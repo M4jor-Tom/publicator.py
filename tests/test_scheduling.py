@@ -31,7 +31,7 @@ def test_profiles_normalize_day_names_to_python_weekdays_and_default_tiers():
         {"name": "paid", "day": "wednesday", "hour": 20, "per_slot": 2,
          "default_tiers": ["gold", "silver"]}]}) == \
         [{"name": "paid", "day": 2, "hour": 20, "per_slot": 2,
-          "default_tiers": ["gold", "silver"]}]
+          "default_tiers": ["gold", "silver"], "default_price": None}]
 
 
 def test_schedule_data_carries_profile_tier_defaults():
@@ -39,6 +39,18 @@ def test_schedule_data_carries_profile_tier_defaults():
         {"name": "paid", "day": "wednesday", "default_tiers": ["gold", "silver"]}]},
         now=0)[0]
     assert profile["default_tiers"] == ["gold", "silver"]
+
+
+def test_schedule_data_carries_profile_price_default():
+    profile = scheduling.schedule_data({"timezone": "UTC", "profiles": [
+        {"name": "paid", "default_price": 1.0}]}, now=0)[0]
+    assert profile["default_price"] == 1.0
+
+
+@pytest.mark.parametrize("price", [-1, "1", True, False, float("inf"), float("-inf"), float("nan")])
+def test_schedule_profiles_reject_invalid_default_prices(price):
+    with pytest.raises(ValueError, match="default_price"):
+        scheduling.schedule_profiles({"default_price": price})
 
 
 def test_schedule_data_rejects_tier_defaults_missing_from_allow_list():
@@ -50,12 +62,14 @@ def test_schedule_data_rejects_tier_defaults_missing_from_allow_list():
 
 def test_flat_config_becomes_one_default_profile():
     assert scheduling.schedule_profiles({"day": "friday", "hour": 18, "per_slot": 1}) == \
-        [{"name": "default", "day": 4, "hour": 18, "per_slot": 1, "default_tiers": []}]
+        [{"name": "default", "day": 4, "hour": 18, "per_slot": 1,
+          "default_tiers": [], "default_price": None}]
 
 
 def test_empty_config_falls_back_to_tuesday_2000():
     assert scheduling.schedule_profiles({}) == \
-        [{"name": "default", "day": 1, "hour": 20, "per_slot": 2, "default_tiers": []}]
+        [{"name": "default", "day": 1, "hour": 20, "per_slot": 2,
+          "default_tiers": [], "default_price": None}]
 
 
 @pytest.mark.parametrize("bad,exc", [

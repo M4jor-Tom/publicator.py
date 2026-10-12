@@ -238,6 +238,38 @@ def test_marking_one_platform_success_does_not_complete_other_targets(tmp_path):
     assert store.load_publications(path)[0]["state"] == "APPEARED"
 
 
+@pytest.mark.parametrize("price", [0, 1.0])
+@pytest.mark.parametrize("named_profile", [False, True])
+def test_toml_defaults_apply_only_on_first_platform_selection(tmp_path, img, price, named_profile):
+    from publicator.config import load_config
+
+    profile = '[[schedule.profiles]]\nname = "paid"\n' if named_profile else '[schedule]\n'
+    (tmp_path / "publicator.toml").write_text(
+        '[deviantart]\ntiers = ["gold"]\n' + profile +
+        f'default_tiers = ["gold"]\ndefault_price = {price}\n')
+    cfg = load_config(tmp_path)
+    path = tmp_path / "publications.json"
+    uuid_ = store.pick_publication(img, str(path), cfg)
+    assert _rows(path)[0]["apparitions"] == []
+    store.repack_publications(str(path), cfg)
+    store.approve_publication_date(str(path), uuid_, cfg)
+    store.save_publication_metadata(str(path), uuid_, title="Saved", description="Saved", config=cfg)
+    store.approve_publication_metadata(str(path), uuid_, cfg)
+    assert _rows(path)[0]["apparitions"] == []
+
+    store.select_publication_platforms(str(path), selected=True, registered_platforms=["deviantart"],
+                                      uuid_=uuid_, platform="deviantart", config=cfg)
+    pub = _rows(path)[0]
+    assert "priceIfNotFree" not in pub
+    assert pub["apparitions"] == [{"platformName": "deviantart", "state": "unpublished",
+                                   "tiers": ["gold"], "priceIfNotFree": price}]
+
+    store.save_platform_options(str(path), uuid_, "deviantart", {"price": 7.5}, cfg)
+    store.select_publication_platforms(str(path), selected=True, registered_platforms=["deviantart"],
+                                      config=cfg)
+    assert store.load_publications(str(path))[0]["apparitions"][0]["priceIfNotFree"] == 7.5
+
+
 def test_options_save_does_not_silently_convert_singular_tier(tmp_path):
     uuid_ = "00000000-0000-4000-8000-000000000001"
     path = tmp_path / "publications.json"
@@ -302,8 +334,9 @@ def test_migrated_custom_date_survives_return_and_unrelated_repack(tmp_path, img
 
 
 @pytest.mark.parametrize('profile', [None, 'removed'])
-def test_manual_custom_date_edit_does_not_assign_profile_or_default_tiers(tmp_path, img, profile):
-    cfg = {'schedule': {'default_tiers': ['gold']}, 'tiers': ['gold'], 'galleries': []}
+def test_manual_custom_date_edit_does_not_assign_profile_or_platform_defaults(tmp_path, img, profile):
+    cfg = {'schedule': {'default_tiers': ['gold'], 'default_price': 1.0},
+           'tiers': ['gold'], 'galleries': []}
     path = tmp_path / 'publications.json'
     uuid_ = store.pick_publication(img, str(path), cfg)
     rows = _rows(path)
@@ -335,6 +368,7 @@ def test_manual_custom_date_edit_does_not_assign_profile_or_default_tiers(tmp_pa
     store.select_publication_platforms(str(path), selected=True, registered_platforms=['deviantart'],
                                       uuid_=uuid_, platform='deviantart', config=cfg)
     assert _rows(path)[0]['apparitions'][0]['tiers'] == ['gold']
+    assert _rows(path)[0]['apparitions'][0]['priceIfNotFree'] == 1.0
 
 
 @pytest.mark.parametrize('profile', [None, 'removed'])

@@ -27,7 +27,7 @@ def zone(schedule: dict) -> ZoneInfo:
 
 
 def schedule_profiles(schedule: dict) -> list[dict]:
-    """Validated cadence: [{name, day: <Python weekday, 0=Mon>, hour, per_slot, default_tiers}, ...].
+    """Validated cadence and DA defaults: name/day/hour/per_slot/default_tiers/default_price.
     Reads schedule['profiles']; a flat day/hour/per_slot config becomes one 'default'
     profile, an empty dict the built-in default. Only frequency='weekly' is
     implemented; profiles need distinct (day, hour). Internal to schedule_data —
@@ -50,13 +50,17 @@ def schedule_profiles(schedule: dict) -> list[dict]:
         default_tiers = p.get("default_tiers", [])
         if not isinstance(default_tiers, list) or not all(isinstance(t, str) for t in default_tiers):
             raise ValueError("schedule.default_tiers must be a list of tier names")
+        default_price = p.get("default_price")
+        if default_price is not None and (type(default_price) not in (int, float)
+                                         or not 0 <= default_price < float("inf")):
+            raise ValueError("schedule.default_price must be a finite nonnegative number")
         key = (WEEKDAY[day], hour)
         if key in seen:
             raise ValueError(f"schedule profiles collide on (day={day}, hour={hour})")
         seen.add(key)
         out.append({"name": str(p.get("name", "default")),
                     "day": WEEKDAY[day], "hour": hour, "per_slot": per_slot,
-                    "default_tiers": default_tiers})
+                    "default_tiers": default_tiers, "default_price": default_price})
     if not out:
         raise ValueError("schedule.profiles is empty")
     return out
@@ -81,7 +85,7 @@ def profile_slots(profile: dict, tz: ZoneInfo, start: int) -> list[int]:
 
 def schedule_data(schedule: dict, now: int | None = None,
                   allowed_tiers: list[str] | None = None) -> list[dict]:
-    """Client scheduling payload: each profile's upcoming slots and tier defaults.
+    """Client scheduling payload: each profile's upcoming slots and DA defaults.
     ALL weekday/hour/timezone math lives here (Python zoneinfo) so the browser
     never reads a clock. If supplied, `allowed_tiers` validates profile defaults."""
     tz = zone(schedule)
@@ -95,7 +99,7 @@ def schedule_data(schedule: dict, now: int | None = None,
                 raise ValueError(f"schedule profile {p['name']!r} has unconfigured default tiers: "
                                  f"{sorted(unknown)}")
     return [{"name": p["name"], "per_slot": p["per_slot"],
-             "default_tiers": p["default_tiers"],
+             "default_tiers": p["default_tiers"], "default_price": p["default_price"],
              "slots": profile_slots(p, tz, start)}
             for p in profiles]
 

@@ -28,7 +28,8 @@
 | `[schedule] day` | str | `"tuesday"` | weekday name, must be a key of `scheduling.WEEKDAY` | `scheduling.schedule_profiles` |
 | `[schedule] hour` | int | 20 | LOCAL hour in `timezone`, not UTC | `scheduling.schedule_profiles` |
 | `[schedule] per_slot` | int | 2 | must be `>= 1` | `scheduling.schedule_profiles` |
-| `[[schedule.profiles]]` | array of tables | absent | `{name, frequency, day, hour, per_slot, default_tiers?}` with distinct `(day, hour)`; `default_tiers` names configured tiers initializing later DA selections; when present the flat keys are ignored except `timezone`; `[]` raises `ValueError` | `scheduling.schedule_profiles`, `schedule_data` |
+| `[schedule] default_price` | number | unset | flat-profile price default; finite and `>= 0`, applied like `default_tiers` when first selecting DA in Phase 4 | `scheduling.schedule_profiles`, `store.select_publication_platforms` |
+| `[[schedule.profiles]]` | array of tables | absent | `{name, frequency, day, hour, per_slot, default_tiers?, default_price?}` with distinct `(day, hour)`; `default_tiers` names configured tiers and `default_price` is a finite nonnegative number, initializing new Phase 4 DA selections only; when present the flat keys are ignored except `timezone`; `[]` raises `ValueError` | `scheduling.schedule_profiles`, `schedule_data` |
 | `[prompts] repo` | str | required | git repo path relative to data dir | `_load_prompts`, `prompts.from_config` |
 | `[prompts] filename` | regex str | required | needs a `(?P<version>...)` group, optional `(?P<lineage>...)`; compiled into the returned key `pattern` | `_load_prompts`, `prompts.from_config` |
 | `[prompts] version_hash` | str | required | must be in `hashlib.algorithms_available` | `_load_prompts`, `prompts.PromptArchive` |
