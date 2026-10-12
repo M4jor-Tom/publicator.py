@@ -1,205 +1,92 @@
-import json
-import os
-import shutil
-import subprocess
-
-import pytest
+import re
 
 from publicator.scheduling import schedule_data
-from publicator.webui.page import PAGE_TEMPLATE, render_page
-
-PENDING = [{"uuid": "00000000-0000-4000-8000-000000000001", "path": "/t/a.png",
-            "title": "Tickler", "description": "d", "scheduleTs": 1800000000,
-            "price": None, "tiers": [], "galleries": []}]
+from publicator.webui.page import render_page
 
 
 def _render(**overrides):
-    kwargs = dict(thumb_map={}, candidates=[], pending=[], existing_ts=[],
-                  timeline=[], schedules=schedule_data({}), config={},
-                  ai_model="m", openrouter_model="o")
+    kwargs = dict(thumb_map={}, candidates=[], publications=[], timeline=[],
+                  schedules=schedule_data({}), config={}, ai_model="m", openrouter_model="o",
+                  platforms={"deviantart": "DeviantArt"})
     kwargs.update(overrides)
     return render_page(**kwargs)
 
 
-def _ai_defer_core_js():
-    start = PAGE_TEMPLATE.index("// >>> AI provider fallback core")
-    end = PAGE_TEMPLATE.index("// <<< AI provider fallback core")
-    return PAGE_TEMPLATE[start:end]
+def publication(state="SCHEDULED", **fields):
+    return {"uuid": "00000000-0000-4000-8000-000000000001", "state": state,
+            "path": "/t/a.png", "title": "Manual", "description": "draft",
+            "apparitionTimestampIfDifferentThanSubmission": 1800000000,
+            "apparitions": [], **fields}
 
 
-def test_defer_requires_both_hosted_failures_and_no_local_fit():
-    if not shutil.which("node"):
-        pytest.skip("node is not installed")
-    harness = _ai_defer_core_js() + """
-      const failed = new Set();
-      const first = aiFailureCanDefer(failed, "openrouter", true, false);
-      const second = aiFailureCanDefer(failed, "claude", true, false);
-      const fitting = aiFailureCanDefer(new Set(), "claude", false, false);
-      const pending = aiFailureCanDefer(new Set(["claude", "openrouter"]), "claude", true, true);
-      console.log(JSON.stringify([first, second, fitting, pending]));
-    """
-    result = subprocess.run(["node", "-e", harness], check=True, capture_output=True,
-                            text=True, env=os.environ.copy())
-    assert json.loads(result.stdout) == [False, True, False, False]
+def test_four_completed_phase_counts_and_native_inputs():
+    page = _render(candidates=["/t/c.png"], publications=[publication("PICKED"),
+                   publication(), publication("DESCRIBED"), publication("APPEARED")])
+    for phase, count in [("pick", 1), ("schedule", 1), ("describe", 1), ("publish", 2)]:
+        assert f'id="tab-{phase}"' in page and f'id="{phase}-tab"' in page
+        assert f'{phase.capitalize()} ({count})' in page
+    assert 'type="datetime-local"' in page and 'data-field="title"' in page
+    assert 'new Date(' not in page and 'const queue' not in page
 
 
-def test_page_renders_the_defer_action_hidden_until_provider_failure():
-    page = _render(candidates=["/t/a.png"])
-    assert '<button class="btn-ai-later" hidden' in page
-    assert "Mark for later" in page
+def test_candidate_has_pick_prompt_view_delete_but_no_metadata():
+    page = _render(candidates=["/t/c.png"], thumb_map={"/t/c.png": "beef.png"},
+                   publications=[publication()], prompt_html={"/t/c.png": "<pre>candidate prompt</pre>",
+                                                              "/t/a.png": "<pre>not on draft</pre>"})
+    candidate = re.search(r'<article class="card candidate".*?</article>', page, re.S).group()
+    assert 'data-action="pick"' in candidate and 'data-action="delete"' in candidate
+    assert '/original?path=' in candidate and 'candidate prompt' in candidate
+    assert 'data-field=' not in candidate and 'not on draft' not in page
+    assert 'src="/thumbs/beef.png"' in candidate
 
 
-def test_page_offers_both_models():
-    page = _render(ai_model="claude-cli-opus",
-                   openrouter_model="openrouter/google/gemini-2.0-flash-exp:free")
-    assert 'id="ai-model"' in page
-    assert "claude-cli-opus" in page
-    assert "openrouter/google/gemini-2.0-flash-exp:free" in page
-    assert "__AI_MODEL__" not in page and "__OPENROUTER_MODEL__" not in page
+def test_drafts_escaped_and_markers_visible():
+    page = _render(publications=[publication(title='</script><script>alert(1)</script>',
+                   description='[[PUBLICATOR:TODO_GENERATE]]')])
+    assert '</script><script>alert(1)</script>' not in page
+    assert '&lt;/script&gt;' in page and 'AI metadata pending' in page
+    assert 'beforeunload' in page and 'await flushDrafts()' in page
+    assert '.textContent' in page and 'innerHTML' not in page
 
 
-def test_page_labels_persisted_ai_markers_without_showing_the_sentinel_as_title():
-    from publicator.apps.generate_meta import TODO_GENERATE
+def test_platform_table_accessible_locked_success_and_options():
+    page = _render(publications=[publication('APPEARED', apparitions=[{
+        'platformName': 'deviantart', 'state': 'published_or_scheduled'}]),
+        publication('DESCRIBED', uuid='00000000-0000-4000-8000-000000000002', apparitions=[{
+        'platformName': 'deviantart', 'state': 'unpublished', 'priceIfNotFree': 4,
+        'tiers': ['gold'], 'galleries': ['Art']}])], config={'tiers': ['gold'], 'galleries': ['Art']})
+    assert '<table' in page and 'scope="col"' in page and 'scope="row"' in page
+    assert 'Published / scheduled' in page and 'checked disabled' in page
+    assert 'id="select-all"' in page and '.indeterminate' in page
+    assert 'aria-label="Manual on DeviantArt"' in page
+    assert 'value="4"' in page and 'value="gold" checked' in page and 'value="Art" checked' in page
+    assert 'Publish selected' in page and 'Retry' in page
 
-    pending = [{**PENDING[0], "title": TODO_GENERATE, "description": TODO_GENERATE}]
-    page = _render(pending=pending)
-    assert '<div class="ai-pending">AI metadata pending</div>' in page
-    assert 'class="name"><span class="badge">queued</span> a.png' in page
-    assert "__TODO_GENERATE__" not in page
 
-
-def test_page_renders_one_openrouter_choice_and_all_local_models():
+def test_ai_catalog_and_requested_fields_are_in_describe_only():
     from publicator.llm_meta import VISION_MODELS
-    statuses = {
-        VISION_MODELS[0]["ollama_name"]: {"fit": True, "installed": False,
-                                                  "available": True, "reason": ""},
-        VISION_MODELS[1]["ollama_name"]: {"fit": False, "installed": False,
-                                                  "available": False, "reason": '<Too Tight & limited>'},
-    }
-    page = _render(vision_models=VISION_MODELS, local_model_statuses=statuses,
-                   openrouter_model=VISION_MODELS[1]["openrouter_name"])
+    page = _render(publications=[publication()], vision_models=VISION_MODELS,
+        ai_model='claude-custom', openrouter_model=VISION_MODELS[0]['openrouter_name'],
+        local_model_statuses={VISION_MODELS[0]['ollama_name']: {
+            'fit': True, 'available': True, 'installed': False}})
     assert page.count('data-source="openrouter"') == 1
     assert page.count('data-source="local"') == len(VISION_MODELS)
-    assert f'value="openrouter:{VISION_MODELS[1]["openrouter_name"]}" selected' in page
-    assert 'data-model=' in page
-    assert 'Install on use' in page
-    assert 'disabled title="&lt;Too Tight &amp; limited&gt;"' in page
-    assert "<Too Tight & limited>" not in page
+    assert 'Install on use' in page and 'claude-custom' in page
+    assert 'data-generate="title"' in page and 'data-generate="description"' in page
+    assert 'Mark for later' not in page
 
 
-def test_page_renders_config_tiers_galleries_as_checkboxes():
-    page = _render(candidates=["/t/a.png"],
-                   config={"tiers": ["gold"], "galleries": ["Art"]})
-    assert '<input type="checkbox" class="f-tier" value="gold">' in page
-    assert '<select class="f-tier"' not in page
-    assert 'class="f-gallery"' in page and 'value="Art"' in page
-
-
-def test_schedule_preset_selects_its_default_tiers():
-    if not shutil.which("node"):
-        pytest.skip("node is not installed")
-    core = PAGE_TEMPLATE[PAGE_TEMPLATE.index("// >>> scheduler core"):
-                         PAGE_TEMPLATE.index("// <<< scheduler core")]
-    start = PAGE_TEMPLATE.index("function setTierChecks(")
-    end = PAGE_TEMPLATE.index("\nfunction showTab", start)
-    setup = """
-      const SCHEDULES = [
-        {name: "free", per_slot: 2, slots: [1000], default_tiers: []},
-        {name: "paid", per_slot: 2, slots: [2000], default_tiers: ["gold", "silver"]}
-      ];
-      const EXISTING_TS = [], LABELS = {2000: "2026-01-01T20:00"}, queue = [];
-    """
-    harness = setup + core + PAGE_TEMPLATE[start:end] + """
-      const boxes = [{value: "gold", checked: false},
-                     {value: "silver", checked: false},
-                     {value: "bronze", checked: true}];
-      const schedule = {value: ""};
-      const form = {querySelectorAll: () => boxes};
-      const card = {querySelector: s => s === ".form" ? form : schedule};
-      const document = {getElementById: () => card};
-      applyPreset({value: "paid"}, "card");
-      console.log(JSON.stringify(boxes.filter(b => b.checked).map(b => b.value)));
-    """
-    result = subprocess.run(["node", "-e", harness], check=True, capture_output=True,
-                            text=True, env=os.environ.copy())
-    assert json.loads(result.stdout) == ["gold", "silver"]
-
-
-def test_page_renders_schedule_presets():
-    config = {"schedule": {"profiles": [
-        {"name": "free", "day": "tuesday", "hour": 20, "per_slot": 2},
-        {"name": "paid", "day": "friday", "hour": 20, "per_slot": 1}]}}
-    page = _render(candidates=["/t/a.png"], config=config,
-                   schedules=schedule_data(config["schedule"]))
-    assert 'class="f-preset"' in page
-    assert '<option value="free">free</option>' in page
-    assert '<option value="paid">paid</option>' in page
-    assert '"name": "free"' in page and '"name": "paid"' in page
-    assert '"slots"' in page
-    assert "__SCHEDULES__" not in page and "__EXISTING_TS__" not in page
-    assert "__LABELS__" not in page
-
-
-def test_pending_card_renders_with_its_schedule_and_uuid():
-    page = _render(pending=PENDING, thumb_map={"/t/a.png": "beef.png"})
-    assert "Tickler" in page
-    assert '00000000-0000-4000-8000-000000000001' in page   # PENDING payload injected
-    assert "__PENDING__" not in page and "__CARDS__" not in page
-
-
-def test_cards_point_at_the_shared_thumbnail_cache():
-    page = _render(candidates=["/t/a.png"], thumb_map={"/t/a.png": "beef.png"})
-    assert 'src="/thumbs/beef.png"' in page
-
-
-def test_page_has_a_gallery_and_a_calendar_tab():
-    page = _render()
-    assert 'id="tab-gallery"' in page and 'id="tab-calendar"' in page
-    assert 'id="gallery-tab"' in page and 'id="calendar-tab"' in page
-    assert "__CALENDAR__" not in page
-
-
-def test_calendar_tab_renders_the_timeline():
-    rows = [{"uuid": "u1", "ts": 1767726000, "title": "Haunted Tower",
-             "url": "https://da/art/Haunted-Tower", "state": "published_or_scheduled",
-             "basename": "art.webp", "sha": "ab" * 64}]
-    page = _render(timeline=rows)
-    assert "January 2026" in page
-    assert 'href="https://da/art/Haunted-Tower"' in page
-
-
-def test_calendar_links_a_queued_entry_to_its_gallery_card():
-    rows = [{"uuid": PENDING[0]["uuid"], "ts": 1800000000, "title": "Tickler",
-             "url": None, "state": "unpublished",
-             "basename": "a.png", "sha": "cd" * 64}]
-    page = _render(pending=PENDING, timeline=rows, thumb_map={"/t/a.png": "beef.png"})
-    assert 'href="#pending_0"' in page      # the card id render_page gave that entry
-
-
-def test_render_page_injects_the_prompt_block_into_a_candidate_card():
-    from publicator.webui.page import render_page
-    page = render_page(
-        thumb_map={"picked/a.webp": "aa.webp"}, candidates=["picked/a.webp"],
-        pending=[], existing_ts=[], timeline=[], schedules=[],
-        config={}, ai_model="m", openrouter_model="",
-        prompt_html={"picked/a.webp": '<details class="prompt exact">X</details>'})
-    assert '<details class="prompt exact">X</details>' in page
-
-
-def test_render_page_without_prompt_html_is_unchanged():
-    from publicator.webui.page import render_page
-    kwargs = dict(
-        thumb_map={"picked/a.webp": "aa.webp"}, candidates=["picked/a.webp"],
-        pending=[], existing_ts=[], timeline=[], schedules=[],
-        config={}, ai_model="m", openrouter_model="")
-    assert render_page(**kwargs) == render_page(**kwargs, prompt_html={})
+def test_schedule_warnings_and_no_slot_approval_block():
+    page = _render(publications=[publication('PICKED', apparitionTimestampIfDifferentThanSubmission=None)])
+    assert 'No slot available' in page and 'data-action="approve-date" disabled' in page
+    assert 'Use suggested date' in page
 
 
 def test_render_page_renders_the_search_box_and_skip_banner():
     from publicator.webui.page import render_page
     page = render_page(
-        thumb_map={}, candidates=[], pending=[], existing_ts=[], timeline=[],
-        schedules=[], config={}, ai_model="m", openrouter_model="",
+        thumb_map={}, candidates=[], publications=[], timeline=[],
+        schedules=[], config={}, ai_model="m", openrouter_model="", platforms={},
         query="tentacles", skipped=3)
     assert "__PROMPTSEARCH__" not in page, "placeholder left in PAGE_TEMPLATE"
     assert 'name="prompt"' in page and 'value="tentacles"' in page
@@ -209,8 +96,8 @@ def test_render_page_renders_the_search_box_and_skip_banner():
 def test_skip_banner_uses_singular_wording_for_one():
     from publicator.webui.page import render_page
     page = render_page(
-        thumb_map={}, candidates=[], pending=[], existing_ts=[], timeline=[],
-        schedules=[], config={}, ai_model="m", openrouter_model="",
+        thumb_map={}, candidates=[], publications=[], timeline=[],
+        schedules=[], config={}, ai_model="m", openrouter_model="", platforms={},
         skipped=1)
     assert "1 candidate skipped" in page and "candidates" not in page
 
@@ -219,8 +106,8 @@ def test_render_page_separates_exact_and_hinted_lineage_results():
     from publicator.webui.page import render_page
     page = render_page(
         thumb_map={"a.webp": "a", "b.webp": "b"}, candidates=["a.webp"],
-        maybe_candidates=["b.webp"], pending=[], existing_ts=[], timeline=[],
-        schedules=[], config={}, ai_model="m", openrouter_model="")
+        maybe_candidates=["b.webp"], publications=[], timeline=[],
+        schedules=[], config={}, ai_model="m", openrouter_model="", platforms={})
     assert "possibly from this prompt" in page
     # the two groups must not be merged into one grid
     assert page.index("a.webp") < page.index("possibly from this prompt")
@@ -274,3 +161,19 @@ def test_render_page_omits_the_exact_label_when_there_are_no_exact_results():
     glitch, not a deliberate zero-results signal."""
     page = _render(candidates=[], lineage_active=True)
     assert "images from this prompt" not in page
+
+
+def test_native_controls_disable_firefox_stale_form_restoration():
+    from html.parser import HTMLParser
+    class Controls(HTMLParser):
+        def handle_starttag(self, tag, attrs):
+            if tag in ('input', 'select', 'textarea'):
+                assert dict(attrs).get('autocomplete') == 'off'
+    Controls().feed(_render(candidates=['a.png'], publications=[publication('PICKED'), publication(),
+        publication('DESCRIBED', apparitions=[{'platformName': 'deviantart', 'state': 'unpublished'}])]))
+
+
+def test_removed_schedule_preset_is_displayed_as_custom():
+    page = _render(publications=[publication('PICKED', scheduleProfile='removed', scheduleIsManual=True)])
+    assert '<option value="" selected disabled>Custom / unassigned</option>' in page
+    assert 'Manual pin' in page

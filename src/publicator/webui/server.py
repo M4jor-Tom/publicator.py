@@ -1,15 +1,20 @@
 """The human-review gallery: a ThreadingHTTPServer on 127.0.0.1 plus its
-JSON endpoints (/delete, /ai, /stage, /update, /publish)."""
+durable phase endpoints."""
 
 import json
 import logging
 import os
 import subprocess
 import urllib.parse
+import threading
+from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from jsonschema import ValidationError
+
 from publicator.config import validate_publications
-from publicator.deviantart import publish_batch
+from publicator import platforms, store
+from publicator.platforms import publish_selected
 from publicator.images import (
     THUMB_CACHE,
     collect_images,
@@ -22,13 +27,12 @@ from publicator.images import (
     thumb_name,
 )
 from publicator.llm_meta import (
-    DEFAULT_MODEL, ProviderUnavailable, TODO_GENERATE, VISION_MODELS,
+    DEFAULT_MODEL, TODO_GENERATE, VISION_MODELS,
     generate_metadata, local_model_status,
 )
 from publicator.prompts import Exact, Nearest
 from publicator.prompts import from_config as prompt_archive_from_config
-from publicator.scheduling import existing_ts as compute_existing_ts, schedule_data, zone
-from publicator.store import apply_update, atomic_write_json, write_publications
+from publicator.scheduling import schedule_data, zone
 from publicator.webui.calendar_view import timeline
 from publicator.webui.page import render_page
 from publicator.webui.prompt_view import render_prompt
@@ -51,9 +55,12 @@ class GalleryHandler(BaseHTTPRequestHandler):
     thumb_map: dict[str, str] = {}       # art path -> cache name (gallery cards)
     thumb_src: dict[str, str] = {}       # cache name -> art path (what /thumbs may serve)
     candidate_paths: list[str] = []      # new picks from picked/, add-able
-    pending: list[dict] = []             # already-queued entries from publications.json
-    timeline: list[dict] = []            # every DA apparition, for the calendar tab
-    existing_ts: list[int] = []
+    data_dir = ""
+    rendered_candidates: set[str] = set()
+    ai_busy: set[str] = set()
+    operation_lock = threading.RLock()
+    publish_lock = threading.Lock()
+    timeline: list[dict] = []            # every stored apparition, for the calendar tab
     ai_model = DEFAULT_MODEL
     openrouter_model = ""
     ai_timeout = 300
@@ -61,7 +68,6 @@ class GalleryHandler(BaseHTTPRequestHandler):
     local_model_statuses: dict[str, dict] = {}
     json_path = "publications.json"
     config: dict = {}
-    schedules: list = []
     archive = None                       # PromptArchive | None; None = feature off
     publicable_dirs: list[str] = []      # walked in full when a filter is active
 
@@ -75,8 +81,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
             return {}
         tz = zone(self.config.get("schedule", {}))
         wanted = dict.fromkeys(
-            list(paths) + [e["path"] for e in self.pending]
-            + [r["path"] for r in self.timeline if r.get("path")])
+            list(paths) + [r["path"] for r in self.timeline if r.get("path")])
         return {p: block for p in wanted
                 if (block := render_prompt(self.archive.resolve_path(p),
                                            near=os.path.dirname(p), tz=tz))}
@@ -96,8 +101,11 @@ class GalleryHandler(BaseHTTPRequestHandler):
         if self.archive is None:
             return [], [], 0, False
         exact, maybe, skipped = [], [], 0
+        referenced = self._referenced_paths()
         for d in self.publicable_dirs:
             for path in collect_images(d):
+                if os.path.realpath(path) in referenced:
+                    continue
                 match = self.archive.resolve_path(path)
                 if isinstance(match, Nearest):
                     # A Nearest shown under "possibly from this prompt" is not
@@ -140,16 +148,49 @@ class GalleryHandler(BaseHTTPRequestHandler):
                 self.__class__.thumb_map[p] = name
                 self.__class__.thumb_src[name] = p
 
+    def _publications(self) -> list[dict]:
+        data = store.load_publications(self.json_path)
+        validate_publications(data, self.config)
+        return data
+
+    def _publication(self, uuid_: str) -> dict:
+        if not isinstance(uuid_, str) or not uuid_:
+            raise ValueError("uuid required")
+        return store._find(self._publications(), uuid_)
+
+    def _referenced_paths(self) -> set[str]:
+        # A referenced file remains protected even if its bytes no longer match its saved hash.
+        index = index_by_basename(self.data_dir)
+        return {os.path.realpath(index[f['basename']]) for pub in self._publications()
+                for f in pub.get('files', []) + pub.get('previewFilesIfNotFree', [])
+                if f.get('basename') in index}
+
+    def _candidates(self) -> list[str]:
+        hashes = load_publicated_hashes(self.json_path)
+        referenced = self._referenced_paths()
+        return [p for p in dict.fromkeys(self.candidate_paths + list(self.rendered_candidates))
+                if os.path.realpath(p) not in referenced and os.path.isfile(p) and compute_sha512(p) not in hashes]
+
     def _build_page(self, needle: str = "", lineage: str = "") -> str:
-        candidates, maybe, skipped, truncated = self.candidate_paths, [], 0, False
+        publications = self._publications()
+        index = index_by_basename(self.data_dir)
+        for pub in publications:
+            pub["path"] = next((index[f["basename"]] for f in pub.get("files", [])
+                                if f.get("basename") in index), "")
+        self.timeline = timeline(self.json_path)
+        paths = self._candidates()
+        candidates, maybe, skipped, truncated = paths, [], 0, False
         if needle or lineage:
             candidates, maybe, skipped, truncated = self.search(needle, lineage)
-            self._register_thumbs(candidates + maybe)
+        self.rendered_candidates.update(candidates + maybe)
+        self._register_thumbs(candidates + maybe + [p["path"] for p in publications if p["path"]])
+        _, calendar_thumbs = thumb_maps(self.data_dir, [], self.timeline)
+        self.thumb_src.update(calendar_thumbs)
         return render_page(
-            thumb_map=self.thumb_map, candidates=candidates,
-            maybe_candidates=maybe, pending=self.pending,
-            existing_ts=self.existing_ts, timeline=self.timeline,
-            schedules=self.schedules, config=self.config,
+            thumb_map=self.thumb_map, candidates=candidates, maybe_candidates=maybe,
+            publications=publications, timeline=self.timeline,
+            schedules=schedule_data(self.config.get("schedule", {}), allowed_tiers=self.config.get("tiers", [])),
+            config=self.config, platforms={k: p.label for k, p in platforms.PLATFORMS.items()},
             ai_model=self.ai_model, openrouter_model=self.openrouter_model,
             prompt_html=self._prompt_html(candidates + maybe),
             query=needle, skipped=skipped, truncated=truncated,
@@ -159,7 +200,17 @@ class GalleryHandler(BaseHTTPRequestHandler):
 
     def _json_body(self) -> dict:
         length = int(self.headers.get("Content-length", 0))
-        return json.loads(self.rfile.read(length) or b"{}")
+        if not 0 <= length <= 1_000_000:
+            raise ValueError("request body too large")
+        data = json.loads(self.rfile.read(length) or b"{}")
+        if not isinstance(data, dict):
+            raise ValueError("JSON object required")
+        return data
+
+    @staticmethod
+    def _fields(data: dict, allowed: set[str]) -> None:
+        if set(data) - allowed:
+            raise ValueError("fields not allowed: " + ", ".join(sorted(set(data) - allowed)))
 
     def _send(self, code: int, obj: dict) -> None:
         body = json.dumps(obj).encode("utf-8")
@@ -183,9 +234,13 @@ class GalleryHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path in ("/", "/index.html"):
             q = urllib.parse.parse_qs(parsed.query)
-            page = self._build_page(
-                needle=q.get("prompt", [""])[0],
-                lineage=q.get("lineage", [""])[0]).encode("utf-8")
+            try:
+                page = self._build_page(
+                    needle=q.get("prompt", [""])[0],
+                    lineage=q.get("lineage", [""])[0]).encode("utf-8")
+            except Exception as exc:
+                log.exception("Cannot render publications")
+                self._send(500, {"error": str(exc)}); return
             self.send_response(200)
             self.send_header("Content-type", "text/html; charset=utf-8")
             self.send_header("Content-length", str(len(page)))
@@ -215,141 +270,204 @@ class GalleryHandler(BaseHTTPRequestHandler):
         else:
             self.send_response(404); self.end_headers()
 
+    def _ai(self, data: dict) -> None:
+        self._fields(data, {"uuid", "source", "model", "fields"})
+        pub = self._publication(data.get("uuid"))
+        if pub["state"] != "SCHEDULED":
+            raise ValueError("AI generation requires SCHEDULED")
+        fields = data.get("fields")
+        if not isinstance(fields, list) or not fields or any(f not in ("title", "description") for f in fields):
+            raise ValueError("requested metadata fields required")
+        source, posted_model = data.get("source"), data.get("model")
+        model = None
+        if source == "claude":
+            if posted_model is not None:
+                raise ValueError("Claude does not take a model object")
+        elif source in ("local", "openrouter"):
+            model = next((m for m in VISION_MODELS if m == posted_model), None)
+            if model is None:
+                raise ValueError("model object not allowed")
+            if source == "local":
+                status = self.local_model_statuses.get(model["ollama_name"], {})
+                if not status.get("fit") or not status.get("available"):
+                    raise ValueError(status.get("reason") or "Local model unavailable")
+
+        else:
+            raise ValueError("source not allowed")
+        index = index_by_basename(self.data_dir)
+        path = next((index[f["basename"]] for f in pub.get("files", [])
+                     if f.get("basename") in index), "")
+        if not path or not os.path.isfile(path):
+            raise ValueError("stored artwork not found")
+        with self.operation_lock:
+            if pub["uuid"] in self.ai_busy:
+                self._send(409, {"error": "metadata generation already running"}); return
+            if self._publication(pub["uuid"])["state"] != "SCHEDULED":
+                raise ValueError("AI generation requires SCHEDULED")
+            self.ai_busy.add(pub["uuid"])
+        try:
+            image = thumb_for_ai(path, self.cache_dir, self.thumb_map.get(path))
+            error = None
+            error_status = 400
+            try:
+                title, description = generate_metadata(
+                    image, model, source=source, timeout=self.ai_timeout,
+                    install_missing=(source == "local"),
+                    **({"claude_model": self.ai_model} if source == "claude" else {}))
+                if any(not isinstance(v, str) or not v.strip() for v in (title, description)):
+                    raise RuntimeError("invalid generated metadata")
+            except Exception as exc:
+                title = description = TODO_GENERATE
+                error = str(exc)
+                if not isinstance(exc, (RuntimeError, OSError)):
+                    log.exception("Unexpected generation error")
+                    error_status = 500
+            # Provider work has no mutation lock. Merge only requested fields into fresh data.
+            store.save_publication_metadata(self.json_path, pub["uuid"], config=self.config,
+                **{k: v for k, v in (("title", title), ("description", description)) if k in fields})
+            saved = self._publication(pub["uuid"])
+            result = {"saved": True, "title": saved["title"], "description": saved["description"]}
+            if error is not None:
+                result["error"] = error
+            self._send(error_status if error is not None else 200, result)
+        finally:
+            with self.operation_lock:
+                self.ai_busy.discard(pub["uuid"])
+
+    def _publish(self, data: dict) -> None:
+        self._fields(data, {"uuid"})
+        if not self.publish_lock.acquire(blocking=False):
+            self._send(409, {"error": "publication batch already running"}); return
+        try:
+            publications = self._publications()
+            if "uuid" in data:
+                pub = self._publication(data["uuid"])
+                if pub["state"] not in ("DESCRIBED", "APPEARED"):
+                    raise ValueError("publication is not metadata-approved")
+                publications = [pub]
+            registered = list(platforms.PLATFORMS)
+            targets = [p for p in publications if p["state"] == "DESCRIBED" and
+                       any(a["state"] == "unpublished" and a["platformName"] in registered
+                           for a in p.get("apparitions", []))]
+            for pub in targets:
+                if any(not pub.get(k, "").strip() or TODO_GENERATE in pub[k] for k in ("title", "description")):
+                    raise ValueError("AI metadata incomplete")
+                for app in pub.get("apparitions", []):
+                    if app["state"] == "unpublished" and app["platformName"] in registered:
+                        if app["platformName"] == "deviantart" and len(pub["title"]) > 50:
+                            raise ValueError("DeviantArt title must be at most 50 characters")
+            published, failed, error = publish_selected(
+                self.json_path, self.data_dir, uuids=[p["uuid"] for p in targets],
+                platform_names=registered, config=self.config)
+            remaining = [{"uuid": p["uuid"], "platform": a["platformName"]}
+                         for p in self._publications() if p["uuid"] in {t["uuid"] for t in targets}
+                         for a in p.get("apparitions", [])
+                         if a["state"] == "unpublished" and a["platformName"] in registered]
+            self._send(200, {"published": published, "failed": failed,
+                             "unattempted": max(0, len(remaining) - failed),
+                             "remaining": remaining, "error": error})
+        finally:
+            self.publish_lock.release()
+
+    def _mutate(self, data: dict) -> dict:
+        endpoint = self.path
+        if endpoint in ("/pick", "/delete"):
+            self._fields(data, {"path"})
+            path = data.get("path")
+            if path not in self._candidates():
+                # Repeat picking is idempotent, but deletion of referenced art is forbidden.
+                if endpoint != "/pick" or path not in self.candidate_paths + list(self.rendered_candidates):
+                    raise ValueError("unpicked candidate path required")
+            if endpoint == "/pick":
+                uuid_ = store.pick_publication(path, self.json_path, self.config)
+                store.repack_publications(self.json_path, self.config)
+                return {"uuid": uuid_, "saved": True}
+            os.remove(path)
+            self.candidate_paths[:] = [p for p in self.candidate_paths if p != path]
+            self.rendered_candidates.discard(path)
+            name = self.thumb_map.pop(path, "")
+            self.thumb_src.pop(name, None)
+            return {"ok": True}
+        if endpoint in ("/selection", "/selection/all"):
+            self._fields(data, {"selected"} if endpoint.endswith("/all") else {"uuid", "platform", "selected"})
+            if endpoint == "/selection":
+                self._publication(data.get("uuid"))
+                if not isinstance(data.get("platform"), str):
+                    raise ValueError("platform required")
+            store.select_publication_platforms(self.json_path, selected=data.get("selected"),
+                registered_platforms=list(platforms.PLATFORMS), uuid_=data.get("uuid"),
+                platform=data.get("platform"), config=self.config)
+            return {"saved": True}
+        allowed = {
+            "/schedule": {"uuid", "schedule", "scheduleTs", "scheduleProfile", "scheduleIsManual"},
+            "/schedule/approve": {"uuid"}, "/schedule/return": {"uuid"},
+            "/metadata": {"uuid", "title", "description"},
+            "/metadata/approve": {"uuid"}, "/metadata/return": {"uuid"},
+            "/options": {"uuid", "platform", "price", "tiers", "galleries"},
+        }
+        if endpoint not in allowed:
+            raise LookupError("endpoint not found")
+        self._fields(data, allowed[endpoint])
+        pub = self._publication(data.get("uuid"))
+        uuid_ = pub["uuid"]
+        if endpoint == "/schedule":
+            if "scheduleIsManual" in data and type(data["scheduleIsManual"]) is not bool:
+                raise ValueError("scheduleIsManual must be boolean")
+            store.edit_publication_date(self.json_path, uuid_, data, self.config)
+        elif endpoint == "/schedule/approve":
+            store.approve_publication_date(self.json_path, uuid_, self.config)
+        elif endpoint == "/schedule/return":
+            store.return_to_scheduling(self.json_path, uuid_, self.config)
+        elif endpoint == "/metadata":
+            fields = {k: data[k] for k in ("title", "description") if k in data}
+            if not fields or any(not isinstance(v, str) for v in fields.values()):
+                raise ValueError("metadata string fields required")
+            store.save_publication_metadata(self.json_path, uuid_, config=self.config, **fields)
+        elif endpoint == "/metadata/approve":
+            store.approve_publication_metadata(self.json_path, uuid_, self.config)
+        elif endpoint == "/metadata/return":
+            store.return_to_metadata(self.json_path, uuid_, self.config)
+        elif endpoint == "/options":
+            if data.get("platform") not in platforms.PLATFORMS:
+                raise ValueError("unregistered platform")
+            store.save_platform_options(self.json_path, uuid_, data["platform"],
+                {k: data[k] for k in ("price", "tiers", "galleries") if k in data}, self.config)
+        return {"saved": True}
+
     def do_POST(self):
         try:
-            if self.path == "/delete":
-                data = self._json_body()
-                path = data.get("path", "")
-                try:
-                    os.remove(path)
-                except OSError as e:
-                    self._send(200, {"ok": False, "error": str(e)}); return
-                # ponytail: gallery renders once; concurrent refresh vs. delete
-                # would race this dict, but in practice the tab is opened once.
-                # The cached thumbnail is left behind — it is content-addressed,
-                # so it costs ~20KB and is reused if the art ever comes back.
-                name = self.__class__.thumb_map.pop(path, "")
-                self.__class__.thumb_src.pop(name, None)
-                self._send(200, {"ok": True})
-
-            elif self.path == "/ai":
-                data = self._json_body()
-                path = data.get("path", "")
-                source, posted_model = data.get("source"), data.get("model")
-                model = None
-                if source == "claude":
-                    if posted_model is not None:
-                        self._send(400, {"error": "Claude does not take a model object"}); return
-                elif source in ("local", "openrouter"):
-                    model = next((m for m in VISION_MODELS if m == posted_model), None)
-                    if model is None:
-                        self._send(400, {"error": "model object not allowed"}); return
-                    if source == "local":
-                        status = self.local_model_statuses.get(model["ollama_name"], {})
-                        if not status.get("fit") or not status.get("available"):
-                            self._send(400, {"error": status.get("reason") or "Local model unavailable"}); return
-                else:
-                    self._send(400, {"error": f"source not allowed: {source}"}); return
-                image_for_ai = thumb_for_ai(path, self.cache_dir, self.thumb_map.get(path))
-                log.debug("AI metadata: %s (source=%s, timeout=%ss)",
-                          image_for_ai, source, self.ai_timeout)
-                try:
-                    title, desc = generate_metadata(
-                        image_for_ai, model, source=source, timeout=self.ai_timeout,
-                        install_missing=(source == "local"),
-                        **({"claude_model": self.ai_model} if source == "claude" else {}))
-                except ProviderUnavailable as e:
-                    log.debug("AI provider unavailable: %s", e)
-                    statuses = (self.local_model_statuses.get(m["ollama_name"], {})
-                                for m in self.vision_models)
-                    can_defer = bool(self.vision_models) and all(
-                        status.get("fit") is False
-                        and isinstance(status.get("fit_level"), str)
-                        and status["fit_level"].strip() not in ("", "Unavailable", "Good")
-                        for status in statuses)
-                    self._send(400, {"error": str(e), "can_defer": can_defer}); return
-                except (RuntimeError, OSError) as e:
-                    log.debug("AI metadata failed: %s", e)
-                    self._send(400, {"error": str(e)}); return
-                self._send(200, {"title": title, "description": desc})
-
+            if self.headers.get_content_type() != "application/json":
+                self._send(415, {"error": "application/json required"}); return
+            origin = self.headers.get("Origin")
+            host, port = self.server.server_address
+            # Trust the bound address, not the request's attacker-controlled Host.
+            if origin is not None and origin not in {f"http://{host}:{port}", f"http://localhost:{port}"}:
+                self._send(403, {"error": "foreign origin forbidden"}); return
+            data = self._json_body()
+            if self.path == "/ai":
+                self._ai(data)
             elif self.path == "/publish":
-                data = self._json_body()
-                entries = data.get("entries", []) or []
-                if not entries:
-                    self._send(400, {"error": "empty queue"}); return
-                if any(e.get("title") == TODO_GENERATE or e.get("description") == TODO_GENERATE
-                       for e in entries):
-                    self._send(400, {"error": "AI metadata still marked for generation"}); return
-                existing_uuids = {e.get("uuid") for e in entries if e.get("uuid")}
-                if existing_uuids:
-                    with open(self.json_path, encoding="utf-8") as f:
-                        stored = {p.get("uuid"): p for p in json.load(f)}
-                    for uuid_ in existing_uuids:
-                        publication = stored.get(uuid_)
-                        if publication and (
-                            publication.get("description") == TODO_GENERATE or any(
-                                a.get("platformName") == "deviantart"
-                                and a.get("urlElsePublicationName") == TODO_GENERATE
-                                for a in publication.get("apparitions", []))
-                        ):
-                            self._send(400, {"error": "AI metadata still marked for generation"}); return
-                # Entries with a uuid are already in publications.json (the
-                # pre-queued pending set) — publish them as-is. The rest are new
-                # picks: append them first, then publish. Existing go first.
-                existing = [e for e in entries if e.get("uuid")]
-                new = [e for e in entries if not e.get("uuid")]
-                try:
-                    new_uuids = (write_publications(new, self.json_path, self.config)
-                                 if new else [])
-                except Exception as e:
-                    self._send(400, {"error": f"schema/write failed: {e}"}); return
-
-                all_entries = existing + new
-                all_uuids = [e["uuid"] for e in existing] + new_uuids
-                published, failed, err = publish_batch(all_entries, all_uuids, self.json_path)
-                result = {"published": published, "failed": failed}
-                if err:
-                    result["error"] = err
-                self.server.publish_done = result
-                self._send(200, result)
-
-            elif self.path == "/stage":
-                data = self._json_body()
-                entries = data.get("entries", []) or []
-                if not entries:
-                    self._send(400, {"error": "nothing to stage"}); return
-                try:
-                    uuids = write_publications(entries, self.json_path, self.config)
-                except Exception as e:
-                    self._send(400, {"error": f"schema/write failed: {e}"}); return
-                # No publish_done set → serve loop keeps running, session stays alive.
-                self._send(200, {"staged": len(uuids), "uuids": uuids})
-
-            elif self.path == "/update":
-                data = self._json_body()
-                u = data.get("uuid")
-                if not u:
-                    self._send(400, {"error": "missing uuid"}); return
-                with open(self.json_path) as f:
-                    pubs = json.load(f)
-                try:
-                    apply_update(pubs, u, data, zone(self.config.get("schedule", {})))
-                except KeyError:
-                    self._send(404, {"error": f"uuid not found: {u}"}); return
-                try:
-                    validate_publications(pubs, self.config)
-                except Exception as e:
-                    self._send(400, {"error": f"invalid: {e}"}); return
-                atomic_write_json(self.json_path, pubs)
-                self._send(200, {"ok": True})
+                self._publish(data)
             else:
-                self.send_response(404); self.end_headers()
-        except Exception as e:
-            try:
-                self._send(500, {"error": str(e)})
-            except Exception:
-                pass
+                with self.operation_lock:
+                    if self.path in ("/metadata/approve", "/schedule/return") and data.get("uuid") in self.ai_busy:
+                        self._send(409, {"error": "wait for metadata generation to save"}); return
+                    if not self.publish_lock.acquire(blocking=False):
+                        self._send(409, {"error": "publication batch already running"}); return
+                    try:
+                        result = self._mutate(data)
+                    finally:
+                        self.publish_lock.release()
+                self._send(200, result)
+        except KeyError as exc:
+            self._send(404, {"error": f"uuid not found: {exc}"})
+        except LookupError as exc:
+            self._send(404, {"error": str(exc)})
+        except (ValueError, TypeError, OSError, ValidationError) as exc:
+            self._send(400, {"error": str(exc)})
+        except Exception as exc:
+            log.exception("HTTP mutation failed")
+            self._send(500, {"error": str(exc)})
 
     def log_message(self, format, *args):
         log.debug("http %s - %s", self.address_string(), format % args)
@@ -381,47 +499,46 @@ def thumb_maps(data_dir: str, paths: list[str], rows: list[dict]) -> tuple[dict,
     return thumb_map, thumb_src
 
 
-def serve(data_dir: str, candidate_paths: list[str], pending: list[dict],
-          args, config: dict, publicable_dirs: list[str] | None = None) -> dict | None:
-    GalleryHandler.timeline = timeline(args.json)
-    GalleryHandler.thumb_map, GalleryHandler.thumb_src = thumb_maps(
-        data_dir, candidate_paths + [e["path"] for e in pending], GalleryHandler.timeline)
-    GalleryHandler.cache_dir = os.path.join(data_dir, THUMB_CACHE)
-    GalleryHandler.candidate_paths = candidate_paths
-    GalleryHandler.pending = pending
-    GalleryHandler.existing_ts = compute_existing_ts(args.json)
-    GalleryHandler.ai_model = args.ai_model
-    GalleryHandler.openrouter_model = args.openrouter_model
-    GalleryHandler.ai_timeout = args.ai_timeout
-    GalleryHandler.vision_models = VISION_MODELS
-    GalleryHandler.local_model_statuses = {
-        model["ollama_name"]: local_model_status(model) for model in VISION_MODELS
-    }
-    GalleryHandler.json_path = args.json
-    GalleryHandler.config = config
-    GalleryHandler.schedules = schedule_data(
-        config["schedule"], allowed_tiers=config.get("tiers", []))
-    GalleryHandler.archive = prompt_archive_from_config(data_dir, config)
-    GalleryHandler.publicable_dirs = publicable_dirs or []
+def create_handler(data_dir: str, candidate_paths: list[str], args, config: dict,
+                   publicable_dirs: list[str] | None = None) -> type[GalleryHandler]:
+    """Isolated handler configuration; every request rereads the durable database."""
+    class Handler(GalleryHandler):
+        pass
+    Handler.data_dir = str(Path(data_dir).resolve())
+    Handler.cache_dir = os.path.join(data_dir, THUMB_CACHE)
+    Handler.candidate_paths = list(candidate_paths)
+    Handler.rendered_candidates = set()
+    Handler.thumb_map, Handler.thumb_src = {}, {}
+    Handler.ai_busy = set()
+    Handler.operation_lock = threading.RLock()
+    Handler.publish_lock = threading.Lock()
+    Handler.ai_model = args.ai_model
+    Handler.openrouter_model = args.openrouter_model
+    Handler.ai_timeout = args.ai_timeout
+    Handler.local_model_statuses = {
+        m["ollama_name"]: local_model_status(m) for m in VISION_MODELS}
+    Handler.json_path = args.json
+    Handler.config = config
+    Handler.archive = prompt_archive_from_config(data_dir, config)
+    Handler.publicable_dirs = publicable_dirs or []
+    schedule_data(config.get("schedule", {}), allowed_tiers=config.get("tiers", []))
+    return Handler
 
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), GalleryHandler)
-    server.publish_done = None
-    server.timeout = 0.5
-    url = f"http://127.0.0.1:{args.port}"
-    print(f"Gallery: {url}")
+
+def serve(data_dir: str, candidate_paths: list[str], args, config: dict,
+          publicable_dirs: list[str] | None = None) -> None:
+    handler = create_handler(data_dir, candidate_paths, args, config, publicable_dirs)
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), handler)
+    url = f"http://127.0.0.1:{server.server_address[1]}"
+    print(f"Gallery: {url}", flush=True)
     try:
-        subprocess.Popen(
-            ["firefox", "--private-window", "--no-remote", url],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
+        subprocess.Popen(["firefox", "--private-window", "--no-remote", url],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except FileNotFoundError:
         print("(open the URL yourself; firefox not found)")
-
     try:
-        while server.publish_done is None:
-            server.handle_request()
+        server.serve_forever()
     except KeyboardInterrupt:
         print("\nShutting down...")
     finally:
         server.server_close()
-    return server.publish_done

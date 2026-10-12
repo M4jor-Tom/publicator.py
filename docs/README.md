@@ -14,10 +14,10 @@ First visit: read `CLAUDE.md` (architecture and gotchas), then the feature you t
 - [Configuration (publicator.toml)](features/config.md) — every key, its default, where it is validated and consumed
 - [Publications store (publications.json + schema)](features/publications-store.md) — source-of-truth writers, lookups, schema validation, validate/echo-first CLIs
 - [Images and thumbnails](features/images-thumbnails.md) — candidate discovery, content-addressed .thumbs cache, /thumbs allow-list, non-webp uploads
-- [Gallery UI (publish-next)](features/gallery-ui.md) — human-review gallery: AI metadata, schedule, stage, batch-publish to DeviantArt
+- [Gallery UI (publish-next)](features/gallery-ui.md) — durable Pick/Schedule/Describe/Publish phases, registered-platform grid and success-aware retry
 - [AI metadata (title/description via llm CLI)](features/ai-metadata.md) — title + description via `llm` CLI, Claude or OpenRouter, schema fallback
 - [Scheduling (slots and weekly profiles)](features/scheduling.md) — server-side weekly slot instants and TZ-anchored picker resolution
-- [Calendar tab](features/calendar.md) — read-only month grids of every DA apparition, server-side tz bucketing, prompt popover per thumbnail
+- [Calendar tab](features/calendar.md) — read-only month grids of every platform apparition, server-side tz bucketing, prompt popover per thumbnail
 - [Prompt mapping (image -> generation prompt)](features/prompt-mapping.md) — content-addressed lookup of an image's prompt in the archive repo: Exact, Nearest or Unknown
 - [DeviantArt publishing (Playwright submit flow)](features/deviantart-publish.md) — drives Firefox through DA's submit form for pending entries
 
@@ -34,10 +34,6 @@ links the ADRs that constrain it; do not reverse one without a new ADR.
 - [0007 Local vision models with Ollama and llmfit](adr/0007-local-vision-models-with-ollama-and-llmfit.md)
 - [0008 Walk the free vision catalogue after any failed model attempt](adr/0008-walk-the-free-vision-catalogue-on-any-error.md)
 
-## Not built yet
-
-`ROADMAP.md`. Done work is never listed there; it lives in `features/`.
-
 ## Maintaining
 
 - A rule or symbol is documented once, in the file whose **Code** block owns the
@@ -48,5 +44,6 @@ links the ADRs that constrain it; do not reverse one without a new ADR.
 - Code change: update the feature file's block and invariants in the same commit.
 - New feature: add `features/<slug>.md` in the same shape and a line above.
 - New decision: add `adr/000N-*.md` and link it from the feature's **Decisions** line.
-- Design specs and implementation plans are not kept: once shipped, the feature
-  file is the truth and git history holds the rest.
+- Design specs, implementation plans, and task trackers live in `/tmp`, never in
+  Git. Feature files record non-code-obvious constraints, decisions, and operational
+  knowledge; do not duplicate behavior that is obvious from reading the code.

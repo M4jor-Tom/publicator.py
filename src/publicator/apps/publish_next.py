@@ -1,19 +1,14 @@
 #!/usr/bin/env python3
-"""CLI: the unified publish workflow (gallery + AI metadata + Firefox batch)."""
+"""CLI: the durable four-phase workflow and calendar."""
 import argparse
-import logging
 import sys
 from pathlib import Path
 
 from publicator import setup_logging
 from publicator.config import load_config
-from publicator.deviantart import configure, load_pending_entries
 from publicator.images import find_candidates
 from publicator.llm_meta import DEFAULT_MODEL, OPENROUTER_MODEL
 from publicator.webui.server import serve
-
-log = logging.getLogger("publicator.gallery")
-
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Unified publish workflow (gallery + AI + Firefox DA).")
@@ -35,31 +30,13 @@ def main() -> int:
 
     data_dir = Path(args.data_dir).resolve() if args.data_dir else Path.cwd()
     config = load_config(data_dir)
-    configure(args.data_dir, config)  # points deviantart + entry helpers at the db dir
     args.json = args.json or str(data_dir / "publications.json")
     publicable_dirs = [str(data_dir / d) for d in config["publicable"]]
 
     print("Finding unpublished images...")
     candidates = find_candidates(publicable_dirs, args.json, args.n)
-    pending = load_pending_entries(args.json)
-    log.debug("found %d candidate(s), %d pending", len(candidates), len(pending))
-    if not candidates and not pending:
-        print("Nothing to publish (no new picks, no pending queue).")
-        return 0
-
-    msg = f"{len(candidates)} new pick(s)"
-    if pending:
-        msg += f", {len(pending)} already queued"
-    print(f"Found {msg}.")
-    result = serve(str(data_dir), candidates, pending, args, config, publicable_dirs)
-
-    if result is None:
-        print("No publish action taken.")
-        return 0
-    print(f"Done. published={result.get('published',0)} failed={result.get('failed',0)}")
-    if result.get("error"):
-        print(f"error: {result['error']}", file=sys.stderr)
-        return 1
+    print(f"Found {len(candidates)} new pick(s); opening saved workflow and calendar.")
+    serve(str(data_dir), candidates, args, config, publicable_dirs)
     return 0
 
 

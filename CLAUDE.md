@@ -45,10 +45,10 @@ Some scheduler tests shell out to `node` to run the served page's client JS and
 nix run <this>#login          # one-time DeviantArt sign-in in a REAL Firefox (see PerimeterX below)
 nix run <this>#publish-next   # the gallery UI: review picked/, AI metadata, schedule, batch-publish
 nix run <this>#da-publish -- --data-dir <dir> [--uuid <id> | --all] [--headless]   # publish the first pending entry, one by uuid, or all
-nix run <this>#generate-meta -- [--openrouter] IMAGE...   # AI title/description only, no gallery, no data dir
+nix run <this>#generate-meta -- --data-dir <dir> --source openrouter # replace marked metadata
 nix run <this>#vision-models  # host-fit verdicts for configured local vision models
 nix run <this>#validate       # validate publications.json against publicationsSchema.json
-nix run <this>#echo-first     # path/title/schedule of the first state=unpublished entry
+nix run <this>#echo-first     # path/title/schedule of the first metadata-approved pending DA target
 nix run <this>#check-steps    # cheap CI drift guard (no browser/data deps)
 nix run <this>#prompt-audit   # prompt-mapping coverage: parsed N of M, nearest count
 nix run <this>#pw-daemon      # Playwright FIFO daemon for DOM probing (see docs/features/deviantart-publish.md)
@@ -78,21 +78,26 @@ resolves against CWD/`--data-dir`, per the code/data split above.
 2. `publicator.webui.server` (`#publish-next`, launched by `apps/publish_next.py`)
    is the orchestrator — a `ThreadingHTTPServer` gallery on `127.0.0.1` opened in
    Firefox for **human review**, not a headless job. It scans the config's
-   `publicable` dirs (e.g. `picked/`), lets you add images to a queue with AI
-   title/description and a schedule, writes them to `publications.json`, then
-   drives a Firefox persistent context (copied from the `#login` profile)
-   through the DA submit flow.
-   The page has two tabs: the gallery (review/queue/publish) and a **read-only
-   calendar** (`webui/calendar_view.py`) of every DeviantArt apparition in
-   `publications.json`, past and scheduled — rows whose name is a URL link out to DA,
-   queued ones jump to their gallery card. All day/month math is server-side, in
-   the schedule timezone, for the same reason scheduling is (see below).
-   Both tabs show one image's prompt identically because they are handed the
-   *same* block: the server resolves `{art path: prompt HTML}` once per request
-   (`_prompt_html`) and passes it to the cards and to `render_calendar`. A day
-   cell has no room for a prompt `<pre>`, so a calendar thumbnail whose prompt is
-   known becomes a native `popover` trigger holding that block plus its link;
-   rows with no archived prompt stay the plain one-click link they were.
+   `publicable` dirs (e.g. `picked/`), then persists four distinct phases:
+   Pick → Schedule → Describe → Publish. `publications.json` owns completed
+   publication states PICKED/SCHEDULED/DESCRIBED/APPEARED, shared title/description,
+   and the publication-level apparitionTimestampIfDifferentThanSubmission.
+   Apparitions retain delivery states/options and an optional actual `url`.
+   Picking never selects a platform or generates metadata. Dates and metadata
+   require explicit approval; successful deliveries lock shared content.
+   Phase 4 is image rows × registered-platform columns, with persistent selection
+   and success-aware retry through `platforms.py`. DeviantArt is the only initial
+   executable registration; historical other-platform data remains readable.
+   The server rereads saved data on requests and stays open after publishing,
+   including history-only startup. No RAM-only queue is authoritative.
+   The read-only calendar (`webui/calendar_view.py`) shows every apparition using
+   the shared title/date and actual URL, never guessed URL-slug titles.
+   Candidate cards and calendar popovers share the prompt renderer; scheduling
+   and metadata cards have no prompt/search/delete actions.
+   Every mutation validates before atomic replacement under short thread/file
+   locks; AI/browser work never holds them. Accepted AI failures save the exact
+   [[PUBLICATOR:TODO_GENERATE]] marker in requested fields; blank/marked metadata
+   cannot advance or publish. Manual drafts debounce and flush on phase changes.
 3. `publicator/deviantart.py` is the Playwright submit logic for **one** entry
    (one-way import: `webui.server` / `apps.da_publish` → `deviantart`, no cycle).
    It flips the entry's apparition `state` `unpublished` → `published_or_scheduled`.
@@ -123,8 +128,7 @@ Every AI caller downscales through
 
 **Scheduling is entirely server-side** (`publicator/scheduling.py`). All
 weekday/hour/timezone math lives in Python (`zoneinfo`, `schedule.timezone`,
-default `Europe/Paris`). The browser receives absolute slot *instants* and
-counts occupancy by exact-timestamp equality — it never reads its own clock,
+default `Europe/Paris`). Allocation/repacking and occupancy are server-side; the browser never reads its own clock,
 because `firefox --private-window` with resist-fingerprinting spoofs `Date` to
 UTC and would otherwise mis-match local slots. Custom picker times are likewise
 resolved server-side on save (`store.resolve_ts`). **Stored timestamps are
@@ -132,7 +136,7 @@ LOCAL wall-clock 20:00, never UTC 20:00** — don't reintroduce browser-clock ma
 in the served page's JS.
 
 **Thumbnails.** One content-addressed cache, `<data-dir>/.thumbs/<sha512[:32]><ext>`
-(`images.thumb_name`/`ensure_thumb`), shared by both tabs and kept across runs —
+(`images.thumb_name`/`ensure_thumb`), shared by workflow and calendar and kept across runs —
 it is *not* per-run in `/tmp`. Thumbnails are generated on the first request that
 needs one, so a cold calendar doesn't stall startup; `/thumbs/<name>` only serves
 names the page actually rendered (that allow-list is what keeps paths from being
@@ -163,12 +167,16 @@ flake `runtimeInputs` — `writeShellApplication` pins PATH to those.
 Feature doc: `docs/features/prompt-mapping.md`,
 decisions in `docs/adr/0001`–`0004`.
 
-**State & data.** `publications.json` is the source of truth (an array of entries,
-each with `apparitions[]` carrying `state` + `apparitionTimestampIfDifferentThanSubmission`).
-`publicator/entries.py` reports the first `unpublished` entry (by state field,
-not git; `apps/echo_first.py` is the CLI wrapper). `publicator/config.py::load_config`
-reads `publicator.toml` (`publicable` dirs, `tags` file, `[deviantart]`
-tiers/galleries allow-lists, `[schedule]` timezone + weekly `profiles`).
+**State & data.** `publications.json` is the source of truth. Publication state
+records completed phases, while apparitions carry delivery state. Automatic
+PICKED dates repack in persisted order; manual pins and approved dates stay
+frozen. Shared dates count once regardless of apparition count. `entries.py`
+selects metadata-approved pending targets; `config.py` owns data-directory
+configuration and option validation. Historical migration is a tested pure
+transformation (`migration.py`); bounded title recovery uses a temporary copy
+of the named Firefox privacy profile headlessly, **not** a private window.
+Never alter the original profile or guess titles from URLs. Specs/plans/trackers
+and reports stay in /tmp or managed scratch space, never in Git.
 `publicator/apps/pw_daemon.py` is a separate Playwright FIFO daemon (Chromium
 persistent context in `.deviantart-session/`) for interactive debugging of the
 flow.
