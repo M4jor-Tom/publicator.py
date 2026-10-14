@@ -48,7 +48,7 @@ and returns nonzero on failures. No apparition is needed for generation.
 - **The live OpenRouter test skips ONLY when offline (with a warning); online with no `$OPENROUTER_KEY` fails.** A credential-gated skip rots unnoticed; `tests/test_llm_meta_openrouter.py::test_openrouter_generates_title_and_description` (`_online()` gate, then `assert os.environ.get("OPENROUTER_KEY")`).
 - **The live test targets a model that does NOT advertise `structured_outputs` (`SCHEMALESS_VISION_MODEL`).** Its purpose is to exercise the fallback end to end; `tests/test_llm_meta_openrouter.py` docstring.
 - **Provider IDs are explicit catalog values, not derived from another provider's name.** Local/OpenRouter selection resolves against `VISION_MODELS`; Claude retains its module model. The CLI's OpenRouter default is `OPENROUTER_MODEL`; local requires explicit `--model`.
-- Relies on the header select listing OpenRouter (free) first as gallery default while the server default (`ai_model`, used when the body omits `model`) stays `claude-cli-opus` (commit d3153d5), owned by `docs/features/gallery-ui.md`.
+- Relies on the header select listing OpenRouter (free) first as gallery default while the server default (`ai_model`, used when the body omits `model`) stays `claude-cli-opus` (commit d0b7d1e), owned by `docs/features/gallery-ui.md`.
 
 ## Gotchas
 

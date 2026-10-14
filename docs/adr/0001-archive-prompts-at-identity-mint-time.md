@@ -6,7 +6,7 @@
 | Status   | Accepted                                  |
 | Deciders | theta (repo owner)                        |
 | Branch   | `master`                                  |
-| Commit   | `7408cf4`, `89592f7`                      |
+| Commit   | `73576b1`, `d930b3b`                      |
 
 ## Context
 
@@ -153,7 +153,7 @@ git cat-file --batch-all-objects --batch-check='%(objectname) %(objecttype)' \
 
 ### Related
 
-- Commits: `7408cf4` (spec), `89592f7` (fail-open revision); implemented in `huggingface_prompts` `97aaf63`, `2d4ba4a` and here in `032c896` (read side)
+- Commits: `73576b1` (spec), `d930b3b` (fail-open revision); implemented in `huggingface_prompts` `97aaf63`, `2d4ba4a` and here in `12b1e79` (read side)
 - Branch: `master`
 - Feature doc: `docs/features/prompt-mapping.md`
 - ADRs: [[0002]] read side, [[0003]] grammar ownership, [[0004]] refines this decision's failure handling

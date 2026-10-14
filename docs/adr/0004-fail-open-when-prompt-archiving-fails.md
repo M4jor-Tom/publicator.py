@@ -6,7 +6,7 @@
 | Status   | Accepted                                  |
 | Deciders | theta (repo owner)                        |
 | Branch   | `master`                                  |
-| Commit   | `89592f7`                                 |
+| Commit   | `d930b3b`                                 |
 
 ## Context
 
@@ -148,7 +148,7 @@ to fail-closed.
 
 ### Related
 
-- Commits: `89592f7` (this reversal), `7408cf4` (original spec); implemented in `huggingface_prompts` `97aaf63`, `2d4ba4a`, `0968198`
+- Commits: `d930b3b` (this reversal), `73576b1` (original spec); implemented in `huggingface_prompts` `97aaf63`, `2d4ba4a`, `0968198`
 - Branch: `master`
 - Feature doc: `docs/features/prompt-mapping.md`
 - ADRs: refines [[0001]]; relies on [[0002]] absorbing dangling references

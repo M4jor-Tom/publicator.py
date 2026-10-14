@@ -6,7 +6,7 @@
 | Status   | Accepted                                  |
 | Deciders | theta (repo owner)                        |
 | Branch   | `master`                                  |
-| Commit   | `7408cf4`                                 |
+| Commit   | `73576b1`                                 |
 
 ## Context
 
@@ -153,7 +153,7 @@ means the abstraction leaked.
 
 ### Related
 
-- Commits: `7408cf4` (spec), `89592f7`; implemented in `7807845`, `8c361c2`, `7907d31`
+- Commits: `73576b1` (spec), `d930b3b`; implemented in `444060d`, `1e0925e`, `3cec179`
 - Branch: `master`
 - Feature doc: `docs/features/prompt-mapping.md`
 - Prior art: `docs/features/config.md`

@@ -6,7 +6,7 @@
 | Status   | Accepted                                  |
 | Deciders | theta (repo owner)                        |
 | Branch   | `master`                                  |
-| Commit   | `0e88998`, `4de25b3`                      |
+| Commit   | `9edd8ad`, `89d7db4`                      |
 
 ## Context
 
@@ -156,7 +156,7 @@ guard where all callers already route through is the root-cause placement.
   dir** — a TOML key would be unreachable for exactly the entry point that most
   needs it. This is deliberately *not* the same case as the filename grammar of
   [[0003]], which is a contract with a counterparty living in the data repo.
-- `apps/generate_meta.py` (commit `4de25b3`) ships alongside this but is not its
+- `apps/generate_meta.py` (commit `89d7db4`) ships alongside this but is not its
   own ADR: it is a thin entry point onto `generate_metadata` with no rejected
   alternatives worth recording.
 
@@ -213,7 +213,7 @@ curl -s https://openrouter.ai/api/v1/models | jq -r '.data[]
 
 ### Related
 
-- Commits: `0e88998` (the fallback), `4de25b3` (the `generate-meta` entry point)
+- Commits: `9edd8ad` (the fallback), `89d7db4` (the `generate-meta` entry point)
 - Branch: `master`
 - ADRs: [[0003]] — contrasted, not superseded: that ADR moves the filename
   grammar *out* of code into `publicator.toml`; this one deliberately keeps a

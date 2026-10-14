@@ -6,7 +6,7 @@
 | Status   | Accepted                                  |
 | Deciders | theta (repo owner)                        |
 | Branch   | `master`                                  |
-| Commit   | `7408cf4`                                 |
+| Commit   | `73576b1`                                 |
 
 ## Context
 
@@ -163,7 +163,7 @@ wrong case frozen into a test.
 
 ### Related
 
-- Commits: `7408cf4` (spec), `89592f7`; implemented in `e590215`, `032c896`, `f46bcd2`, `bbf7df8`, `8790179`
+- Commits: `73576b1` (spec), `d930b3b`; implemented in `b3e6ec3`, `12b1e79`, `dac635b`, `7cacfd8`, `ee04937`
 - Branch: `master`
 - Feature doc: `docs/features/prompt-mapping.md`
 - ADRs: [[0001]] write side, [[0003]] grammar ownership, [[0004]] why dangling refs stay possible
