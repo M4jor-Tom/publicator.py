@@ -8,6 +8,7 @@ import random
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tiff", ".mp4"}
 THUMB_CACHE = ".thumbs"     # under the data dir: one thumbnail cache for the whole UI
@@ -46,15 +47,23 @@ def collect_images(directory: str) -> list[str]:
     return images
 
 
-def find_candidates(directories: list[str], json_path: str, limit: int) -> list[str]:
+@dataclass(frozen=True)
+class Search:
+    limit: int
+    paths: tuple[str, ...]
+
+
+def find_candidates(search: Search, json_path: str) -> list[str]:
+    if search.limit == 0:
+        return []
     publicated = load_publicated_hashes(json_path)
     images = []
-    for d in directories:
-        images.extend(collect_images(d))   # os.walk on a missing dir yields nothing
+    for directory in search.paths:
+        images.extend(collect_images(directory))   # os.walk on a missing dir yields nothing
     random.shuffle(images)
     candidates = []
     for path in images:
-        if len(candidates) >= limit:
+        if len(candidates) >= search.limit:
             break
         try:
             if compute_sha512(path) not in publicated:

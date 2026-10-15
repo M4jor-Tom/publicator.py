@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 from publicator.images import (
+    Search,
     compute_sha512,
     ensure_thumb,
     find_candidates,
@@ -20,7 +21,7 @@ def test_find_candidates_skips_already_published_hashes(tmp_path):
     jp = tmp_path / "publications.json"
     jp.write_text(json.dumps([{"files": [{"sha512sum": compute_sha512(str(done)).upper()}]}]))
 
-    got = find_candidates([str(picked)], str(jp), 10)
+    got = find_candidates(Search(10, (str(picked),)), str(jp))
 
     assert got == [str(new)]  # case-insensitive hash match drops done.png
 
@@ -30,11 +31,26 @@ def test_find_candidates_honours_the_limit(tmp_path):
     picked.mkdir()
     for i in range(5):
         (picked / f"{i}.png").write_bytes(f"img{i}".encode())
-    assert len(find_candidates([str(picked)], str(tmp_path / "none.json"), 3)) == 3
+    assert len(find_candidates(Search(3, (str(picked),)), str(tmp_path / "none.json"))) == 3
+
+
+def test_find_candidates_uses_selected_paths(tmp_path):
+    left, right = tmp_path / "left", tmp_path / "right"
+    left.mkdir(); right.mkdir()
+    for root, name in ((left, "a"), (left, "b"), (right, "c")):
+        (root / f"{name}.png").write_bytes(name.encode())
+    got = find_candidates(Search(25, (str(left),)), str(tmp_path / "none.json"))
+    assert set(got) == {str(left / "a.png"), str(left / "b.png")}
+
+
+def test_find_candidates_empty_does_not_scan(tmp_path, monkeypatch):
+    import pytest
+    monkeypatch.setattr("publicator.images.collect_images", lambda _: pytest.fail("walked"))
+    assert find_candidates(Search(0, (str(tmp_path),)), str(tmp_path / "none.json")) == []
 
 
 def test_find_candidates_tolerates_a_missing_directory(tmp_path):
-    assert find_candidates([str(tmp_path / "nope")], str(tmp_path / "none.json"), 5) == []
+    assert find_candidates(Search(5, (str(tmp_path / "nope"),)), str(tmp_path / "none.json")) == []
 
 
 def test_thumb_name_is_content_addressed(tmp_path):

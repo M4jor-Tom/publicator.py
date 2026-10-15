@@ -6,7 +6,7 @@ from pathlib import Path
 
 from publicator import setup_logging
 from publicator.config import load_config
-from publicator.images import find_candidates
+from publicator.images import Search, find_candidates
 from publicator.llm_meta import DEFAULT_MODEL, OPENROUTER_MODEL
 from publicator.webui.server import serve
 
@@ -34,7 +34,7 @@ def main() -> int:
     publicable_dirs = [str(data_dir / d) for d in config["publicable"]]
 
     print("Finding unpublished images...")
-    candidates = find_candidates(publicable_dirs, args.json, args.n)
+    candidates = find_candidates(Search(args.n, tuple(publicable_dirs)), args.json)
     print(f"Found {len(candidates)} new pick(s); opening saved workflow and calendar.")
     serve(str(data_dir), candidates, args, config, publicable_dirs)
     return 0
