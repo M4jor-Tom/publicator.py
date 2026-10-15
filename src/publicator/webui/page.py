@@ -175,6 +175,7 @@ document.addEventListener('click', async e => {
   const action = btn.dataset.action, card = btn.closest('[data-uuid]'), uuid = card?.dataset.uuid;
   if (action === 'tab') { await showTab(btn.dataset.phase); return; }
   btn.disabled = true;
+  let disabledMetadata = [];
   try {
     await flushDrafts();
     if (action === 'pick' || action === 'delete') {
@@ -188,6 +189,8 @@ document.addEventListener('click', async e => {
       const opt = document.getElementById('ai-model').selectedOptions[0];
       if (opt.dataset.source === 'local' && opt.dataset.installed === 'false' &&
           !confirm('Install ' + opt.dataset.ollama + ' and generate?')) return;
+      disabledMetadata = [...card.querySelectorAll('[data-field]')];
+      disabledMetadata.forEach(field => { field.disabled = true; });
       const r = await fetch('/ai', {method:'POST', headers:{'Content-Type':'application/json'},
         body:JSON.stringify({uuid, source:opt.dataset.source, model:opt.dataset.model ? JSON.parse(opt.dataset.model) : null})});
       const d = await r.json();
@@ -213,7 +216,10 @@ document.addEventListener('click', async e => {
       await post(routes[action], action === 'suggest' ? {uuid, scheduleIsManual:false} : {uuid});
     }
     report('Saved'); await refresh();
-  } catch(e) { report(e.message, true); } finally { btn.disabled = false; }
+  } catch(e) { report(e.message, true); } finally {
+    disabledMetadata.forEach(field => { field.disabled = false; });
+    btn.disabled = false;
+  }
 });
 document.querySelector('.promptsearch')?.addEventListener('submit', async e => {
   e.preventDefault(); try { await flushDrafts(); e.target.submit(); } catch(e) { report(e.message, true); }

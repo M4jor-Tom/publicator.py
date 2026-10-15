@@ -885,6 +885,39 @@ def test_search_excludes_referenced_artwork_with_changed_bytes(workflow, monkeyp
         assert f'data-path="{workflow.candidates[1]}"'.encode() in page
 
 
+def test_ai_generation_disables_metadata_inputs_and_reenables_after_failure(workflow, monkeypatch):
+    from playwright.sync_api import sync_playwright
+
+    entered, release = threading.Event(), threading.Event()
+    def generate(*a, **kw):
+        entered.set()
+        assert release.wait(timeout=5)
+        raise RuntimeError('stub provider failure')
+    monkeypatch.setattr(workflow.gallery, 'generate_metadata', generate)
+    with workflow.start() as url:
+        uuid = pick(url, workflow)
+        assert _post(url, {'uuid': uuid}, '/schedule/approve')[0] == 200
+        with sync_playwright() as pw:
+            browser = pw.firefox.launch(headless=True)
+            try:
+                page = browser.new_page()
+                page.goto(url + '/#describe')
+                page.locator('#ai-model').select_option(label='Claude (subscription) — claude-test')
+                page.locator('[data-action=ai]').evaluate('e => e.click()')
+                assert entered.wait(timeout=5)
+                title = page.locator(f'#publication-{uuid} [data-field=title]')
+                description = page.locator(f'#publication-{uuid} [data-field=description]')
+                assert title.is_disabled()
+                assert description.is_disabled()
+                release.set()
+                page.wait_for_function("!document.querySelector('[data-action=ai]').disabled")
+                assert title.is_enabled()
+                assert description.is_enabled()
+            finally:
+                release.set()
+                browser.close()
+
+
 def test_ai_button_requests_both_fields_and_refreshes_to_publish(workflow, monkeypatch):
     from playwright.sync_api import sync_playwright
 
