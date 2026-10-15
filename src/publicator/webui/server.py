@@ -129,8 +129,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
                 exact.append(path)
         published = load_publicated_hashes(self.json_path)
         display_limit = min(SEARCH_LIMIT, getattr(self.search_state, "limit", 25))
-        truncated = (len(exact) + len(maybe) > display_limit
-                     or len(exact) > SEARCH_LIMIT or len(maybe) > SEARCH_LIMIT)
+        truncated = len(exact) + len(maybe) > display_limit
 
         def unpublished(paths, remaining):
             out = []
