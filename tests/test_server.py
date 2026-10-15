@@ -885,136 +885,57 @@ def test_search_excludes_referenced_artwork_with_changed_bytes(workflow, monkeyp
         assert f'data-path="{workflow.candidates[1]}"'.encode() in page
 
 
-@pytest.mark.parametrize('requested', ['title', 'description'])
-@pytest.mark.parametrize('failure', [False, True])
-def test_delayed_ai_preserves_unrequested_pending_client_draft(workflow, monkeypatch, requested, failure):
-    """Real Firefox client: the unrequested input is dirty when AI responds."""
-    from datetime import datetime, timedelta
+def test_ai_button_requests_both_fields_and_refreshes_to_publish(workflow, monkeypatch):
     from playwright.sync_api import sync_playwright
-    from publicator.llm_meta import TODO_GENERATE
-    entered, release = threading.Event(), threading.Event()
-    def generate(*a, **kw):
-        entered.set()
-        assert release.wait(10)
-        if failure:
-            raise RuntimeError('stub provider failure')
-        return 'Generated title', 'Generated description'
-    monkeypatch.setattr(workflow.gallery, 'generate_metadata', generate)
-    unrequested = 'description' if requested == 'title' else 'title'
+
+    monkeypatch.setattr(workflow.gallery, 'generate_metadata',
+                        lambda *a, **kw: ('Generated title', 'Generated description'))
     with workflow.start() as url:
         uuid = pick(url, workflow)
         assert _post(url, {'uuid': uuid}, '/schedule/approve')[0] == 200
-        assert _post(url, {'uuid': uuid, 'title': 'Stored title', 'description': 'Stored description'}, '/metadata')[0] == 200
         with sync_playwright() as pw:
             browser = pw.firefox.launch(headless=True)
             try:
                 page = browser.new_page()
-                errors = []
-                page.on('pageerror', lambda error: errors.append(str(error)))
-                # Pause native debounce timers, not HTTP/provider work, to make the race deterministic.
-                now = datetime(2027, 1, 1)
-                page.clock.install(time=now)
-                page.clock.pause_at(now + timedelta(seconds=1))
                 page.goto(url + '/#describe')
                 page.locator('#ai-model').select_option(label='Claude (subscription) — claude-test')
-                page.locator(f'[data-generate={unrequested}]').uncheck()
-                page.locator('[data-action=ai]').evaluate('e => e.click()')
-                assert entered.wait(5)
-                with page.expect_response(lambda r: r.url.endswith('/ai')):
-                    page.locator(f'[data-field={unrequested}]').evaluate("""e => {
-                        e.value = 'Pending manual edit';
-                        e.dispatchEvent(new Event('input', {bubbles:true}));
-                    }""")
-                    release.set()
-                page.wait_for_function("!document.querySelector('[data-action=ai]').disabled")
-                assert page.locator(f'[data-field={unrequested}]').input_value() == 'Pending manual edit'
-                assert page.evaluate('dirty.has(' + json.dumps(uuid) + ')')
-                assert page.locator('#describe-tab .status').inner_text() == 'Unsaved'
-                generated = TODO_GENERATE if failure else 'Generated ' + requested
-                assert page.locator(f'[data-field={requested}]').input_value() == generated
-                assert json.loads(workflow.jp.read_text())[0][unrequested] == 'Stored ' + unrequested
-                page.clock.run_for(350)
-                page.wait_for_function('dirty.size === 0')
+                with page.expect_request(lambda request: request.url.endswith('/ai')) as request_info:
+                    page.locator('[data-action=ai]').click()
+                request = request_info.value
+                assert set(request.post_data_json) == {'uuid', 'source', 'model'}
+                page.wait_for_function("document.querySelector('#tab-publish').textContent.includes('(1)')")
                 row, = json.loads(workflow.jp.read_text())
-                assert row[unrequested] == 'Pending manual edit' and row[requested] == generated
-                assert page.locator('#describe-tab .status').inner_text() == 'Saved'
-                assert not errors, errors
+                assert row['title'] == 'Generated title'
+                assert row['description'] == 'Generated description'
+                assert row['state'] == 'DESCRIBED'
             finally:
-                release.set()
                 browser.close()
 
 
-@pytest.mark.parametrize('requested', ['title', 'description'])
-@pytest.mark.parametrize('failure', [False, True])
-def test_active_autosave_between_ai_write_and_reread_preserves_generated_field(workflow, monkeypatch, requested, failure):
-    """Release a captured debounce request only after AI writes, before its reread."""
-    from datetime import datetime, timedelta
-    from playwright.sync_api import sync_playwright
-    from publicator import store
+def test_ai_failure_keeps_describe_card_and_retry_available(workflow, monkeypatch):
     from publicator.llm_meta import TODO_GENERATE
-    entered, release = threading.Event(), threading.Event()
-    ai_written, manual_saved = threading.Event(), threading.Event()
-    generated = TODO_GENERATE if failure else 'Generated ' + requested
-    unrequested = 'description' if requested == 'title' else 'title'
-    original_save = store.save_publication_metadata
-    def generate(*a, **kw):
-        entered.set()
-        assert release.wait(10)
-        if failure:
-            raise RuntimeError('stub provider failure')
-        return 'Generated title', 'Generated description'
-    def save(*a, **kw):
-        original_save(*a, **kw)
-        if kw.get(requested) == generated:
-            ai_written.set()
-            assert manual_saved.wait(10)
-        elif kw.get(unrequested) == 'Concurrent manual edit':
-            manual_saved.set()
-    monkeypatch.setattr(workflow.gallery, 'generate_metadata', generate)
-    monkeypatch.setattr(store, 'save_publication_metadata', save)
+    from playwright.sync_api import sync_playwright
+
+    def fail(*args, **kwargs):
+        raise RuntimeError('stub provider failure')
+    monkeypatch.setattr(workflow.gallery, 'generate_metadata', fail)
     with workflow.start() as url:
         uuid = pick(url, workflow)
         assert _post(url, {'uuid': uuid}, '/schedule/approve')[0] == 200
-        assert _post(url, {'uuid': uuid, 'title': 'Stored title', 'description': 'Stored description'}, '/metadata')[0] == 200
         with sync_playwright() as pw:
             browser = pw.firefox.launch(headless=True)
             try:
                 page = browser.new_page()
-                errors, captured = [], []
-                page.on('pageerror', lambda error: errors.append(str(error)))
-                def capture(route):
-                    captured.append(route)
-                    page.evaluate('window.autosaveCaptured = true')
-                page.route('**/metadata', capture)
-                now = datetime(2027, 1, 1)
-                page.clock.install(time=now)
-                page.clock.pause_at(now + timedelta(seconds=1))
                 page.goto(url + '/#describe')
                 page.locator('#ai-model').select_option(label='Claude (subscription) — claude-test')
-                page.locator(f'[data-generate={unrequested}]').uncheck()
-                page.locator('[data-action=ai]').evaluate('e => e.click()')
-                assert entered.wait(5)
-                page.locator(f'[data-field={unrequested}]').fill('Concurrent manual edit')
-                page.clock.run_for(350)  # debounce fires and captures the pre-generation draft
-                page.wait_for_function("document.querySelector('#describe-tab .status').textContent === 'Saving…'")
-                page.wait_for_function('window.autosaveCaptured === true')
-                assert len(captured) == 1
-                release.set()
-                assert ai_written.wait(5)
-                assert json.loads(workflow.jp.read_text())[0][requested] == generated
-                with page.expect_response(lambda r: r.url.endswith('/ai')):
-                    captured[0].continue_()
-                page.wait_for_function("!document.querySelector('[data-action=ai]').disabled && dirty.size === 0")
+                page.locator('[data-action=ai]').click()
+                page.wait_for_function("!document.querySelector('[data-action=ai]').disabled")
+                assert page.locator('[data-action=ai]').count() == 1
+                assert page.locator('#describe-tab').inner_text().count('AI metadata pending') == 1
                 row, = json.loads(workflow.jp.read_text())
-                assert row[requested] == generated
-                assert row[unrequested] == 'Concurrent manual edit'
-                assert captured[0].request.post_data_json == {'uuid': uuid, unrequested: 'Concurrent manual edit'}
-                assert page.locator(f'[data-field={requested}]').input_value() == generated
-                assert page.locator(f'[data-field={unrequested}]').input_value() == 'Concurrent manual edit'
-                assert page.locator('#describe-tab .status').inner_text() in ('Saved', 'Saved AI metadata pending')
-                assert not errors, errors
+                assert row['title'] == row['description'] == TODO_GENERATE
+                assert row['state'] == 'SCHEDULED'
             finally:
-                release.set(); manual_saved.set()
                 browser.close()
 
 

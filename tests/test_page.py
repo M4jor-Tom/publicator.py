@@ -80,7 +80,9 @@ def test_ai_catalog_and_requested_fields_are_in_describe_only():
     assert page.count('data-source="openrouter"') == 1
     assert page.count('data-source="local"') == len(VISION_MODELS)
     assert 'Install on use' in page and 'claude-custom' in page
-    assert 'data-generate="title"' in page and 'data-generate="description"' in page
+    assert 'data-generate=' not in page and 'Fields to generate' not in page
+    assert 'body:JSON.stringify({uuid, source:opt.dataset.source, model:' in page
+    assert 'JSON.stringify({uuid, source:opt.dataset.source, model:opt.dataset.model ? JSON.parse(opt.dataset.model) : null, fields' not in page
     assert 'Mark for later' not in page
 
 
@@ -134,6 +136,17 @@ def test_render_page_with_search_disabled_emits_no_search_form():
 def test_render_page_with_search_enabled_emits_the_search_form():
     page = _render(search_enabled=True)
     assert 'class="promptsearch"' in page
+
+
+def test_pick_search_controls_render_limit_paths_and_reload():
+    from publicator.images import Search
+    page = _render(search=Search(50, ('picked',)), publicable_choices=['picked', 'other'])
+    assert all(f'<option value="{limit}"' in page for limit in (0, 25, 50, 75, 100))
+    assert '<option value="50" selected' in page
+    assert 'type="checkbox" name="search-path" value="picked" checked' in page
+    assert 'type="checkbox" name="search-path" value="other"' in page
+    assert '>Reload</button>' in page
+    assert "post('/search', {limit, paths})" in page
 
 
 def test_prompt_text_containing_a_placeholder_survives_as_literal_text():

@@ -6,6 +6,7 @@ import urllib.parse
 from datetime import datetime
 
 from publicator.entries import effective_schedule_ts, has_delivery_success
+from publicator.images import Search
 from publicator.llm_meta import TODO_GENERATE
 from publicator.scheduling import zone
 from publicator.webui.calendar_view import render_calendar
@@ -179,21 +180,23 @@ document.addEventListener('click', async e => {
     if (action === 'pick' || action === 'delete') {
       if (action === 'delete' && !confirm('Delete ' + btn.dataset.path + ' from disk?')) return;
       await post('/' + action, {path:btn.dataset.path});
+    } else if (action === 'reload') {
+      const limit = Number(document.getElementById('search-limit').value);
+      const paths = [...document.querySelectorAll('[name="search-path"]:checked')].map(e => e.value);
+      await post('/search', {limit, paths});
     } else if (action === 'ai') {
       const opt = document.getElementById('ai-model').selectedOptions[0];
-      const fields = [...card.querySelectorAll('[data-generate]:checked')].map(e => e.dataset.generate);
-      if (!fields.length) throw new Error('Select fields to generate.');
       if (opt.dataset.source === 'local' && opt.dataset.installed === 'false' &&
           !confirm('Install ' + opt.dataset.ollama + ' and generate?')) return;
       const r = await fetch('/ai', {method:'POST', headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({uuid, source:opt.dataset.source, model:opt.dataset.model ? JSON.parse(opt.dataset.model) : null, fields})});
+        body:JSON.stringify({uuid, source:opt.dataset.source, model:opt.dataset.model ? JSON.parse(opt.dataset.model) : null})});
       const d = await r.json();
       if (d.saved) {
-        for (const field of fields) card.querySelector('[data-field="'+field+'"]').value = d[field];
+        for (const field of ['title', 'description']) card.querySelector('[data-field="'+field+'"]').value = d[field];
         card.querySelector('.status').textContent = dirty.has(uuid) ? 'Unsaved' : (d.error ? 'Saved AI metadata pending' : 'Saved');
       }
       if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
-      report('Generated and saved; approve metadata after review.'); return;
+      report('Generated and saved; approve metadata after review.'); await refresh(); return;
     } else if (action === 'save-options') {
       const form = btn.closest('.options');
       await post('/options', {uuid, platform:'deviantart',
@@ -262,7 +265,8 @@ def model_options(vision_models, statuses, ai_model, openrouter_model):
 def render_page(*, thumb_map, candidates, publications, timeline, schedules, config,
                 ai_model, openrouter_model, platforms, prompt_html=None, query='', skipped=0,
                 maybe_candidates=None, search_enabled=True, truncated=False, lineage_active=False,
-                vision_models=None, local_model_statuses=None) -> str:
+                vision_models=None, local_model_statuses=None, search=None,
+                publicable_choices=()) -> str:
     tz = zone(config.get('schedule', {}))
     prompt_html = prompt_html or {}
     groups = {'schedule': [p for p in publications if p['state'] == 'PICKED'],
@@ -283,7 +287,15 @@ def render_page(*, thumb_map, candidates, publications, timeline, schedules, con
     def button(action, label, disabled=False):
         return f'<button data-action="{action}"{" disabled" if disabled else ""}>{label}</button>'
 
+    search = search or Search(25, tuple(publicable_choices))
     body += '<section id="pick-tab" class="grid" data-phase="pick">'
+    body += '<div class="searchcontrols"><label>Candidate limit <select autocomplete="off" id="search-limit">'
+    for limit, label in ((0, 'Empty'), (25, '25'), (50, '50'), (75, '75'), (100, '100')):
+        body += f'<option value="{limit}"{" selected" if search.limit == limit else ""}>{label}</option>'
+    body += '</select></label><fieldset><legend>Search paths</legend>'
+    for path in publicable_choices:
+        body += f'<label><input autocomplete="off" type="checkbox" name="search-path" value="{escaped(path)}"{" checked" if path in search.paths else ""}> {escaped(path)}</label>'
+    body += '</fieldset>' + button('reload', 'Reload') + '</div>'
     if search_enabled:
         body += (f'<form class="promptsearch" method="get" action="/">'
                  f'<input autocomplete="off" type="search" name="prompt" aria-label="Search prompt text" value="{escaped(query)}">'
@@ -337,10 +349,7 @@ def render_page(*, thumb_map, candidates, publications, timeline, schedules, con
                     body += '<span class="warning">AI metadata pending</span>'
                 body += f'<label>Title <input autocomplete="off" type="text" data-field="title" value="{escaped(pub["title"])}"></label>'
                 body += f'<label>Description <textarea autocomplete="off" data-field="description">{escaped(pub["description"])}</textarea></label>'
-                body += '<fieldset><legend>Fields to generate (other manual content is preserved)</legend>'
-                for field in ('title', 'description'):
-                    body += f'<label><input autocomplete="off" type="checkbox" data-generate="{field}" checked> {field.capitalize()}</label>'
-                body += '</fieldset>' + button('ai', 'Generate with AI')
+                body += button('ai', 'Generate with AI')
                 body += button('approve-metadata', 'Approve metadata') + button('return-schedule', 'Return to scheduling')
                 body += '<span class="status" role="status" aria-live="polite">Saved</span>'
             body += '</article>'

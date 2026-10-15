@@ -211,7 +211,8 @@ class GalleryHandler(BaseHTTPRequestHandler):
             query=needle, skipped=skipped, truncated=truncated,
             search_enabled=self.archive is not None,
             lineage_active=bool(lineage), vision_models=self.vision_models,
-            local_model_statuses=self.local_model_statuses)
+            local_model_statuses=self.local_model_statuses, search=self.search_state,
+            publicable_choices=self.config.get("publicable", []))
 
     def _json_body(self) -> dict:
         length = int(self.headers.get("Content-length", 0))
