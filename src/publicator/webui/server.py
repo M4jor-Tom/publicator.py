@@ -273,8 +273,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
     def _ai(self, data: dict) -> None:
         self._fields(data, {"uuid", "source", "model"})
         pub = self._publication(data.get("uuid"))
-        if pub["state"] != "SCHEDULED":
-            raise ValueError("AI generation requires SCHEDULED")
+        workflow.require_metadata_generation(pub)
         source, posted_model = data.get("source"), data.get("model")
         model = None
         if source == "claude":
@@ -299,8 +298,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
         with self.operation_lock:
             if pub["uuid"] in self.ai_busy:
                 self._send(409, {"error": "metadata generation already running"}); return
-            if self._publication(pub["uuid"])["state"] != "SCHEDULED":
-                raise ValueError("AI generation requires SCHEDULED")
+            workflow.require_metadata_generation(self._publication(pub["uuid"]))
             self.ai_busy.add(pub["uuid"])
         try:
             image = thumb_for_ai(path, self.cache_dir, self.thumb_map.get(path))

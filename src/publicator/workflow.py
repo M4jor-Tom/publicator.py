@@ -117,6 +117,12 @@ def save_publication_metadata(json_path: str, uuid_: str, *, title: str | None =
     store.mutate_publications(json_path, mutation, config)
 
 
+def require_metadata_generation(publication: dict) -> None:
+    """Reject AI generation outside the scheduled metadata phase."""
+    if publication.get("state") != PUBLICATION_STATE_SCHEDULED:
+        raise ValueError("AI generation requires SCHEDULED")
+
+
 def _generated_metadata_is_complete(pub: dict) -> bool:
     return all(isinstance(pub.get(key), str) and pub[key].strip()
                and TODO_GENERATE not in pub[key] for key in ("title", "description"))
@@ -129,8 +135,7 @@ def save_generated_metadata(json_path: str, uuid_: str, title: str, description:
         pub = store._find(data, uuid_)
         if has_delivery_success(pub):
             raise ValueError("delivered publication cannot be edited")
-        if pub.get("state") != PUBLICATION_STATE_SCHEDULED:
-            raise ValueError("metadata generation requires SCHEDULED")
+        require_metadata_generation(pub)
         pub["title"] = title
         pub["description"] = description
         if _generated_metadata_is_complete(pub):

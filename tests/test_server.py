@@ -329,6 +329,26 @@ def test_ai_saves_complete_pair_and_retries_failure_markers(workflow, monkeypatc
         assert _post(url, {'uuid': uuid}, '/metadata/approve')[0] == 400
 
 
+def test_ai_ineligible_phase_is_rejected_by_workflow_before_provider(workflow, monkeypatch):
+    from publicator import workflow as operations
+    provider_calls = []
+    guard_calls = []
+    guard = operations.require_metadata_generation
+    def track_guard(publication):
+        guard_calls.append(publication['uuid'])
+        return guard(publication)
+    monkeypatch.setattr(operations, 'require_metadata_generation', track_guard)
+    monkeypatch.setattr(workflow.gallery, 'generate_metadata', lambda *a, **kw: provider_calls.append(a))
+    with workflow.start() as url:
+        uuid = pick(url, workflow)
+        before = workflow.jp.read_text()
+        status, body = _post(url, {'uuid': uuid, 'source': 'claude'}, '/ai')
+        assert status == 400 and body['error'] == 'AI generation requires SCHEDULED'
+        assert guard_calls == [uuid]
+        assert not provider_calls
+        assert workflow.jp.read_text() == before
+
+
 def test_ai_validation_does_not_mutate_and_uses_canonical_models(workflow, monkeypatch):
     from publicator.llm_meta import VISION_MODELS
     calls = []
