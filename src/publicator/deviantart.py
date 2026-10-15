@@ -41,7 +41,8 @@ from publicator.entries import (
     set_data_dir,
 )
 from publicator.llm_meta import TODO_GENERATE
-from publicator.store import load_publications, mark_state
+from publicator.store import load_publications
+from publicator.workflow import mark_state
 
 log = logging.getLogger("publicator.da")
 

@@ -8,7 +8,7 @@ from jsonschema.exceptions import ValidationError
 
 import pytest
 
-from publicator import deviantart, platforms, store
+from publicator import deviantart, platforms, store, workflow
 from publicator.platforms import Platform
 
 
@@ -50,7 +50,7 @@ class FakePublisher:
         if self.fail:
             return 0, len(entries), f"{self.name} broke"
         for uuid_ in uuids:
-            store.mark_state(json_path, uuid_, "published_or_scheduled", platform=self.name, config=CFG)
+            workflow.mark_state(json_path, uuid_, "published_or_scheduled", platform=self.name, config=CFG)
         self.published.extend(uuids)
         return len(entries), 0, None
 
