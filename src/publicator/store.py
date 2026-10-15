@@ -15,7 +15,6 @@ from publicator.entries import (
     PUBLICATION_STATE_APPEARED,
     PUBLICATION_STATE_DESCRIBED,
     PUBLICATION_STATE_PICKED,
-    PUBLICATION_STATE_SCHEDULED,
     has_delivery_success,
 )
 from publicator.llm_meta import TODO_GENERATE
@@ -92,18 +91,8 @@ def approve_publication_date(json_path: str, uuid_: str, config: dict | None = N
 def save_publication_metadata(json_path: str, uuid_: str, *, title: str | None = None,
                               description: str | None = None,
                               config: dict | None = None) -> None:
-    with _mutation_lock(json_path):
-        data = _read_publications(json_path)
-        pub = _find(data, uuid_)
-        if has_delivery_success(pub):
-            raise ValueError("delivered publication cannot be edited")
-        if pub.get("state") != PUBLICATION_STATE_SCHEDULED:
-            raise ValueError("metadata edits require SCHEDULED")
-        if title is not None:
-            pub["title"] = title
-        if description is not None:
-            pub["description"] = description
-        _write_publications(json_path, data, config)
+    from publicator.workflow import save_publication_metadata as operation
+    return operation(json_path, uuid_, title=title, description=description, config=config)
 
 
 def merge_generated_metadata(json_path: str, uuid_: str, *, title: str, description: str,
@@ -121,43 +110,18 @@ def merge_generated_metadata(json_path: str, uuid_: str, *, title: str, descript
 
 
 def approve_publication_metadata(json_path: str, uuid_: str, config: dict | None = None) -> None:
-    with _mutation_lock(json_path):
-        data = _read_publications(json_path)
-        pub = _find(data, uuid_)
-        if pub.get("state") != PUBLICATION_STATE_SCHEDULED:
-            raise ValueError("metadata approval requires SCHEDULED")
-        if any(not pub.get(key, "").strip() or TODO_GENERATE in pub[key]
-               for key in ("title", "description")):
-            raise ValueError("title and description required")
-        pub["state"] = PUBLICATION_STATE_DESCRIBED
-        _write_publications(json_path, data, config)
+    from publicator.workflow import approve_publication_metadata as operation
+    return operation(json_path, uuid_, config)
 
 
 def return_to_metadata(json_path: str, uuid_: str, config: dict | None = None) -> None:
-    with _mutation_lock(json_path):
-        data = _read_publications(json_path)
-        pub = _find(data, uuid_)
-        if has_delivery_success(pub):
-            raise ValueError("delivered publication cannot be edited")
-        if pub.get("state") != PUBLICATION_STATE_DESCRIBED:
-            raise ValueError("return to metadata requires DESCRIBED")
-        pub["state"] = PUBLICATION_STATE_SCHEDULED
-        _write_publications(json_path, data, config)
+    from publicator.workflow import return_to_metadata as operation
+    return operation(json_path, uuid_, config)
 
 
 def return_to_scheduling(json_path: str, uuid_: str, config: dict | None = None) -> None:
-    cfg = _config(config)
-    with _mutation_lock(json_path):
-        data = _read_publications(json_path)
-        pub = _find(data, uuid_)
-        if has_delivery_success(pub):
-            raise ValueError("delivered publication cannot be edited")
-        if (pub.get("apparitionTimestampIfDifferentThanSubmission") is not None
-                and pub.get("scheduleProfile") not in {
-                    p["name"] for p in schedule_profiles(cfg.get("schedule", {}))}):
-            pub["scheduleIsManual"] = True
-        pub["state"] = PUBLICATION_STATE_PICKED
-        _write_publications(json_path, data, cfg)
+    from publicator.workflow import return_to_scheduling as operation
+    return operation(json_path, uuid_, config)
 
 
 def mutate_publications(json_path: str, mutation, config: dict | None = None):

@@ -4,7 +4,12 @@ from datetime import datetime, timezone
 import pytest
 
 from publicator import scheduling, store, workflow
-from publicator.entries import PUBLICATION_STATE_PICKED, PUBLICATION_STATE_SCHEDULED
+from publicator.entries import (
+    APPARITION_STATE_PUBLISHED,
+    PUBLICATION_STATE_APPEARED,
+    PUBLICATION_STATE_PICKED,
+    PUBLICATION_STATE_SCHEDULED,
+)
 
 _CFG = {"schedule": {"timezone": "Europe/Paris"}, "tiers": ["gold"], "galleries": ["Art"]}
 _TUE_2000 = int(datetime(2026, 1, 6, 20, tzinfo=timezone.utc).timestamp())
@@ -17,6 +22,114 @@ def img(tmp_path):
 
 def _rows(path):
     return json.loads(path.read_text())
+
+
+def test_metadata_approval_rejects_blank_and_marker_metadata(tmp_path, img):
+    path = tmp_path / "publications.json"
+    uuid_ = store.pick_publication(img, str(path), _CFG)
+    store.edit_publication_date(str(path), uuid_, {"scheduleTs": _TUE_2000}, _CFG)
+    store.approve_publication_date(str(path), uuid_, _CFG)
+
+    with pytest.raises(ValueError, match="title and description required"):
+        workflow.approve_publication_metadata(str(path), uuid_, _CFG)
+
+    workflow.save_publication_metadata(str(path), uuid_, title="T", description=store.TODO_GENERATE, config=_CFG)
+    with pytest.raises(ValueError, match="title and description required"):
+        workflow.approve_publication_metadata(str(path), uuid_, _CFG)
+
+
+@pytest.mark.parametrize("field", ["title", "description"])
+@pytest.mark.parametrize("marked", [
+    f" {store.TODO_GENERATE} ",
+    f"Before {store.TODO_GENERATE} after",
+])
+def test_metadata_approval_rejects_marker_occurrence_without_writing(tmp_path, img, field, marked):
+    path = tmp_path / "publications.json"
+    uuid_ = store.pick_publication(img, str(path), _CFG)
+    store.edit_publication_date(str(path), uuid_, {"scheduleTs": _TUE_2000}, _CFG)
+    store.approve_publication_date(str(path), uuid_, _CFG)
+    fields = {"title": "T", "description": "D", field: marked}
+    workflow.save_publication_metadata(str(path), uuid_, **fields, config=_CFG)
+    before = path.read_bytes()
+
+    with pytest.raises(ValueError, match="title and description required"):
+        workflow.approve_publication_metadata(str(path), uuid_, _CFG)
+
+    assert path.read_bytes() == before
+    assert _rows(path)[0]["state"] == PUBLICATION_STATE_SCHEDULED
+
+
+def test_illegal_backward_edits_rejected_after_delivery_success(tmp_path, img):
+    path = tmp_path / "publications.json"
+    uuid_ = store.pick_publication(img, str(path), _CFG)
+    store.edit_publication_date(str(path), uuid_, {"scheduleTs": _TUE_2000}, _CFG)
+    store.approve_publication_date(str(path), uuid_, _CFG)
+    workflow.save_publication_metadata(str(path), uuid_, title="T", description="D", config=_CFG)
+    workflow.approve_publication_metadata(str(path), uuid_, _CFG)
+    rows = _rows(path)
+    rows[0]["state"] = PUBLICATION_STATE_APPEARED
+    rows[0]["apparitions"] = [{
+        "platformName": "deviantart",
+        "state": APPARITION_STATE_PUBLISHED,
+    }]
+    path.write_text(json.dumps(rows))
+
+    with pytest.raises(ValueError, match="delivered"):
+        workflow.return_to_scheduling(str(path), uuid_, _CFG)
+    with pytest.raises(ValueError, match="delivered"):
+        workflow.save_publication_metadata(str(path), uuid_, title="new", description="D", config=_CFG)
+
+
+@pytest.mark.parametrize("fields", [{"title": ""}, {"description": store.TODO_GENERATE}])
+def test_metadata_edits_after_approval_require_explicit_return(tmp_path, img, fields):
+    path = tmp_path / "publications.json"
+    uuid_ = store.pick_publication(img, str(path), _CFG)
+    store.edit_publication_date(str(path), uuid_, {"scheduleTs": _TUE_2000}, _CFG)
+    store.approve_publication_date(str(path), uuid_, _CFG)
+    workflow.save_publication_metadata(str(path), uuid_, title="T", description="D", config=_CFG)
+    workflow.approve_publication_metadata(str(path), uuid_, _CFG)
+    rows = _rows(path)
+    rows[0]["apparitions"] = [{"platformName": "deviantart", "state": "unpublished"}]
+    path.write_text(json.dumps(rows))
+    before = path.read_bytes()
+
+    with pytest.raises(ValueError, match="metadata edits require SCHEDULED"):
+        workflow.save_publication_metadata(str(path), uuid_, **fields, config=_CFG)
+    assert path.read_bytes() == before
+    workflow.return_to_metadata(str(path), uuid_, _CFG)
+    expected = rows[0] | {"state": PUBLICATION_STATE_SCHEDULED}
+    assert _rows(path)[0] == expected
+    workflow.save_publication_metadata(str(path), uuid_, **fields, config=_CFG)
+    with pytest.raises(ValueError, match="title and description required"):
+        workflow.approve_publication_metadata(str(path), uuid_, _CFG)
+
+
+def test_return_to_metadata_rejects_delivery_success_without_writing(tmp_path):
+    path = tmp_path / "publications.json"
+    pub = {"uuid": "00000000-0000-4000-8000-000000000001", "state": "DESCRIBED",
+           "title": "T", "description": "D", "submissionTimestamp": 1700000000,
+           "files": [], "apparitions": [
+               {"platformName": "deviantart", "state": APPARITION_STATE_PUBLISHED},
+               {"platformName": "pixiv", "state": "unpublished"}]}
+    path.write_text(json.dumps([pub]))
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match="delivered"):
+        workflow.return_to_metadata(str(path), pub["uuid"], _CFG)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize('profile', [None, 'removed'])
+def test_return_to_scheduling_without_override_does_not_invent_custom_date(tmp_path, profile):
+    path = tmp_path / 'publications.json'
+    pub = {'uuid': '00000000-0000-4000-8000-000000000001', 'state': 'DESCRIBED',
+           'submissionTimestamp': 1700000000, 'title': 'Saved', 'description': 'Saved',
+           'files': [], 'apparitions': []}
+    if profile is not None:
+        pub['scheduleProfile'] = profile
+    store.atomic_write_json(str(path), [pub])
+    workflow.return_to_scheduling(str(path), pub['uuid'], _CFG)
+    assert _rows(path) == [pub | {'state': 'PICKED'}]
+
 
 def test_pick_is_durable_and_creates_no_apparition(tmp_path):
     art = tmp_path / "art.png"

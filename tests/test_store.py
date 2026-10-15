@@ -4,13 +4,6 @@ from datetime import datetime, timezone
 import pytest
 
 from publicator import scheduling, store
-from publicator.entries import (
-    APPARITION_STATE_PUBLISHED,
-    PUBLICATION_STATE_APPEARED,
-    PUBLICATION_STATE_DESCRIBED,
-    PUBLICATION_STATE_PICKED,
-    PUBLICATION_STATE_SCHEDULED,
-)
 
 _TZ = "Europe/Paris"
 _CFG = {"schedule": {"timezone": _TZ}, "tiers": ["gold"], "galleries": ["Art"]}
@@ -59,100 +52,6 @@ def test_mutate_publications_does_not_write_after_callback_error(tmp_path):
         raise ValueError("rejected")
     with pytest.raises(ValueError, match="rejected"):
         store.mutate_publications(str(path), fail, config={})
-    assert path.read_bytes() == before
-
-
-def test_metadata_approval_rejects_blank_and_marker_metadata(tmp_path, img):
-    path = tmp_path / "publications.json"
-    uuid_ = store.pick_publication(img, str(path), _CFG)
-    store.edit_publication_date(str(path), uuid_, {"scheduleTs": _TUE_2000}, _CFG)
-    store.approve_publication_date(str(path), uuid_, _CFG)
-
-    with pytest.raises(ValueError, match="title and description required"):
-        store.approve_publication_metadata(str(path), uuid_, _CFG)
-
-    store.save_publication_metadata(str(path), uuid_, title="T", description=store.TODO_GENERATE, config=_CFG)
-    with pytest.raises(ValueError, match="title and description required"):
-        store.approve_publication_metadata(str(path), uuid_, _CFG)
-
-
-@pytest.mark.parametrize("field", ["title", "description"])
-@pytest.mark.parametrize("marked", [
-    f" {store.TODO_GENERATE} ",
-    f"Before {store.TODO_GENERATE} after",
-])
-def test_metadata_approval_rejects_marker_occurrence_without_writing(tmp_path, img, field, marked):
-    path = tmp_path / "publications.json"
-    uuid_ = store.pick_publication(img, str(path), _CFG)
-    store.edit_publication_date(str(path), uuid_, {"scheduleTs": _TUE_2000}, _CFG)
-    store.approve_publication_date(str(path), uuid_, _CFG)
-    fields = {"title": "T", "description": "D", field: marked}
-    store.save_publication_metadata(str(path), uuid_, **fields, config=_CFG)
-    before = path.read_bytes()
-
-    with pytest.raises(ValueError, match="title and description required"):
-        store.approve_publication_metadata(str(path), uuid_, _CFG)
-
-    assert path.read_bytes() == before
-    assert _rows(path)[0]["state"] == PUBLICATION_STATE_SCHEDULED
-
-
-def test_illegal_backward_edits_rejected_after_delivery_success(tmp_path, img):
-    path = tmp_path / "publications.json"
-    uuid_ = store.pick_publication(img, str(path), _CFG)
-    store.edit_publication_date(str(path), uuid_, {"scheduleTs": _TUE_2000}, _CFG)
-    store.approve_publication_date(str(path), uuid_, _CFG)
-    store.save_publication_metadata(str(path), uuid_, title="T", description="D", config=_CFG)
-    store.approve_publication_metadata(str(path), uuid_, _CFG)
-    rows = _rows(path)
-    rows[0]["state"] = PUBLICATION_STATE_APPEARED
-    rows[0]["apparitions"] = [{
-        "platformName": "deviantart",
-        "state": APPARITION_STATE_PUBLISHED,
-    }]
-    path.write_text(json.dumps(rows))
-
-    with pytest.raises(ValueError, match="delivered"):
-        store.return_to_scheduling(str(path), uuid_, _CFG)
-    with pytest.raises(ValueError, match="delivered"):
-        store.save_publication_metadata(str(path), uuid_, title="new", description="D", config=_CFG)
-
-
-@pytest.mark.parametrize("fields", [{"title": ""}, {"description": store.TODO_GENERATE}])
-def test_metadata_edits_after_approval_require_explicit_return(tmp_path, img, fields):
-    path = tmp_path / "publications.json"
-    uuid_ = store.pick_publication(img, str(path), _CFG)
-    store.edit_publication_date(str(path), uuid_, {"scheduleTs": _TUE_2000}, _CFG)
-    store.approve_publication_date(str(path), uuid_, _CFG)
-    store.save_publication_metadata(str(path), uuid_, title="T", description="D", config=_CFG)
-    store.approve_publication_metadata(str(path), uuid_, _CFG)
-    rows = _rows(path)
-    rows[0]["apparitions"] = [{"platformName": "deviantart", "state": "unpublished"}]
-    path.write_text(json.dumps(rows))
-    before = path.read_bytes()
-
-    with pytest.raises(ValueError, match="metadata edits require SCHEDULED"):
-        store.save_publication_metadata(str(path), uuid_, **fields, config=_CFG)
-    assert path.read_bytes() == before
-    store.return_to_metadata(str(path), uuid_, _CFG)
-    expected = rows[0] | {"state": PUBLICATION_STATE_SCHEDULED}
-    assert _rows(path)[0] == expected
-    store.save_publication_metadata(str(path), uuid_, **fields, config=_CFG)
-    with pytest.raises(ValueError, match="title and description required"):
-        store.approve_publication_metadata(str(path), uuid_, _CFG)
-
-
-def test_return_to_metadata_rejects_delivery_success_without_writing(tmp_path):
-    path = tmp_path / "publications.json"
-    pub = {"uuid": "00000000-0000-4000-8000-000000000001", "state": "DESCRIBED",
-           "title": "T", "description": "D", "submissionTimestamp": 1700000000,
-           "files": [], "apparitions": [
-               {"platformName": "deviantart", "state": APPARITION_STATE_PUBLISHED},
-               {"platformName": "pixiv", "state": "unpublished"}]}
-    path.write_text(json.dumps([pub]))
-    before = path.read_bytes()
-    with pytest.raises(ValueError, match="delivered"):
-        store.return_to_metadata(str(path), pub["uuid"], _CFG)
     assert path.read_bytes() == before
 
 
@@ -236,16 +135,3 @@ def test_save_platform_options_selects_deviantart_not_first_platform(tmp_path):
     assert pub["apparitions"][1] == {
         "platformName": "deviantart", "state": "unpublished", "priceIfNotFree": 5,
         "tiers": ["gold"], "galleries": ["Art"]}
-
-
-@pytest.mark.parametrize('profile', [None, 'removed'])
-def test_return_to_scheduling_without_override_does_not_invent_custom_date(tmp_path, profile):
-    path = tmp_path / 'publications.json'
-    pub = {'uuid': '00000000-0000-4000-8000-000000000001', 'state': 'DESCRIBED',
-           'submissionTimestamp': 1700000000, 'title': 'Saved', 'description': 'Saved',
-           'files': [], 'apparitions': []}
-    if profile is not None:
-        pub['scheduleProfile'] = profile
-    store.atomic_write_json(str(path), [pub])
-    store.return_to_scheduling(str(path), pub['uuid'], _CFG)
-    assert _rows(path) == [pub | {'state': 'PICKED'}]

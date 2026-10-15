@@ -5,11 +5,13 @@ import time
 import uuid
 
 from publicator.entries import (
+    PUBLICATION_STATE_DESCRIBED,
     PUBLICATION_STATE_PICKED,
     PUBLICATION_STATE_SCHEDULED,
     has_delivery_success,
 )
 from publicator.images import compute_sha512
+from publicator.llm_meta import TODO_GENERATE
 from publicator.scheduling import repack_publication_dates, resolve_ts, schedule_profiles, zone
 from publicator import store
 
@@ -93,6 +95,64 @@ def approve_publication_date(json_path: str, uuid_: str, config: dict | None = N
         repack_publication_dates(data, schedule)
 
     store.mutate_publications(json_path, mutation, config)
+
+
+def save_publication_metadata(json_path: str, uuid_: str, *, title: str | None = None,
+                              description: str | None = None,
+                              config: dict | None = None) -> None:
+    def mutation(data):
+        pub = store._find(data, uuid_)
+        if has_delivery_success(pub):
+            raise ValueError("delivered publication cannot be edited")
+        if pub.get("state") != PUBLICATION_STATE_SCHEDULED:
+            raise ValueError("metadata edits require SCHEDULED")
+        if title is not None:
+            pub["title"] = title
+        if description is not None:
+            pub["description"] = description
+
+    store.mutate_publications(json_path, mutation, config)
+
+
+def approve_publication_metadata(json_path: str, uuid_: str, config: dict | None = None) -> None:
+    def mutation(data):
+        pub = store._find(data, uuid_)
+        if pub.get("state") != PUBLICATION_STATE_SCHEDULED:
+            raise ValueError("metadata approval requires SCHEDULED")
+        if any(not pub.get(key, "").strip() or TODO_GENERATE in pub[key]
+               for key in ("title", "description")):
+            raise ValueError("title and description required")
+        pub["state"] = PUBLICATION_STATE_DESCRIBED
+
+    store.mutate_publications(json_path, mutation, config)
+
+
+def return_to_metadata(json_path: str, uuid_: str, config: dict | None = None) -> None:
+    def mutation(data):
+        pub = store._find(data, uuid_)
+        if has_delivery_success(pub):
+            raise ValueError("delivered publication cannot be edited")
+        if pub.get("state") != PUBLICATION_STATE_DESCRIBED:
+            raise ValueError("return to metadata requires DESCRIBED")
+        pub["state"] = PUBLICATION_STATE_SCHEDULED
+
+    store.mutate_publications(json_path, mutation, config)
+
+
+def return_to_scheduling(json_path: str, uuid_: str, config: dict | None = None) -> None:
+    cfg = store._config(config)
+
+    def mutation(data):
+        pub = store._find(data, uuid_)
+        if has_delivery_success(pub):
+            raise ValueError("delivered publication cannot be edited")
+        if (pub.get("apparitionTimestampIfDifferentThanSubmission") is not None
+                and pub.get("scheduleProfile") not in {
+                    p["name"] for p in schedule_profiles(cfg.get("schedule", {}))}):
+            pub["scheduleIsManual"] = True
+        pub["state"] = PUBLICATION_STATE_PICKED
+
+    store.mutate_publications(json_path, mutation, cfg)
 
 
 def repack_publications(json_path: str, config: dict | None = None) -> None:
