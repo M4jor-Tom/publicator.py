@@ -226,6 +226,15 @@ def return_to_scheduling(json_path: str, uuid_: str, config: dict | None = None)
         _write_publications(json_path, data, cfg)
 
 
+def mutate_publications(json_path: str, mutation, config: dict | None = None):
+    """Apply one validated atomic mutation to the latest persisted publications."""
+    with _mutation_lock(json_path):
+        data = _read_publications(json_path)
+        result = mutation(data)
+        _write_publications(json_path, data, config)
+        return result
+
+
 def load_publications(json_path: str) -> list[dict]:
     return _read_publications(json_path)
 
