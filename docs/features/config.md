@@ -1,14 +1,14 @@
 # Configuration (publicator.toml)
 
 - **Does:** `load_config(data_dir)` reads `<data_dir>/publicator.toml` with stdlib `tomllib` into one flat dict (DA allow-lists, candidate dirs, tags path, raw `[schedule]`, compiled `[prompts]`), empty defaults when absent.
-- **Run:** `nix run .#publish-next -- --data-dir <data-dir>` loads it (library only; `--data-dir` defaults to CWD)
+- **Run:** `nix run .#ui -- --data-dir <data-dir>` loads it (library only; `--data-dir` defaults to CWD)
 - **Run:** `nix run .#da-publish -- --data-dir <data-dir>` loads it through `deviantart.configure`
 - **Run:** `nix run .#validate -- --data-dir <data-dir>` loads it; fastest smoke check that a real file parses
 - **Run:** `nix run .#prompt-audit -- --data-dir <data-dir>` loads it
-- **Code:** `src/publicator/config.py` (`load_config`, `_load_prompts`, `validate_publications`, `SCHEMA`), `src/publicator/deviantart.py` (`configure`, `DATA_DIR`, `TAGS_FILE`), `src/publicator/scheduling.py` (`zone`, `schedule_profiles`, `WEEKDAY`), `src/publicator/prompts.py` (`from_config`), `src/publicator/store.py` (validated mutations), `src/publicator/webui/page.py` (`render_page`), `src/publicator/webui/server.py` (`serve`), `src/publicator/apps/publish_next.py` (`main`), `src/publicator/apps/da_publish.py` (`main`), `src/publicator/apps/validate.py` (`main`), `src/publicator/apps/prompt_audit.py` (`main`, `audit`)
+- **Code:** `src/publicator/config.py` (`load_config`, `_load_prompts`, `validate_publications`, `SCHEMA`), `src/publicator/deviantart.py` (`configure`, `DATA_DIR`, `TAGS_FILE`), `src/publicator/scheduling.py` (`zone`, `schedule_profiles`, `WEEKDAY`), `src/publicator/prompts.py` (`from_config`), `src/publicator/store.py` (validated mutations), `src/publicator/webui/page.py` (`render_page`), `src/publicator/webui/server.py` (`serve`), `src/publicator/apps/ui.py` (`main`), `src/publicator/apps/da_publish.py` (`main`), `src/publicator/apps/validate.py` (`main`), `src/publicator/apps/prompt_audit.py` (`main`, `audit`)
 - **Tests:** `tests/test_config.py` (defaults, `[schedule]` pass-through, prompt grammar acceptance and rejection, tier/gallery allow-lists), `tests/test_deviantart.py` (`configure` resolves tags file under data dir, or leaves it unset), `tests/test_store.py` (validated store mutations), `tests/test_scheduling.py` (flat config becomes one profile, defaults, invalid profiles, day names), `tests/test_prompts.py` (`from_config` None without section or repo dir, archive otherwise), `tests/conftest.py` (`_restore_data_dir_globals` autouse fixture resets `configure` globals)
 - **Config:** `publicator.toml`, every key, see Keys; absent or empty `[prompts]` gives `prompts = None` (feature off).
-- **Data:** `publicator.toml` (read only; missing file is not an error); `<tags>` (read by `_step_add_tags` at STEPS entry 8); `<publicable[i]>/` (scanned by publish-next and prompt-audit); `<prompts.repo>/` (git repo digested by `prompts.PromptArchive` when set and present); `src/publicator/publicationsSchema.json` (code asset via `__file__`, parsed once at import, never read from the data dir)
+- **Data:** `publicator.toml` (read only; missing file is not an error); `<tags>` (read by `_step_add_tags` at STEPS entry 8); `<publicable[i]>/` (scanned by the UI and prompt-audit); `<prompts.repo>/` (git repo digested by `prompts.PromptArchive` when set and present); `src/publicator/publicationsSchema.json` (code asset via `__file__`, parsed once at import, never read from the data dir)
 - **Decisions:** `docs/adr/0003-declare-the-filename-grammar-in-publicator-toml.md`
 - **Verify:** `nix develop -c pytest tests/test_config.py -q`
 - **Verify:** `nix develop -c pytest tests/test_deviantart.py tests/test_store.py tests/test_scheduling.py tests/test_prompts.py -q`
@@ -19,7 +19,7 @@
 
 | key | type | default | meaning | consumer |
 |---|---|---|---|---|
-| `publicable` | list[str] | `[]` | dirs relative to data dir scanned for candidates | `images.find_candidates`, `serve` (publish-next, prompt-audit) |
+| `publicable` | list[str] | `[]` | dirs relative to data dir scanned for candidates | `images.find_candidates`, `serve` (UI, prompt-audit) |
 | `tags` | str | None | tag list path, one tag per line | `deviantart.configure` -> `TAGS_FILE`, `_step_add_tags` |
 | `[deviantart] tiers` | list[str] | `[]` | tier allow-list; the UI renders checkboxes and schedule profiles can preselect names; when `tiers` and `galleries` are both empty the card form omits both fields | `validate_publications`, `page.render_page` |
 | `[deviantart] galleries` | list[str] | `[]` | allow-list, same rule as `tiers` | `validate_publications`, `page.render_page` |

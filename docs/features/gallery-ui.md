@@ -1,8 +1,8 @@
-# Gallery UI (publish-next)
+# Gallery UI
 
 - **Does:** Durable human review in Pick / Schedule / Describe / Publish phases, plus a read-only calendar; phase labels indicate the next action, not stored state.
-- **Run:** `nix run .#publish-next -- [-n 10] [--data-dir DIR] [--json FILE] [--ai-model ID] [--openrouter-model ID] [--ai-timeout 300] [--port 8765] [-v]`
-- **Code:** `src/publicator/webui/page.py` (pure renderer and small client), `src/publicator/webui/server.py` (`GalleryHandler`, `create_handler`, `serve`), `src/publicator/apps/publish_next.py` (startup); persistence owned by `src/publicator/store.py`, dispatch by `src/publicator/platforms.py`.
+- **Run:** `nix run .#ui -- [--data-dir DIR] [--json FILE] [--ai-model ID] [--openrouter-model ID] [--ai-timeout 300] [--port 8765] [-v]`
+- **Code:** `src/publicator/webui/page.py` (pure renderer and small client), `src/publicator/webui/server.py` (`GalleryHandler`, `create_handler`, `serve`), `src/publicator/apps/ui.py` (startup); persistence owned by `src/publicator/store.py`, dispatch by `src/publicator/platforms.py`.
 - **Tests:** `tests/test_page.py` (escaping, phase forms, accessible selection grid), `tests/test_server.py` (real HTTP + real JSON persistence, reopen, AI races, retry, guards), `tests/test_scheduling.py` (server allocation).
 - **Config:** `publicator.toml`: `publicable`, `[deviantart]` allow-lists, read-only `[schedule]` profiles, optional `[prompts]`; local model availability from llmfit/Ollama.
 - **Data:** `publications.json` is authoritative on every request/refresh; `.thumbs/` is a lazy content-addressed cache. Disk deletion is restricted to unpicked candidate paths; no persisted publication is removed by the UI.
@@ -31,6 +31,6 @@ Publication state meanings belong to [publications-store](publications-store.md)
 ## Gotchas
 
 - Publication results stay in this tab's session storage across reload; durable success/pending states live in JSON. Other tabs see successes on refresh, not an automatic live update. The server stays open after attempts; stop it with Ctrl-C.
-- `-n` samples candidates once per launch; prompt search walks publicable directories with a 200-result cap before hashing. Missing stored artwork remains visible rather than silently disappearing.
+- Search reloads candidates from the selected configured paths; prompt search walks those paths with a 200-result cap before hashing. Missing stored artwork remains visible rather than silently disappearing.
 - The localhost UI is intended for one trusted human, not deployment on a public interface. Publishing is synchronous per request but other requests can read the workflow during it.
 - Browser/UI checks must use disposable data and stub publishers/providers. Never demonstrate a workflow by submitting real artwork or changing the Art directory.

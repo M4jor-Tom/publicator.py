@@ -1,11 +1,11 @@
 # Images and thumbnails
 
 - **Does:** Finds unpublished candidates (sha512-dedup against `publications.json`), keeps one content-addressed `.thumbs/` cache shared by gallery, calendar and `/ai`, and resolves art to a non-webp upload at publish time.
-- **Run:** `nix run .#publish-next -- [--data-dir D] [-n 10] [--json F] [--port 8765] [--ai-model M] [--openrouter-model M] [--ai-timeout 300] [-v]` (persistent `.thumbs/` cache)
+- **Run:** `nix run .#ui -- [--data-dir D] [--json F] [--port 8765] [--ai-model M] [--openrouter-model M] [--ai-timeout 300] [-v]` (persistent `.thumbs/` cache)
 - **Run:** `nix run .#generate-meta -- --data-dir ../Art --source {local,openrouter,claude} [--model M] [--timeout 300] [-y] [-v]` (publication-driven; batch uses the data-dir `.thumbs` cache)
 - **Run:** `nix run .#da-publish -- [--data-dir D] [--json F] [--uuid ID | --all] [--headless] [-v]` (webp to png via `convert`)
 - **Run:** `nix run .#prompt-audit -- [--data-dir D]` (library use of `collect_images` only)
-- **Code:** `src/publicator/images.py` (`IMAGE_EXTENSIONS`, `find_candidates`, `thumb_name`, `ensure_thumb`, `thumb_for_ai`, `index_by_basename`), `src/publicator/webui/server.py` (`thumb_maps`, `GalleryHandler.do_GET`, `SEARCH_LIMIT`), `src/publicator/webui/calendar_view.py` (`timeline`, `event_html`), `src/publicator/webui/page.py` (`render_page`), `src/publicator/deviantart.py` (`_pending_art`, `_resolve_art`, `_step_upload`), `src/publicator/entries.py` (`find_art_path`), `src/publicator/apps/generate_meta.py` (`main`), `src/publicator/apps/publish_next.py` (`main`)
+- **Code:** `src/publicator/images.py` (`IMAGE_EXTENSIONS`, `find_candidates`, `thumb_name`, `ensure_thumb`, `thumb_for_ai`, `index_by_basename`), `src/publicator/webui/server.py` (`thumb_maps`, `GalleryHandler.do_GET`, `SEARCH_LIMIT`), `src/publicator/webui/calendar_view.py` (`timeline`, `event_html`), `src/publicator/webui/page.py` (`render_page`), `src/publicator/deviantart.py` (`_pending_art`, `_resolve_art`, `_step_upload`), `src/publicator/entries.py` (`find_art_path`), `src/publicator/apps/generate_meta.py` (`main`), `src/publicator/apps/ui.py` (`main`)
 - **Tests:** `tests/test_images.py` (thumb naming, cache reuse, candidate dedup, dot-dir skip), `tests/test_server.py` (`/thumbs` allow-list and serving, `thumb_maps` row pairing), `tests/test_calendar.py` (legacy sha key, off-disk art renders as title)
 - **Config:** `publicator.toml` top-level `publicable` (list[str], default `[]`): dirs joined to the data dir that `find_candidates` walks recursively for `IMAGE_EXTENSIONS` files, and that a filtered page (`?prompt=`/`?lineage=`) re-walks in full via `GalleryHandler.search`.
 - **Data:** `.thumbs/<sha512[:32]><lowercased ext>` (`THUMB_CACHE`, `GalleryHandler.cache_dir`; written lazily on first `/thumbs`/`/ai` request, never pruned; gitignore it); `publications.json` (read only: sha keys and `files[0].basename`, fields written by publications-store); `<publicable>/**` (walked for candidates, re-walked in full by filtered pages); data dir (`index_by_basename` walks it once per `serve()` skipping dot-dirs; `rglob('*<stem>*')` includes them); `tempfile.gettempdir()/<stem>.png` (webp converted by `_resolve_art`); `<data-dir>/.thumbs/` (persistent AI thumbnail cache shared with gallery; batch generation uses this cache too).
@@ -14,7 +14,7 @@
 
 ## How it works
 
-1. `apps/publish_next.main` calls `images.find_candidates(dirs, json, n)`; `collect_images` os.walks each dir keeping files whose lowercased ext is in `IMAGE_EXTENSIONS` (a missing dir yields nothing), then the list is shuffled.
+1. `apps/ui.main` calls `images.find_candidates(dirs, json, n)`; `collect_images` os.walks each dir keeping files whose lowercased ext is in `IMAGE_EXTENSIONS` (a missing dir yields nothing), then the list is shuffled.
 2. `find_candidates` sha512-hashes the shuffled list and keeps the first n whose hash is not in `load_publicated_hashes` (both sha keys, lowercased, under `files[]`/`previewFilesIfNotFree[]`); an `OSError` goes to stderr and skips the file.
 3. `deviantart.load_pending_entries` → `_pending_art(files[0].basename)`: `DATA_DIR.rglob('*<stem>*')`, `is_file()` only, prefers `suffix.lower() != '.webp'`, else first match; `None`/`SystemExit`/`KeyError`/`IndexError` skips the entry on stderr.
 4. `webui.server.serve` calls `calendar_view.timeline(args.json)`: one row per DA apparition carrying `files[0].basename` and the stored sha (`''` when absent), then `thumb_maps(data_dir, candidates + pending, rows)`.
@@ -43,7 +43,7 @@
 
 - `ensure_thumb` hides a failing/missing `convert` by `copy2`-ing the full-size original under the thumb name and `exists()` keeps it forever: full-res "thumbnails" served and sent to the AI. Fix: ImageMagick on PATH, delete oversized `.thumbs/` files.
 - The suite never proves `convert` resizes: `test_ensure_thumb_*` and `test_thumbs_route_serves_a_rendered_name` write fake bytes (`b'\x89PNG-art'`) on which `convert` exits 1, so they pass via the copy2 fallback (thumb byte-identical to source).
-- `generate-meta`'s flake app lists only `claude` in `runtimeInputs` (`flake.nix:103`; `app` adds `python`, no `pkgs.imagemagick` unlike `publish-next`/`da-publish`), so `convert` comes from the host PATH or `thumb_for_ai` silently sends full-res.
+- `generate-meta`'s flake app lists only `claude` in `runtimeInputs` (`flake.nix:103`; `app` adds `python`, no `pkgs.imagemagick` unlike `ui`/`da-publish`), so `convert` comes from the host PATH or `thumb_for_ai` silently sends full-res.
 - `IMAGE_EXTENSIONS` includes `.mp4`, so a video becomes a candidate and its card is `<img src="/thumbs/<sha>.mp4">`, which browsers cannot render. Whether `convert` resizes it or the copy fallback stores the whole video in `.thumbs/` is untested.
 - `/ai` and `/delete` take `path` from the POST body with no `thumb_map` check; only `/thumbs` and `/original` are allow-listed, so any local path posted to `/ai` is thumbnailed into `.thumbs/` and sent to the model. Server binds `127.0.0.1` only.
 - `GalleryHandler` state (`thumb_map`, `thumb_src`, `cache_dir`, ...) is class attributes mutated at runtime (`_register_thumbs`, `/delete`); tests must monkeypatch them or leak, and `tests/test_server.py::_serve_once` uses `setattr` and does leak.

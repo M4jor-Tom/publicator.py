@@ -1,7 +1,7 @@
 # Scheduling (slots and weekly profiles)
 
 - **Does:** Repackages automatic PICKED date suggestions in persisted order; manual pins and approved dates reserve capacity and never move automatically.
-- **Run:** `nix run .#publish-next -- --data-dir DIR` (Schedule phase; weekly profiles are read-only)
+- **Run:** `nix run .#ui -- --data-dir DIR` (Schedule phase; weekly profiles are read-only)
 - **Code:** `src/publicator/scheduling.py` (`schedule_profiles`, `schedule_data`, `profile_slots`, `repack_publication_dates`, `resolve_ts`, `zone`), `src/publicator/store.py` (date edits/approval and repack mutation), `src/publicator/webui/server.py` (HTTP boundary), `src/publicator/webui/page.py` (native picker).
 - **Tests:** `tests/test_scheduling.py` (capacity, exhausted horizon, DST and historical occupancy), `tests/test_store.py` (manual pins, unpin/profile edits, frozen dates), `tests/test_server.py` (real HTTP repacks/approval).
 - **Config:** `[schedule] timezone` defaults to Europe/Paris; weekly `profiles` specify name, day, local hour, per_slot and optional DA `default_tiers` / `default_price` (finite nonnegative number). Flat configuration remains one default profile. Profiles need distinct day/hour slots and valid configured tier names.

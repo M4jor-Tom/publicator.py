@@ -23,6 +23,8 @@ from publicator.images import (
     guess_mime,
     index_by_basename,
     load_publicated_hashes,
+    Search,
+    find_candidates,
     thumb_for_ai,
     thumb_name,
 )
@@ -69,7 +71,8 @@ class GalleryHandler(BaseHTTPRequestHandler):
     json_path = "publications.json"
     config: dict = {}
     archive = None                       # PromptArchive | None; None = feature off
-    publicable_dirs: list[str] = []      # walked in full when a filter is active
+    publicable_dirs: list[str] = []
+    search_state = None
 
     def _prompt_html(self, paths) -> dict[str, str]:
         """{art path: prompt block} for everything this page will show — the
@@ -124,11 +127,15 @@ class GalleryHandler(BaseHTTPRequestHandler):
                     continue
                 exact.append(path)
         published = load_publicated_hashes(self.json_path)
-        truncated = len(exact) > SEARCH_LIMIT or len(maybe) > SEARCH_LIMIT
+        display_limit = min(SEARCH_LIMIT, getattr(self.search_state, "limit", 25))
+        truncated = (len(exact) + len(maybe) > display_limit
+                     or len(exact) > SEARCH_LIMIT or len(maybe) > SEARCH_LIMIT)
 
-        def unpublished(paths):
+        def unpublished(paths, remaining):
             out = []
             for p in paths[:SEARCH_LIMIT]:
+                if len(out) >= remaining:
+                    break
                 try:
                     if compute_sha512(p) not in published:
                         out.append(p)
@@ -136,7 +143,9 @@ class GalleryHandler(BaseHTTPRequestHandler):
                     log.debug("hashing %s: %s", p, e)
             return out
 
-        return unpublished(exact), unpublished(maybe), skipped, truncated
+        exact_hits = unpublished(exact, display_limit)
+        maybe_hits = unpublished(maybe, display_limit - len(exact_hits))
+        return exact_hits, maybe_hits, skipped, truncated
 
     def _register_thumbs(self, paths: list[str]) -> None:
         """Extend the /thumbs allow-list with search results. The allow-list is
@@ -364,6 +373,26 @@ class GalleryHandler(BaseHTTPRequestHandler):
         finally:
             self.publish_lock.release()
 
+    def _search(self, data: dict) -> dict:
+        self._fields(data, {"limit", "paths"})
+        limit, paths = data.get("limit"), data.get("paths")
+        if type(limit) is not int or limit not in (0, 25, 50, 75, 100):
+            raise ValueError("limit must be 0, 25, 50, 75, or 100")
+        configured = self.config.get("publicable", [])
+        if (not isinstance(paths, list) or any(not isinstance(p, str) for p in paths)
+                or len(paths) != len(set(paths))
+                or any(p not in configured for p in paths)):
+            raise ValueError("paths must be unique configured publicable paths")
+        directories = [str((Path(self.data_dir) / p).resolve()) for p in paths]
+        candidates = find_candidates(Search(limit, tuple(directories)), self.json_path)
+        with self.operation_lock:
+            cls = self.__class__
+            cls.search_state = Search(limit, tuple(paths))
+            cls.publicable_dirs = directories
+            cls.candidate_paths = candidates
+            cls.rendered_candidates.clear()
+        return {"limit": limit, "paths": paths}
+
     def _mutate(self, data: dict) -> dict:
         endpoint = self.path
         if endpoint in ("/pick", "/delete"):
@@ -443,6 +472,8 @@ class GalleryHandler(BaseHTTPRequestHandler):
                 self._ai(data)
             elif self.path == "/publish":
                 self._publish(data)
+            elif self.path == "/search":
+                self._send(200, self._search(data))
             else:
                 with self.operation_lock:
                     if self.path in ("/metadata/approve", "/schedule/return") and data.get("uuid") in self.ai_busy:
@@ -515,7 +546,8 @@ def create_handler(data_dir: str, candidate_paths: list[str], args, config: dict
     Handler.json_path = args.json
     Handler.config = config
     Handler.archive = prompt_archive_from_config(data_dir, config)
-    Handler.publicable_dirs = publicable_dirs or []
+    Handler.search_state = Search(25, tuple(config.get("publicable", [])))
+    Handler.publicable_dirs = list(publicable_dirs or [])
     schedule_data(config.get("schedule", {}), allowed_tiers=config.get("tiers", []))
     return Handler
 

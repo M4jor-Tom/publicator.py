@@ -127,6 +127,22 @@ def test_search_matches_exact_prompt_text_only(tmp_path, monkeypatch):
     assert truncated is False
 
 
+def test_prompt_search_respects_search_display_limit(workflow, monkeypatch):
+    from publicator.images import Search
+    from publicator.prompts import Exact, PromptVersion
+    handler = workflow.gallery.GalleryHandler.__new__(workflow.gallery.GalleryHandler)
+    version = PromptVersion('v', 'prompt', ('lineage',), 0)
+    monkeypatch.setattr(workflow.gallery.GalleryHandler, 'archive',
+                        SimpleNamespace(resolve_path=lambda path: Exact(version)))
+    monkeypatch.setattr(workflow.gallery.GalleryHandler, 'publicable_dirs',
+                        [str(workflow.candidates[0]).rsplit('/', 1)[0]])
+    monkeypatch.setattr(workflow.gallery.GalleryHandler, 'search_state', Search(1, ('picked',)))
+    monkeypatch.setattr(workflow.gallery.GalleryHandler, 'json_path', str(workflow.jp))
+    monkeypatch.setattr(workflow.gallery.GalleryHandler, 'data_dir', str(workflow.jp.parent))
+    exact, maybe, skipped, truncated = handler.search('', '')
+    assert len(exact) == 1 and not maybe and skipped == 0 and truncated
+
+
 def test_search_is_inert_when_the_feature_is_off(monkeypatch):
     from publicator.webui.server import GalleryHandler
     monkeypatch.setattr(GalleryHandler, "archive", None)
@@ -188,7 +204,7 @@ def workflow(tmp_path, monkeypatch):
     jp = tmp_path / 'publications.json'
     jp.write_text('[]')
     cfg = {'schedule': {'timezone': 'Europe/Paris', 'per_slot': 1},
-           'tiers': ['gold'], 'galleries': ['Art']}
+           'tiers': ['gold'], 'galleries': ['Art'], 'publicable': ['picked']}
     submitted = []
     fail = [False]
     class Publisher:
@@ -211,9 +227,12 @@ def workflow(tmp_path, monkeypatch):
     monkeypatch.setattr(gallery, 'thumb_for_ai', lambda *a: 'thumbnail.png')
     monkeypatch.setattr(gallery, 'generate_metadata', lambda *a, **kw: ('Generated', 'Generated description'))
     args = SimpleNamespace(json=str(jp), ai_model='claude-test', openrouter_model='', ai_timeout=3)
+    handlers = []
     @contextlib.contextmanager
     def start():
-        handler = gallery.create_handler(str(tmp_path), candidates, args, cfg, [str(picked)])
+        handler = gallery.create_handler(str(tmp_path), candidates, args, cfg,
+                                         [str(tmp_path / p) for p in cfg['publicable']])
+        handlers.append(handler)
         server = ThreadingHTTPServer(('127.0.0.1', 0), handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
         try:
@@ -221,7 +240,7 @@ def workflow(tmp_path, monkeypatch):
         finally:
             server.shutdown(); thread.join(); server.server_close()
     return SimpleNamespace(start=start, jp=jp, candidates=candidates, cfg=cfg,
-                           submitted=submitted, fail=fail, gallery=gallery)
+                           submitted=submitted, fail=fail, gallery=gallery, handlers=handlers)
 
 
 def pick(url, workflow, index=0):
@@ -264,6 +283,35 @@ def test_http_mutations_dispatch_through_workflow_operations(workflow, monkeypat
                      'approve_publication_metadata', 'select_publication_platforms',
                      'select_publication_platforms', 'save_platform_options',
                      'return_to_metadata', 'return_to_scheduling']
+
+
+def test_search_reload_is_allowlisted_and_replaces_candidate_authorization(workflow):
+    from pathlib import Path
+    from publicator.images import Search
+    extra = Path(workflow.candidates[0]).parent.parent / 'other'
+    extra.mkdir()
+    dropped = extra / 'dropped.png'
+    dropped.write_bytes(b'dropped batch')
+    workflow.cfg['publicable'].append('other')
+    with workflow.start() as url:
+        assert workflow.handlers[-1].search_state == Search(25, ('picked', 'other'))
+        response = _post(url, {'limit': 25, 'paths': ['other']}, '/search')
+        assert response == (200, {'limit': 25, 'paths': ['other']})
+        assert b'data-path="' + str(dropped).encode() + b'"' in _get(url)[1]
+        assert _post(url, {'limit': 0, 'paths': ['picked']}, '/search')[0] == 200
+        assert workflow.handlers[-1].candidate_paths == []
+        assert _post(url, {'path': str(dropped)}, '/pick')[0] == 400
+        assert _get(url)[0] == 200
+        assert _post(url, {'limit': 25, 'paths': ['picked']}, '/search')[0] == 200
+        assert _post(url, {'limit': 25, 'paths': ['unknown']}, '/search')[0] == 400
+        for body in (
+                {'limit': 25, 'paths': ['picked', 'picked']},
+                {'limit': 24, 'paths': ['picked']},
+                {'limit': True, 'paths': ['picked']},
+                {'limit': 25, 'paths': '../picked'},
+                {'limit': 25, 'paths': [1]},
+                {'limit': 25, 'paths': ['picked'], 'extra': True}):
+            assert _post(url, body, '/search')[0] == 400
 
 
 def test_pick_persists_without_metadata_and_reopens_in_schedule(workflow):
@@ -646,16 +694,24 @@ def test_busy_publish_rejects_duplicate_batches(workflow, monkeypatch):
 
 
 @pytest.mark.parametrize('history_platform', ['deviantart', 'pixiv'])
-def test_publish_next_launches_history_only_and_draft_only(tmp_path, monkeypatch, history_platform):
-    from publicator.apps import publish_next
+def test_ui_launches_history_only_and_draft_only(tmp_path, monkeypatch, history_platform):
+    from publicator.apps import ui
+    (tmp_path / 'publicator.toml').write_text('publicable = ["picked", "other"]\n')
     from publicator import store
     art = tmp_path / 'a.png'; art.write_bytes(b'art')
     jp = tmp_path / 'publications.json'
     uuid = store.pick_publication(str(art), str(jp), {})
     calls = []
-    monkeypatch.setattr(publish_next, 'serve', lambda *args: calls.append(args))
-    monkeypatch.setattr('sys.argv', ['publish-next', '--data-dir', str(tmp_path)])
-    assert publish_next.main() == 0 and len(calls) == 1
+    searches = []
+    monkeypatch.setattr(ui, 'serve', lambda *args: calls.append(args))
+    monkeypatch.setattr(ui, 'find_candidates', lambda search, path: searches.append(search) or [])
+    monkeypatch.setattr('sys.argv', ['ui', '--data-dir', str(tmp_path)])
+    assert ui.main() == 0 and len(calls) == 1
+    from publicator.images import Search
+    assert searches == [Search(25, (str(tmp_path / 'picked'), str(tmp_path / 'other')))]
+    monkeypatch.setattr('sys.argv', ['ui', '-n', '10', '--data-dir', str(tmp_path)])
+    with pytest.raises(SystemExit):
+        ui.main()
     store.repack_publications(str(jp), {})
     store.approve_publication_date(str(jp), uuid, {})
     store.save_publication_metadata(str(jp), uuid, title='t', description='d', config={})
@@ -668,7 +724,8 @@ def test_publish_next_launches_history_only_and_draft_only(tmp_path, monkeypatch
     from publicator.config import validate_publications
     validate_publications(rows, {})
     jp.write_text(json.dumps(rows))
-    assert publish_next.main() == 0 and len(calls) == 2
+    monkeypatch.setattr('sys.argv', ['ui', '--data-dir', str(tmp_path)])
+    assert ui.main() == 0 and len(calls) == 2
     assert calls[-1][1] == []  # No candidate images; even unregistered history launches.
 
 

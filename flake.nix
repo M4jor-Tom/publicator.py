@@ -92,7 +92,7 @@
       apps.${system} = {
         # `claude` on PATH so llm-claude-cli can shell out for AI metadata
         # (uses the logged-in Claude subscription at $HOME/.claude — no API key).
-        publish-next = app "publish-next" "publish_next" [ pkgs.git pkgs.imagemagick browsers claude pkgs.ollama pkgs.llmfit ] true;
+        ui = app "ui" "ui" [ pkgs.git pkgs.imagemagick browsers claude pkgs.ollama pkgs.llmfit ] true;
         # Publish the first pending publications.json entry, one by uuid, or --all (the extracted Playwright flow):
         #   nix run .#da-publish -- --data-dir <dir> [--uuid <id> | --all] [--headless]
         da-publish = app "da-publish" "da_publish" [ pkgs.imagemagick browsers ] true;

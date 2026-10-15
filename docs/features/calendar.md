@@ -1,7 +1,7 @@
 # Calendar tab
 
 - **Does:** Read-only month grids of every apparition, past and scheduled, with server-side schedule-timezone bucketing and native prompt popovers.
-- **Run:** `nix run .#publish-next -- --data-dir DIR`, then Calendar; history-only startup is supported.
+- **Run:** `nix run .#ui -- --data-dir DIR`, then Calendar; history-only startup is supported.
 - **Code:** `src/publicator/webui/calendar_view.py` (`timeline`, `render_calendar`, `event_html`, `month_html`), `src/publicator/webui/server.py` (`thumb_maps`, `_build_page`, `_prompt_html`), `src/publicator/webui/page.py` (tab reveal and anchor navigation), `src/publicator/images.py` (cache/index).
 - **Tests:** `tests/test_calendar.py` (shared title/date/URL, multi-platform identities, timezone and popovers), `tests/test_page.py`, `tests/test_server.py` (refresh and allow-lists).
 - **Config:** `[schedule] timezone`, default Europe/Paris; optional `[prompts]` archive.

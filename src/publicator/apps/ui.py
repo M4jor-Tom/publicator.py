@@ -12,7 +12,6 @@ from publicator.webui.server import serve
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Unified publish workflow (gallery + AI + Firefox DA).")
-    parser.add_argument("-n", type=int, default=10)
     parser.add_argument("--data-dir", default=None,
                         help="publication database dir (publications.json + images + browser session); default: CWD")
     parser.add_argument("--json", default=None, help="default: <data-dir>/publications.json")
@@ -34,7 +33,7 @@ def main() -> int:
     publicable_dirs = [str(data_dir / d) for d in config["publicable"]]
 
     print("Finding unpublished images...")
-    candidates = find_candidates(Search(args.n, tuple(publicable_dirs)), args.json)
+    candidates = find_candidates(Search(25, tuple(publicable_dirs)), args.json)
     print(f"Found {len(candidates)} new pick(s); opening saved workflow and calendar.")
     serve(str(data_dir), candidates, args, config, publicable_dirs)
     return 0
