@@ -387,4 +387,3 @@ def test_save_platform_options_selects_deviantart_not_first_platform(tmp_path):
     assert pub["apparitions"][1] == {
         "platformName": "deviantart", "state": "unpublished", "priceIfNotFree": 5,
         "tiers": ["gold"], "galleries": ["Art"]}
-
