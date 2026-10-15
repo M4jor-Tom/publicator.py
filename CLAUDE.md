@@ -43,7 +43,7 @@ Some scheduler tests shell out to `node` to run the served page's client JS and
 
 ```sh
 nix run <this>#login          # one-time DeviantArt sign-in in a REAL Firefox (see PerimeterX below)
-nix run <this>#publish-next   # the gallery UI: review picked/, AI metadata, schedule, batch-publish
+nix run .#ui                 # the gallery UI: Search, review, schedule, describe, batch-publish (from the code repo)
 nix run <this>#da-publish -- --data-dir <dir> [--uuid <id> | --all] [--headless]   # publish the first pending entry, one by uuid, or all
 nix run <this>#generate-meta -- --data-dir <dir> --source openrouter # replace marked metadata
 nix run <this>#vision-models  # host-fit verdicts for configured local vision models
@@ -64,7 +64,7 @@ invariants, gotchas). Read the feature file before touching its code.
 `images.py`, `scheduling.py`, `store.py`, `deviantart.py`, `llm_meta.py`, `prompts.py` hold
 the logic; `webui/{page,server,calendar_view,prompt_view}.py` is the UI (a pure `render_page`
 plus the `ThreadingHTTPServer` that calls it, and the calendar tab's own pure
-renderer); `apps/{publish_next,da_publish,
+renderer); `apps/{ui,da_publish,
 validate,echo_first,pw_daemon,generate_meta,vision_models,prompt_audit}.py` are the thin CLI entry points the flake's
 `nix run` apps invoke. Code assets (the JSON schema) resolve via `__file__`
 inside the package; the tags file, like all data + runtime state, still
@@ -75,10 +75,11 @@ resolves against CWD/`--data-dir`, per the code/data split above.
    the logged-in profile to `.deviantart-login/` in the data dir. This is not
    automatable: DeviantArt sits behind **PerimeterX**, which blocks *every*
    Playwright browser at the login page (Playwright forces `navigator.webdriver`).
-2. `publicator.webui.server` (`#publish-next`, launched by `apps/publish_next.py`)
-   is the orchestrator — a `ThreadingHTTPServer` gallery on `127.0.0.1` opened in
-   Firefox for **human review**, not a headless job. It scans the config's
-   `publicable` dirs (e.g. `picked/`), then persists four distinct phases:
+2. `publicator.webui.server` (`#ui`, launched by `apps/ui.py`) is the
+   orchestrator — a `ThreadingHTTPServer` gallery on `127.0.0.1` opened in
+   Firefox for **human review**, not a headless job. Search selects a runtime
+   subset of configured `publicable` dirs (never arbitrary filesystem paths or
+   TOML edits); it scans the selected dirs, then persists four distinct phases:
    Pick → Schedule → Describe → Publish. `publications.json` owns completed
    publication states PICKED/SCHEDULED/DESCRIBED/APPEARED, shared title/description,
    and the publication-level apparitionTimestampIfDifferentThanSubmission.
@@ -95,9 +96,12 @@ resolves against CWD/`--data-dir`, per the code/data split above.
    Candidate cards and calendar popovers share the prompt renderer; scheduling
    and metadata cards have no prompt/search/delete actions.
    Every mutation validates before atomic replacement under short thread/file
-   locks; AI/browser work never holds them. Accepted AI failures save the exact
-   [[PUBLICATOR:TODO_GENERATE]] marker in requested fields; blank/marked metadata
-   cannot advance or publish. Manual drafts debounce and flush on phase changes.
+   locks; AI/browser work never holds them. UI edits delegate to application
+   operations. AI generation always requests both title and description; only
+   a valid pair advances SCHEDULED to DESCRIBED. Failure leaves SCHEDULED and
+   saves the exact [[PUBLICATOR:TODO_GENERATE]] marker in both fields for retry;
+   blank/marked metadata cannot advance or publish. Manual drafts debounce and
+   flush on phase changes.
 3. `publicator/deviantart.py` is the Playwright submit logic for **one** entry
    (one-way import: `webui.server` / `apps.da_publish` → `deviantart`, no cycle).
    It flips the entry's apparition `state` `unpublished` → `published_or_scheduled`.
@@ -162,7 +166,7 @@ capture groups plus `version_hash`. Nothing in `src/` may hardcode `sha1` or
 the filename shape. `nix run <this>#prompt-audit` reports `parsed: N of M`,
 which drops to 0 if that grammar drifts from what `identify_image.sh` produces,
 and `nearest`, which rising means archive writes are failing. Both apps that
-shell out to git (`publish-next`, `prompt-audit`) must list `pkgs.git` in their
+shell out to git (`ui`, `prompt-audit`) must list `pkgs.git` in their
 flake `runtimeInputs` — `writeShellApplication` pins PATH to those.
 Feature doc: `docs/features/prompt-mapping.md`,
 decisions in `docs/adr/0001`–`0004`.

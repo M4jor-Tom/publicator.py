@@ -14,8 +14,8 @@
 
 ## How it works
 
-1. `apps/ui.main` calls `images.find_candidates(dirs, json, n)`; `collect_images` os.walks each dir keeping files whose lowercased ext is in `IMAGE_EXTENSIONS` (a missing dir yields nothing), then the list is shuffled.
-2. `find_candidates` sha512-hashes the shuffled list and keeps the first n whose hash is not in `load_publicated_hashes` (both sha keys, lowercased, under `files[]`/`previewFilesIfNotFree[]`); an `OSError` goes to stderr and skips the file.
+1. `apps/ui.main` loads configured `publicable` paths and starts the gallery with `Search(25, all_paths)`; Search may select only a runtime subset of those paths, with limits Empty/0, 25, 50, 75, or 100. `collect_images` os.walks each selected dir keeping files whose lowercased ext is in `IMAGE_EXTENSIONS` (a missing dir yields nothing), then the list is shuffled.
+2. `find_candidates` accepts a `Search`, sha512-hashes the shuffled list and keeps candidates whose hash is not in `load_publicated_hashes` (both sha keys, lowercased, under `files[]`/`previewFilesIfNotFree[]`), up to its limit; Empty/0 means no candidates. An `OSError` goes to stderr and skips the file.
 3. `deviantart.load_pending_entries` → `_pending_art(files[0].basename)`: `DATA_DIR.rglob('*<stem>*')`, `is_file()` only, prefers `suffix.lower() != '.webp'`, else first match; `None`/`SystemExit`/`KeyError`/`IndexError` skips the entry on stderr.
 4. `webui.server.serve` calls `calendar_view.timeline(args.json)`: one row per DA apparition carrying `files[0].basename` and the stored sha (`''` when absent), then `thumb_maps(data_dir, candidates + pending, rows)`.
 5. `thumb_maps`: `thumb_name` per gallery path into `thumb_map {path: name}`/`thumb_src {name: path}`; `index_by_basename` stamps `row['thumb'] = thumb_name(src, row['sha'])` (stored sha, else hashed) and `row['path'] = src`, both `''` off disk; rows enter `thumb_src` only.
@@ -25,7 +25,7 @@
 9. `POST /ai` (`do_POST`): `thumb_for_ai(path, cache_dir, thumb_map.get(path))` = `ensure_thumb`, original path on `OSError`, then `llm_meta.generate_metadata`; batch `apps/generate_meta.generate_pending` uses the same function and `<data-dir>/.thumbs` cache.
 10. `GalleryHandler.search` (`?prompt=`/`?lineage=`) re-walks `publicable_dirs` with `collect_images`, filters by the prompt archive, caps each list at `SEARCH_LIMIT`, then sha512-hashes the survivors against `load_publicated_hashes`.
 11. `GalleryHandler._build_page` calls `_register_thumbs(exact + maybe)`, which hashes each path not yet in `thumb_map` and extends the class-level `thumb_map`/`thumb_src` before `render_page`.
-12. `deviantart._step_upload` (publish-next `publish_batch`, da-publish) calls `_resolve_art`: non-webp → as is; webp → `entries.find_art_path` (rglob `*<stem>*`, first `p.suffix.lower() != '.webp'`), else `convert` to `<tempdir>/<stem>.png`, `check=True`.
+12. `deviantart._step_upload` (UI registered-platform dispatch, da-publish) calls `_resolve_art`: non-webp → as is; webp → `entries.find_art_path` (rglob `*<stem>*`, first `p.suffix.lower() != '.webp'`), else `convert` to `<tempdir>/<stem>.png`, `check=True`.
 
 ## Invariants
 

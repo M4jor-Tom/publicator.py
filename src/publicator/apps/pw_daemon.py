@@ -34,7 +34,7 @@ def main() -> None:
     _ap.add_argument("--data-dir", default=None,
                      help="publication database dir holding .deviantart-session/; default: CWD")
     _dd = _ap.parse_args().data_dir
-    SESSION = (Path(_dd).resolve() if _dd else Path.cwd()) / ".deviantart-session"  # shared with the publish-next app
+    SESSION = (Path(_dd).resolve() if _dd else Path.cwd()) / ".deviantart-session"  # shared with the UI app
 
     if not os.path.exists(FIFO):
         os.mkfifo(FIFO)

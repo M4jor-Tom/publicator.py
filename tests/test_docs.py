@@ -15,3 +15,18 @@ PATH_RE = re.compile(r"`((?:src|tests|docs|\.claude)/[^`\s:]*(?:\.\w+|/))")
 def test_referenced_repo_paths_exist(doc):
     missing = sorted({m for m in PATH_RE.findall(doc.read_text()) if not (ROOT / m).exists()})
     assert not missing, f"{doc.relative_to(ROOT)} names missing paths: {missing}"
+
+
+def test_ui_docs_describe_search_and_application_owned_ai_flow():
+    claude = (ROOT / "CLAUDE.md").read_text()
+    gallery = (ROOT / "docs/features/gallery-ui.md").read_text()
+    ai = (ROOT / "docs/features/ai-metadata.md").read_text()
+    config = (ROOT / "docs/features/config.md").read_text()
+
+    assert "nix run .#ui" in claude
+    assert "runtime subset" in gallery
+    assert "Empty/0, 25, 50, 75, or 100" in gallery
+    assert "defaults to 25" in gallery and "all configured `publicable` paths selected" in gallery
+    assert "publicable" in config and "runtime" in config
+    assert "both title and description" in ai
+    assert "publication remains SCHEDULED and retryable" in ai

@@ -73,7 +73,7 @@
       # PerimeterX wall blocks every Playwright browser at the login page, so
       # login must happen in a genuine browser (no navigator.webdriver). It
       # writes the logged-in + cleared session to the repo-local profile that
-      # publish-next then copies. Reproducible: firefox is flake-pinned.
+      # the UI then copies. Reproducible: firefox is flake-pinned.
       login = {
         type = "app";
         program = "${pkgs.writeShellApplication {

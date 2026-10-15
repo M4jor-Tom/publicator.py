@@ -14,7 +14,7 @@ First visit: read `CLAUDE.md` (architecture and gotchas), then the feature you t
 - [Configuration (publicator.toml)](features/config.md) — every key, its default, where it is validated and consumed
 - [Publications store (publications.json + schema)](features/publications-store.md) — source-of-truth writers, lookups, schema validation, validate/echo-first CLIs
 - [Images and thumbnails](features/images-thumbnails.md) — candidate discovery, content-addressed .thumbs cache, /thumbs allow-list, non-webp uploads
-- [Gallery UI (publish-next)](features/gallery-ui.md) — durable Pick/Schedule/Describe/Publish phases, registered-platform grid and success-aware retry
+- [Gallery UI](features/gallery-ui.md) — Search and runtime path filtering, durable Pick/Schedule/Describe/Publish phases, registered-platform grid and success-aware retry
 - [AI metadata (title/description via llm CLI)](features/ai-metadata.md) — title + description via `llm` CLI, Claude or OpenRouter, schema fallback
 - [Scheduling (slots and weekly profiles)](features/scheduling.md) — server-side weekly slot instants and TZ-anchored picker resolution
 - [Calendar tab](features/calendar.md) — read-only month grids of every platform apparition, server-side tz bucketing, prompt popover per thumbnail

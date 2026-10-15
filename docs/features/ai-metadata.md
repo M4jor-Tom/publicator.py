@@ -1,8 +1,8 @@
 # AI metadata (title/description via llm CLI and Ollama)
 
-- **Does:** Generates shared publication title/description through local Ollama, OpenRouter free, or Claude. Every accepted Phase 3 generation failure persists the exact TODO marker in requested fields, unconditionally; generate-meta consumes it later. OpenRouter walks its dynamic free vision catalogue; vision-models reports local host fit.
+- **Does:** Generates shared publication title and description together through local Ollama, OpenRouter free, or Claude. Every accepted Phase 3 failure leaves the publication SCHEDULED and persists the exact TODO marker in both fields for retry; generate-meta can later replace marked fields. OpenRouter walks its dynamic free vision catalogue; vision-models reports local host fit.
 - **Run:** `nix run .#generate-meta -- --data-dir ../Art --source {local,openrouter,claude} [--model MODEL] [--timeout S] [-y] [-v]` (publication-driven, no image arguments; source required; local requires a model; `-y` accepts missing-model installation)
-- **Run:** `nix run .#ui -- [--ai-model ID] [--openrouter-model ID] [--ai-timeout S] [-v]` (selector + Generate with AI → `POST /ai {uuid, source, model, fields}`; model is a catalog object or null for Claude)
+- **Run:** `nix run .#ui -- [--ai-model ID] [--openrouter-model ID] [--ai-timeout S] [-v]` (Generate with AI → `POST /ai {uuid, source, model}`; model is a catalog object or null for Claude)
 - **Run:** `nix run .#vision-models` (fit verdicts for configured local vision models; requires neither a data directory nor a running Ollama service)
 - **Code:** `src/publicator/llm_meta.py` (`TODO_GENERATE`, `ProviderUnavailable`, `generate_metadata`, `VISION_MODELS`, `local_model_fit`, `local_model_status`, `prepare_local_model`, `run_llm`, `_attempt`, `_fallbacks`), `src/publicator/apps/generate_meta.py` (`generate_pending`, `main_args`), `src/publicator/apps/vision_models.py` (host-fit CLI), `src/publicator/images.py` (`thumb_for_ai`, `ensure_thumb`), `src/publicator/webui/server.py` (`GalleryHandler.do_POST` `/ai`, local status), `src/publicator/webui/page.py` (`render_page`), `src/publicator/apps/ui.py` (`main`), `flake.nix` (Ollama, llmfit, llm providers)
 - **Tests:** `tests/test_llm_meta.py` (provider routing, Ollama and llmfit behavior, schema retry, model fallback); `tests/test_vision_models.py` (fit report and unavailable status); `tests/test_generate_meta.py` (marker selection, consent, writes and failures); `tests/test_page.py` and `tests/test_server.py` (model options and endpoint)
@@ -19,12 +19,13 @@
 ## How it works
 
 The UI accepts generation only for a fresh SCHEDULED UUID with a canonical model,
-source, stored artwork and nonempty requested-field list. Rejected requests do not
-write markers. After acceptance, provider/model failures save
-`[[PUBLICATOR:TODO_GENERATE]]` in every requested field, regardless of local fit
-or prior hosted failures. Results and markers merge into fresh stored data before
-reporting saved; unrequested manual fields survive. Unexpected exceptions remain
-visible server errors, not a successful generation response.
+source and stored artwork. Every request generates both title and description.
+Rejected requests do not write markers. After acceptance, provider/model failures
+save `[[PUBLICATOR:TODO_GENERATE]]` in both fields, regardless of local fit or
+prior hosted failures; the publication remains SCHEDULED and retryable. Only a
+validated nonempty pair advances it to DESCRIBED. Results merge through the
+application operation into fresh stored data before reporting saved. Unexpected
+exceptions remain visible server errors, not a successful generation response.
 
 Generation never approves metadata. Blank or marker-bearing metadata cannot
 advance/publish. The CLI replaces only fields still equal to the exact marker,
@@ -43,12 +44,12 @@ and returns nonzero on failures. No apparition is needed for generation.
 - **Candidates come from `llm-openrouter`'s cache, never from a direct fetch of openrouter.ai.** `register_models` mints the ids `llm -m` accepts from that same copy, so listed fallback IDs are resolvable; stale external listings could waste the bounded walk on repeated `Unknown model` errors; `llm_meta.FREE_MODELS_ARGV`.
 - **Both recoveries live under `run_llm` (`_attempt` owns `--schema`, the loop owns `-m`); callers never know about either.** This avoids duplicating provider retry logic at call sites (ADR 0005 alternative E); `rg -n -- '--schema' src/` hits only `src/publicator/llm_meta.py`.
 - **Every AI caller hands the model a thumbnail via `images.thumb_for_ai`.** Same visual info for a fraction of tokens on a 300px-bound call; both gallery and batch use the data-dir `.thumbs` cache.
-- **`/ai` accepts explicit provider sources and canonical catalog objects only.** Local/OpenRouter objects must exactly match `VISION_MODELS`; Claude accepts no model object, and local fit/availability is enforced server-side (`docs/features/gallery-ui.md`).
+- **`/ai` accepts explicit provider sources and canonical catalog objects only.** Local/OpenRouter objects must exactly match `VISION_MODELS`; Claude accepts no model object, local fit/availability is enforced server-side, and each request produces both metadata fields (`docs/features/gallery-ui.md`).
 - **Permissive JSON parsing (outermost `{...}`) still raises on unparseable output; empty title/description also raises.** Permissive parsing must not decay into returning `{}` (ADR 0005); `tests/test_llm_meta.py::test_run_llm_bad_json_with_schema_raises`, `::test_generate_metadata_empty_raises`.
 - **The live OpenRouter test skips ONLY when offline (with a warning); online with no `$OPENROUTER_KEY` fails.** A credential-gated skip rots unnoticed; `tests/test_llm_meta_openrouter.py::test_openrouter_generates_title_and_description` (`_online()` gate, then `assert os.environ.get("OPENROUTER_KEY")`).
 - **The live test targets a model that does NOT advertise `structured_outputs` (`SCHEMALESS_VISION_MODEL`).** Its purpose is to exercise the fallback end to end; `tests/test_llm_meta_openrouter.py` docstring.
 - **Provider IDs are explicit catalog values, not derived from another provider's name.** Local/OpenRouter selection resolves against `VISION_MODELS`; Claude retains its module model. The CLI's OpenRouter default is `OPENROUTER_MODEL`; local requires explicit `--model`.
-- Relies on the header select listing OpenRouter (free) first as gallery default while the server default (`ai_model`, used when the body omits `model`) stays `claude-cli-opus` (commit d0b7d1e), owned by `docs/features/gallery-ui.md`.
+- Relies on the UI's model selector default and server-side canonical-model validation, owned by `docs/features/gallery-ui.md`.
 
 ## Gotchas
 
