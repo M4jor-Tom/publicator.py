@@ -59,6 +59,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
     candidate_paths: list[str] = []      # new picks from picked/, add-able
     data_dir = ""
     rendered_candidates: set[str] = set()
+    search_generation = 0
     ai_busy: set[str] = set()
     operation_lock = threading.RLock()
     publish_lock = threading.Lock()
@@ -181,6 +182,9 @@ class GalleryHandler(BaseHTTPRequestHandler):
                 if os.path.realpath(p) not in referenced and os.path.isfile(p) and compute_sha512(p) not in hashes]
 
     def _build_page(self, needle: str = "", lineage: str = "") -> str:
+        cls = self.__class__
+        with cls.operation_lock:
+            search_generation = cls.search_generation
         publications = self._publications()
         index = index_by_basename(self.data_dir)
         for pub in publications:
@@ -191,7 +195,9 @@ class GalleryHandler(BaseHTTPRequestHandler):
         candidates, maybe, skipped, truncated = paths, [], 0, False
         if needle or lineage:
             candidates, maybe, skipped, truncated = self.search(needle, lineage)
-        self.rendered_candidates.update(candidates + maybe)
+        with cls.operation_lock:
+            if cls.search_generation == search_generation:
+                cls.rendered_candidates.update(candidates + maybe)
         self._register_thumbs(candidates + maybe + [p["path"] for p in publications if p["path"]])
         _, calendar_thumbs = thumb_maps(self.data_dir, [], self.timeline)
         self.thumb_src.update(calendar_thumbs)
@@ -391,6 +397,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
             cls.publicable_dirs = directories
             cls.candidate_paths = candidates
             cls.rendered_candidates.clear()
+            cls.search_generation += 1
         return {"limit": limit, "paths": paths}
 
     def _mutate(self, data: dict) -> dict:
@@ -534,6 +541,7 @@ def create_handler(data_dir: str, candidate_paths: list[str], args, config: dict
     Handler.cache_dir = os.path.join(data_dir, THUMB_CACHE)
     Handler.candidate_paths = list(candidate_paths)
     Handler.rendered_candidates = set()
+    Handler.search_generation = 0
     Handler.thumb_map, Handler.thumb_src = {}, {}
     Handler.ai_busy = set()
     Handler.operation_lock = threading.RLock()

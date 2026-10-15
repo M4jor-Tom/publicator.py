@@ -314,6 +314,43 @@ def test_search_reload_is_allowlisted_and_replaces_candidate_authorization(workf
             assert _post(url, body, '/search')[0] == 400
 
 
+def test_page_render_cannot_restore_candidates_after_search_reload(workflow, monkeypatch):
+    from threading import Event, Thread
+
+    with workflow.start() as url:
+        handler = workflow.handlers[-1]
+        page_handler = handler.__new__(handler)
+        candidates_snapshotted = Event()
+        resume_render = Event()
+        original_candidates = page_handler._candidates
+
+        def blocked_candidates():
+            snapshot = original_candidates()
+            candidates_snapshotted.set()
+            assert resume_render.wait(timeout=5)
+            return snapshot
+
+        monkeypatch.setattr(page_handler, "_candidates", blocked_candidates)
+        render_errors = []
+
+        def render_page():
+            try:
+                page_handler._build_page()
+            except Exception as exc:
+                render_errors.append(exc)
+
+        render = Thread(target=render_page)
+        render.start()
+        assert candidates_snapshotted.wait(timeout=5)
+        assert _post(url, {"limit": 0, "paths": ["picked"]}, "/search")[0] == 200
+        resume_render.set()
+        render.join(timeout=5)
+        assert not render.is_alive()
+        assert not render_errors
+
+        assert _post(url, {"path": workflow.candidates[0]}, "/pick")[0] == 400
+
+
 def test_pick_persists_without_metadata_and_reopens_in_schedule(workflow):
     with workflow.start() as url:
         uuid = pick(url, workflow)
