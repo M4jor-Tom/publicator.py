@@ -6,8 +6,6 @@ import json
 import os
 import tempfile
 import threading
-import time
-import uuid
 from pathlib import Path
 
 from publicator.config import load_config, validate_publications
@@ -20,9 +18,8 @@ from publicator.entries import (
     PUBLICATION_STATE_SCHEDULED,
     has_delivery_success,
 )
-from publicator.images import compute_sha512
 from publicator.llm_meta import TODO_GENERATE
-from publicator.scheduling import repack_publication_dates, resolve_ts, schedule_profiles, zone
+from publicator.scheduling import schedule_profiles
 
 _THREAD_LOCK = threading.RLock()
 
@@ -77,82 +74,19 @@ def _find(data: list[dict], uuid_: str) -> dict:
     raise KeyError(uuid_)
 
 
-def _default_profile(config: dict | None) -> str:
-    raw = (_config(config).get("schedule") or {}).get("profiles")
-    return str(raw[0].get("name", "default")) if raw else "default"
-
-
-def _sha_matches(pub: dict, sha: str) -> bool:
-    return any(f.get("sha512sum") == sha or f.get("fileSha512sum") == sha
-               for f in pub.get("files", []))
-
-
 def pick_publication(path: str, json_path: str, config: dict | None = None) -> str:
-    """Persist a PICKED publication once, deduplicated by content hash."""
-    sha = compute_sha512(path)
-    with _mutation_lock(json_path):
-        data = _read_publications(json_path)
-        for pub in data:
-            if _sha_matches(pub, sha):
-                return pub["uuid"]
-        uuid_ = str(uuid.uuid4())
-        data.append({
-            "uuid": uuid_,
-            "state": PUBLICATION_STATE_PICKED,
-            "title": "",
-            "submissionTimestamp": int(time.time()),
-            "description": "",
-            "files": [{
-                "basename": os.path.basename(path),
-                "sha512sum": sha,
-            }],
-            "apparitions": [],
-        })
-        _write_publications(json_path, data, config)
-        return uuid_
+    from publicator.workflow import pick_publication as operation
+    return operation(path, json_path, config)
 
 
 def edit_publication_date(json_path: str, uuid_: str, fields: dict, config: dict | None = None) -> None:
-    """Pin a date, or reallocate automatically on profile-only/unpin edits."""
-    cfg = _config(config)
-    manual = bool(fields.get("schedule") or fields.get("scheduleTs"))
-    if not manual and "scheduleProfile" not in fields and fields.get("scheduleIsManual") is not False:
-        raise ValueError("date, profile, or unpin required")
-    ts = resolve_ts(fields, zone(cfg.get("schedule", {}))) if manual else None
-    with _mutation_lock(json_path):
-        data = _read_publications(json_path)
-        pub = _find(data, uuid_)
-        if has_delivery_success(pub):
-            raise ValueError("delivered publication cannot be edited")
-        if pub.get("state") != PUBLICATION_STATE_PICKED:
-            raise ValueError("date edits require PICKED")
-        profile = str(fields.get("scheduleProfile") or pub.get("scheduleProfile") or _default_profile(cfg))
-        profile_names = {p["name"] for p in schedule_profiles(cfg.get("schedule", {}))}
-        if "scheduleProfile" in fields and profile not in profile_names:
-            raise ValueError("unknown schedule profile")
-        if manual:
-            pub["apparitionTimestampIfDifferentThanSubmission"] = ts
-        if "scheduleProfile" in fields or not manual:
-            pub["scheduleProfile"] = profile if profile in profile_names else _default_profile(cfg)
-        pub["scheduleIsManual"] = manual
-        repack_publication_dates(data, cfg.get("schedule", {}))
-        _write_publications(json_path, data, cfg)
+    from publicator.workflow import edit_publication_date as operation
+    return operation(json_path, uuid_, fields, config)
 
 
 def approve_publication_date(json_path: str, uuid_: str, config: dict | None = None) -> None:
-    cfg = _config(config)
-    with _mutation_lock(json_path):
-        data = _read_publications(json_path)
-        pub = _find(data, uuid_)
-        if has_delivery_success(pub):
-            raise ValueError("delivered publication cannot be edited")
-        if pub.get("state") != PUBLICATION_STATE_PICKED:
-            raise ValueError("date approval requires PICKED")
-        if pub.get("apparitionTimestampIfDifferentThanSubmission") is None:
-            raise ValueError("date required")
-        pub["state"] = PUBLICATION_STATE_SCHEDULED
-        repack_publication_dates(data, cfg.get("schedule", {}))
-        _write_publications(json_path, data, cfg)
+    from publicator.workflow import approve_publication_date as operation
+    return operation(json_path, uuid_, config)
 
 
 def save_publication_metadata(json_path: str, uuid_: str, *, title: str | None = None,
@@ -268,12 +202,8 @@ def set_or_pop(d, k, v):
 
 
 def repack_publications(json_path: str, config: dict | None = None) -> None:
-    """Persist automatic PICKED suggestions, keeping approved/manual dates frozen."""
-    cfg = _config(config)
-    with _mutation_lock(json_path):
-        data = _read_publications(json_path)
-        repack_publication_dates(data, cfg.get("schedule", {}))
-        _write_publications(json_path, data, cfg)
+    from publicator.workflow import repack_publications as operation
+    return operation(json_path, config)
 
 
 def select_publication_platforms(json_path: str, *, selected: bool,
