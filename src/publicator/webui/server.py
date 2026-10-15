@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from jsonschema import ValidationError
 
 from publicator.config import validate_publications
-from publicator import platforms, store
+from publicator import platforms, store, workflow
 from publicator.platforms import publish_selected
 from publicator.images import (
     THUMB_CACHE,
@@ -271,13 +271,10 @@ class GalleryHandler(BaseHTTPRequestHandler):
             self.send_response(404); self.end_headers()
 
     def _ai(self, data: dict) -> None:
-        self._fields(data, {"uuid", "source", "model", "fields"})
+        self._fields(data, {"uuid", "source", "model"})
         pub = self._publication(data.get("uuid"))
         if pub["state"] != "SCHEDULED":
             raise ValueError("AI generation requires SCHEDULED")
-        fields = data.get("fields")
-        if not isinstance(fields, list) or not fields or any(f not in ("title", "description") for f in fields):
-            raise ValueError("requested metadata fields required")
         source, posted_model = data.get("source"), data.get("model")
         model = None
         if source == "claude":
@@ -322,9 +319,9 @@ class GalleryHandler(BaseHTTPRequestHandler):
                 if not isinstance(exc, (RuntimeError, OSError)):
                     log.exception("Unexpected generation error")
                     error_status = 500
-            # Provider work has no mutation lock. Merge only requested fields into fresh data.
-            store.save_publication_metadata(self.json_path, pub["uuid"], config=self.config,
-                **{k: v for k, v in (("title", title), ("description", description)) if k in fields})
+            # Provider work has no mutation lock; the application operation saves both fields.
+            workflow.save_generated_metadata(self.json_path, pub["uuid"], title, description,
+                                            config=self.config)
             saved = self._publication(pub["uuid"])
             result = {"saved": True, "title": saved["title"], "description": saved["description"]}
             if error is not None:
@@ -379,8 +376,8 @@ class GalleryHandler(BaseHTTPRequestHandler):
                 if endpoint != "/pick" or path not in self.candidate_paths + list(self.rendered_candidates):
                     raise ValueError("unpicked candidate path required")
             if endpoint == "/pick":
-                uuid_ = store.pick_publication(path, self.json_path, self.config)
-                store.repack_publications(self.json_path, self.config)
+                uuid_ = workflow.pick_publication(path, self.json_path, self.config)
+                workflow.repack_publications(self.json_path, self.config)
                 return {"uuid": uuid_, "saved": True}
             os.remove(path)
             self.candidate_paths[:] = [p for p in self.candidate_paths if p != path]
@@ -394,7 +391,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
                 self._publication(data.get("uuid"))
                 if not isinstance(data.get("platform"), str):
                     raise ValueError("platform required")
-            store.select_publication_platforms(self.json_path, selected=data.get("selected"),
+            workflow.select_publication_platforms(self.json_path, selected=data.get("selected"),
                 registered_platforms=list(platforms.PLATFORMS), uuid_=data.get("uuid"),
                 platform=data.get("platform"), config=self.config)
             return {"saved": True}
@@ -413,24 +410,24 @@ class GalleryHandler(BaseHTTPRequestHandler):
         if endpoint == "/schedule":
             if "scheduleIsManual" in data and type(data["scheduleIsManual"]) is not bool:
                 raise ValueError("scheduleIsManual must be boolean")
-            store.edit_publication_date(self.json_path, uuid_, data, self.config)
+            workflow.edit_publication_date(self.json_path, uuid_, data, self.config)
         elif endpoint == "/schedule/approve":
-            store.approve_publication_date(self.json_path, uuid_, self.config)
+            workflow.approve_publication_date(self.json_path, uuid_, self.config)
         elif endpoint == "/schedule/return":
-            store.return_to_scheduling(self.json_path, uuid_, self.config)
+            workflow.return_to_scheduling(self.json_path, uuid_, self.config)
         elif endpoint == "/metadata":
             fields = {k: data[k] for k in ("title", "description") if k in data}
             if not fields or any(not isinstance(v, str) for v in fields.values()):
                 raise ValueError("metadata string fields required")
-            store.save_publication_metadata(self.json_path, uuid_, config=self.config, **fields)
+            workflow.save_publication_metadata(self.json_path, uuid_, config=self.config, **fields)
         elif endpoint == "/metadata/approve":
-            store.approve_publication_metadata(self.json_path, uuid_, self.config)
+            workflow.approve_publication_metadata(self.json_path, uuid_, self.config)
         elif endpoint == "/metadata/return":
-            store.return_to_metadata(self.json_path, uuid_, self.config)
+            workflow.return_to_metadata(self.json_path, uuid_, self.config)
         elif endpoint == "/options":
             if data.get("platform") not in platforms.PLATFORMS:
                 raise ValueError("unregistered platform")
-            store.save_platform_options(self.json_path, uuid_, data["platform"],
+            workflow.save_platform_options(self.json_path, uuid_, data["platform"],
                 {k: data[k] for k in ("price", "tiers", "galleries") if k in data}, self.config)
         return {"saved": True}
 

@@ -236,6 +236,36 @@ def describe(url, uuid):
     assert _post(url, {'uuid': uuid}, '/metadata/approve')[0] == 200
 
 
+def test_http_mutations_dispatch_through_workflow_operations(workflow, monkeypatch):
+    from publicator import workflow as operations
+    calls = []
+    for name in ('pick_publication', 'repack_publications', 'edit_publication_date',
+                 'approve_publication_date', 'return_to_scheduling',
+                 'save_publication_metadata', 'approve_publication_metadata',
+                 'return_to_metadata', 'select_publication_platforms', 'save_platform_options'):
+        operation = getattr(operations, name)
+        def tracked(*args, _name=name, _operation=operation, **kwargs):
+            calls.append(_name)
+            return _operation(*args, **kwargs)
+        monkeypatch.setattr(operations, name, tracked)
+    with workflow.start() as url:
+        uuid = pick(url, workflow)
+        assert _post(url, {'uuid': uuid, 'scheduleProfile': 'default'}, '/schedule')[0] == 200
+        assert _post(url, {'uuid': uuid}, '/schedule/approve')[0] == 200
+        assert _post(url, {'uuid': uuid, 'title': 'Manual', 'description': 'Description'}, '/metadata')[0] == 200
+        assert _post(url, {'uuid': uuid}, '/metadata/approve')[0] == 200
+        assert _post(url, {'uuid': uuid, 'platform': 'deviantart', 'selected': True}, '/selection')[0] == 200
+        assert _post(url, {'selected': True}, '/selection/all')[0] == 200
+        assert _post(url, {'uuid': uuid, 'platform': 'deviantart', 'price': 2}, '/options')[0] == 200
+        assert _post(url, {'uuid': uuid}, '/metadata/return')[0] == 200
+        assert _post(url, {'uuid': uuid}, '/schedule/return')[0] == 200
+    assert calls == ['pick_publication', 'repack_publications', 'edit_publication_date',
+                     'approve_publication_date', 'save_publication_metadata',
+                     'approve_publication_metadata', 'select_publication_platforms',
+                     'select_publication_platforms', 'save_platform_options',
+                     'return_to_metadata', 'return_to_scheduling']
+
+
 def test_pick_persists_without_metadata_and_reopens_in_schedule(workflow):
     with workflow.start() as url:
         uuid = pick(url, workflow)
@@ -269,26 +299,34 @@ def test_schedule_repacks_pins_and_approval_freezes(workflow):
         assert b'Over capacity' not in _get(url)[1]  # automatic row moved out
 
 
-def test_drafts_ai_requested_fields_and_unconditional_failure_markers(workflow, monkeypatch):
+def test_ai_saves_complete_pair_and_retries_failure_markers(workflow, monkeypatch):
     from publicator.llm_meta import TODO_GENERATE
+    generated_pairs = []
+    save_generated = workflow.gallery.workflow.save_generated_metadata
+    def track_generated(*args, **kwargs):
+        generated_pairs.append(args[2:4])
+        return save_generated(*args, **kwargs)
+    monkeypatch.setattr(workflow.gallery.workflow, 'save_generated_metadata', track_generated)
     with workflow.start() as url:
         uuid = pick(url, workflow)
         assert _post(url, {'uuid': uuid}, '/schedule/approve')[0] == 200
         assert _post(url, {'uuid': uuid, 'title': 'Keep me', 'description': ''}, '/metadata')[0] == 200
         def fail(*a, **kw): raise RuntimeError('provider failed <script>')
         monkeypatch.setattr(workflow.gallery, 'generate_metadata', fail)
-        status, body = _post(url, {'uuid': uuid, 'source': 'claude', 'fields': ['description']}, '/ai')
+        status, body = _post(url, {'uuid': uuid, 'source': 'claude'}, '/ai')
         assert status == 400 and 'provider failed' in body['error'] and body['saved'] is True
         row, = json.loads(workflow.jp.read_text())
-        assert row['title'] == 'Keep me' and row['description'] == TODO_GENERATE
+        assert row['title'] == row['description'] == TODO_GENERATE and row['state'] == 'SCHEDULED'
+        assert generated_pairs == [(TODO_GENERATE, TODO_GENERATE)]
         assert _post(url, {'uuid': uuid}, '/metadata/approve')[0] == 400
     with workflow.start() as url:
-        assert b'Keep me' in _get(url)[1] and b'AI metadata pending' in _get(url)[1]
+        assert b'AI metadata pending' in _get(url)[1]
         monkeypatch.setattr(workflow.gallery, 'generate_metadata', lambda *a, **kw: ('New', 'Done'))
-        assert _post(url, {'uuid': uuid, 'source': 'claude', 'fields': ['description']}, '/ai')[0] == 200
+        assert _post(url, {'uuid': uuid, 'source': 'claude'}, '/ai')[0] == 200
         row, = json.loads(workflow.jp.read_text())
-        assert row['title'] == 'Keep me' and row['description'] == 'Done' and row['state'] == 'SCHEDULED'
-        assert _post(url, {'uuid': uuid}, '/metadata/approve')[0] == 200
+        assert row['title'] == 'New' and row['description'] == 'Done' and row['state'] == 'DESCRIBED'
+        assert generated_pairs[-1] == ('New', 'Done')
+        assert _post(url, {'uuid': uuid}, '/metadata/approve')[0] == 400
 
 
 def test_ai_validation_does_not_mutate_and_uses_canonical_models(workflow, monkeypatch):
@@ -297,13 +335,13 @@ def test_ai_validation_does_not_mutate_and_uses_canonical_models(workflow, monke
     monkeypatch.setattr(workflow.gallery, 'generate_metadata', lambda *a, **kw: calls.append((a, kw)) or ('t', 'd'))
     with workflow.start() as url:
         uuid = pick(url, workflow)
-        base = {'uuid': uuid, 'source': 'claude', 'fields': ['title']}
+        base = {'uuid': uuid, 'source': 'claude'}
         before = workflow.jp.read_text()
         assert _post(url, base, '/ai')[0] == 400  # wrong phase
         assert workflow.jp.read_text() == before
         assert _post(url, {'uuid': uuid}, '/schedule/approve')[0] == 200
         before = workflow.jp.read_text()
-        for extra in ({'source': 'unknown'}, {'fields': ['urlElsePublicationName']},
+        for extra in ({'source': 'unknown'}, {'fields': ['title']},
                       {'path': '/etc/passwd'}, {'model': {}}, {'uuid': 'missing'},
                       {'source': 'openrouter', 'model': {**VISION_MODELS[0], 'llmfit_name': 'forged'}}):
             assert _post(url, {**base, **extra}, '/ai')[0] in (400, 404)
@@ -562,9 +600,9 @@ def test_ai_does_not_hold_mutation_lock_and_preserves_unrequested_edits(workflow
             assert _post(url, {'uuid': uuid, 'description': 'Concurrent draft'}, '/metadata')[0] == 200
             return 'AI title', 'Ignore me'
         monkeypatch.setattr(workflow.gallery, 'generate_metadata', generate)
-        assert _post(url, {'uuid': uuid, 'source': 'claude', 'fields': ['title']}, '/ai')[0] == 200
+        assert _post(url, {'uuid': uuid, 'source': 'claude'}, '/ai')[0] == 200
         row, = store.load_publications(str(workflow.jp))
-        assert row['title'] == 'AI title' and row['description'] == 'Concurrent draft'
+        assert row['title'] == 'AI title' and row['description'] == 'Ignore me'
 
 
 def test_busy_publish_rejects_duplicate_batches(workflow, monkeypatch):
@@ -620,7 +658,7 @@ def test_accepted_generation_blocks_approval_and_duplicate_ai_until_saved(workfl
         uuid = pick(url, workflow)
         assert _post(url, {'uuid': uuid}, '/schedule/approve')[0] == 200
         assert _post(url, {'uuid': uuid, 'title': 'Manual', 'description': 'Manual'}, '/metadata')[0] == 200
-        request = {'uuid': uuid, 'source': 'claude', 'fields': ['title']}
+        request = {'uuid': uuid, 'source': 'claude'}
         def generate(*a, **kw):
             assert _post(url, {'uuid': uuid}, '/metadata/approve')[0] == 409
             assert _post(url, {'uuid': uuid}, '/schedule/return')[0] == 409
@@ -662,7 +700,7 @@ def test_all_accepted_generation_failures_save_both_markers(workflow, monkeypatc
     with workflow.start() as url:
         uuid = pick(url, workflow)
         assert _post(url, {'uuid': uuid}, '/schedule/approve')[0] == 200
-        status, result = _post(url, {'uuid': uuid, 'source': 'claude', 'fields': ['title', 'description']}, '/ai')
+        status, result = _post(url, {'uuid': uuid, 'source': 'claude'}, '/ai')
         assert status == (500 if isinstance(exception, ValueError) else 400)
         assert result['saved'] is True and result['error'] == str(exception)
         row, = json.loads(workflow.jp.read_text())
