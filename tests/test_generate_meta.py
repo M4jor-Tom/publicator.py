@@ -49,8 +49,18 @@ def test_only_exact_top_level_markers_are_replaced_without_apparitions(tmp_path,
     assert result[1]["description"] == MARKER + " "
     assert result[1]["title"] == "todo_generate"
     assert result[2] == pubs[2]
-    assert result[0]["state"] == "SCHEDULED"
+    assert result[0]["state"] == "DESCRIBED"
     validate_publications(result, load_config(tmp_path))
+
+
+def test_partial_marker_keeps_batch_generation_retryable(tmp_path, monkeypatch):
+    pub = publication("partial", "a.png", description=f"manual {MARKER}")
+    counts, path = batch(tmp_path, monkeypatch, [pub])
+    saved = store.load_publications(str(path))[0]
+    assert counts == (1, 0)
+    assert saved["title"] == "title"
+    assert saved["description"] == f"manual {MARKER}"
+    assert saved["state"] == "SCHEDULED"
 
 
 def test_generation_preserves_edit_during_provider_call(tmp_path, monkeypatch):
@@ -67,7 +77,7 @@ def test_generation_preserves_edit_during_provider_call(tmp_path, monkeypatch):
     saved = store.load_publications(str(path))[0]
     assert saved["title"] == "Manual title"
     assert saved["description"] == "Generated description"
-    assert saved["state"] == "SCHEDULED"
+    assert saved["state"] == "DESCRIBED"
 
 
 def test_generation_preserves_concurrent_store_edit_before_replacement(tmp_path, monkeypatch):
@@ -107,12 +117,13 @@ def test_generation_preserves_concurrent_store_edit_before_replacement(tmp_path,
         for editor in editors:
             editor.join(5)
     assert editors and all(not editor.is_alive() for editor in editors)
-    assert not errors
+    assert len(errors) == 1 and isinstance(errors[0], ValueError)
+    assert "metadata edits require SCHEDULED" in str(errors[0])
     assert counts == (1, 0)
     saved = store.load_publications(str(path))[0]
     assert saved["title"] == "title"
-    assert saved["description"] == "Manual description"
-    assert saved["state"] == "SCHEDULED"
+    assert saved["description"] == "description"
+    assert saved["state"] == "DESCRIBED"
 
 
 @pytest.mark.parametrize("invalid_field", ["uuid", "submissionTimestamp"])

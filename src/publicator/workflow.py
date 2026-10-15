@@ -117,6 +117,46 @@ def save_publication_metadata(json_path: str, uuid_: str, *, title: str | None =
     store.mutate_publications(json_path, mutation, config)
 
 
+def _generated_metadata_is_complete(pub: dict) -> bool:
+    return all(isinstance(pub.get(key), str) and pub[key].strip()
+               and TODO_GENERATE not in pub[key] for key in ("title", "description"))
+
+
+def save_generated_metadata(json_path: str, uuid_: str, title: str, description: str,
+                            *, config: dict | None = None) -> None:
+    """Save the provider's complete pair, keeping failures retryable."""
+    def mutation(data):
+        pub = store._find(data, uuid_)
+        if has_delivery_success(pub):
+            raise ValueError("delivered publication cannot be edited")
+        if pub.get("state") != PUBLICATION_STATE_SCHEDULED:
+            raise ValueError("metadata generation requires SCHEDULED")
+        pub["title"] = title
+        pub["description"] = description
+        if _generated_metadata_is_complete(pub):
+            pub["state"] = PUBLICATION_STATE_DESCRIBED
+
+    store.mutate_publications(json_path, mutation, config)
+
+
+def merge_generated_metadata(json_path: str, uuid_: str, title: str, description: str,
+                             *, config: dict | None = None) -> None:
+    """Replace only exact markers; advance only after both fields are complete."""
+    def mutation(data):
+        pub = store._find(data, uuid_)
+        if has_delivery_success(pub):
+            raise ValueError("delivered publication cannot be edited")
+        if pub.get("state") != PUBLICATION_STATE_SCHEDULED:
+            raise ValueError("metadata generation requires SCHEDULED")
+        for field, value in (("title", title), ("description", description)):
+            if pub.get(field) == TODO_GENERATE:
+                pub[field] = value
+        if _generated_metadata_is_complete(pub):
+            pub["state"] = PUBLICATION_STATE_DESCRIBED
+
+    store.mutate_publications(json_path, mutation, config)
+
+
 def approve_publication_metadata(json_path: str, uuid_: str, config: dict | None = None) -> None:
     def mutation(data):
         pub = store._find(data, uuid_)

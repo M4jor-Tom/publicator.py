@@ -13,7 +13,7 @@ from publicator.llm_meta import (
     DEFAULT_TIMEOUT, OPENROUTER_MODEL, TODO_GENERATE, VISION_MODELS,
     generate_metadata, local_model_status,
 )
-from publicator.store import merge_generated_metadata
+from publicator import workflow
 
 
 def _load(path):
@@ -66,8 +66,8 @@ def generate_pending(json_path, data_dir, *, source, model_option, timeout=DEFAU
                 image, model_option, source=source, timeout=timeout,
                 install_missing=install_missing,
             )
-            merge_generated_metadata(json_path, pub["uuid"], title=title,
-                                    description=description, config=config)
+            workflow.merge_generated_metadata(json_path, pub["uuid"], title=title,
+                                              description=description, config=config)
             succeeded += 1
             install_missing = False
         except (Exception, SystemExit) as e:

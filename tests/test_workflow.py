@@ -23,6 +23,31 @@ def img(tmp_path):
 def _rows(path):
     return json.loads(path.read_text())
 
+def test_generated_metadata_saves_pair_and_advances_only_when_complete(tmp_path, img):
+    path = tmp_path / "publications.json"
+    uuid_ = store.pick_publication(img, str(path), _CFG)
+    store.edit_publication_date(str(path), uuid_, {"scheduleTs": _TUE_2000}, _CFG)
+    store.approve_publication_date(str(path), uuid_, _CFG)
+
+    workflow.save_generated_metadata(str(path), uuid_, "Generated title", "Generated description", config=_CFG)
+    pub = _rows(path)[0]
+    assert (pub["title"], pub["description"]) == ("Generated title", "Generated description")
+    assert pub["state"] == "DESCRIBED"
+
+
+def test_failed_generated_metadata_saves_both_markers_without_advancing(tmp_path, img):
+    path = tmp_path / "publications.json"
+    uuid_ = store.pick_publication(img, str(path), _CFG)
+    store.edit_publication_date(str(path), uuid_, {"scheduleTs": _TUE_2000}, _CFG)
+    store.approve_publication_date(str(path), uuid_, _CFG)
+
+    workflow.save_generated_metadata(str(path), uuid_, store.TODO_GENERATE,
+                                     store.TODO_GENERATE, config=_CFG)
+    pub = _rows(path)[0]
+    assert pub["title"] == pub["description"] == store.TODO_GENERATE
+    assert pub["state"] == PUBLICATION_STATE_SCHEDULED
+
+
 def test_metadata_approval_rejects_blank_and_marker_metadata(tmp_path, img):
     path = tmp_path / "publications.json"
     uuid_ = store.pick_publication(img, str(path), _CFG)
