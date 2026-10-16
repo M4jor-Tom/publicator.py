@@ -132,9 +132,9 @@ def free_vision_models(catalogue):
                  if "image" in (m.get("architecture") or {}).get("input_modalities", ()))
 
 
-def batch_order(records):
-    """Batch records are processed from last to first in persisted order."""
-    return reversed(records)
+def batch_order(records, *, source):
+    """OpenRouter batches start with the last persisted record; others keep order."""
+    return reversed(records) if source == "openrouter" else iter(records)
 
 
 def _fallbacks(model, run, preferred_model=None):

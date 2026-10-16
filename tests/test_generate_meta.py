@@ -179,6 +179,16 @@ def test_success_is_written_before_next_record_and_failures_continue(tmp_path, m
     assert [p["title"] for p in result] == ["title", MARKER, "title"]
 
 
+def test_non_openrouter_batch_keeps_persisted_order(tmp_path, monkeypatch):
+    pubs = [publication("first", "first.png"), publication("second", "second.png")]
+    calls = []
+    def generated(path, model, **kwargs):
+        calls.append(path)
+        return "title", "description"
+    batch(tmp_path, monkeypatch, pubs, generated, source="claude")
+    assert calls == [f"thumb:{tmp_path / name}" for name in ("first.png", "second.png")]
+
+
 def test_lookup_failure_retains_markers_and_batch_returns_failure(tmp_path, monkeypatch):
     pubs = [publication("bad", "bad.png")]
     json_path = tmp_path / "publications.json"

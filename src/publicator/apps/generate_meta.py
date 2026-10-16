@@ -57,7 +57,7 @@ def generate_pending(json_path, data_dir, *, source, model_option, timeout=DEFAU
     cache_dir = str(Path(data_dir) / ".thumbs")
     succeeded = failed = 0
     preferred_model = None
-    for pub in batch_order(pending):
+    for pub in batch_order(pending, source=source):
         uuid = pub.get("uuid", "<unknown>")
         art_path = "<unresolved>"
         try:

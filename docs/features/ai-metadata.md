@@ -29,9 +29,10 @@ exceptions remain visible server errors, not a successful generation response.
 Generation never approves metadata. Blank or marker-bearing metadata cannot
 advance/publish. The CLI replaces only fields still equal to the exact marker,
 saves successes individually via the locked store merge, preserves review state,
-and returns nonzero on failures. CLI and UI batches attempt the last eligible
-record first; OpenRouter reuses the first successful model as the next item's
-preferred candidate, then its ordinary dynamic fallback order. Each record is
+and returns nonzero on failures. OpenRouter batches attempt the last eligible
+record first and reuse the first successful model as the next item's preferred
+candidate, then its ordinary dynamic fallback order. Local and Claude batches
+retain persisted record order. Each record is
 saved independently and failures leave markers retryable. No apparition is
 needed for generation.
 

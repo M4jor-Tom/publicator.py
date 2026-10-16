@@ -362,7 +362,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
         succeeded, failed, results, preferred_model = 0, 0, [], None
         try:
             index = index_by_basename(self.data_dir)
-            for pub in batch_order(publications):
+            for pub in batch_order(publications, source=source):
                 uuid = pub["uuid"]
                 try:
                     path = next((index[f["basename"]] for f in pub.get("files", [])

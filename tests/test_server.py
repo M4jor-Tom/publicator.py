@@ -418,6 +418,25 @@ def test_ai_batch_is_last_first_exact_marker_only_and_continues_after_failure(wo
         assert [r['uuid'] for r in body['results']] == [uuids[1], uuids[0]]
 
 
+def test_ai_batch_keeps_persisted_order_for_non_openrouter_provider(workflow, monkeypatch):
+    calls = []
+    monkeypatch.setattr(workflow.gallery, 'thumb_for_ai', lambda path, *a: path.rsplit('/', 1)[-1])
+    monkeypatch.setattr(workflow.gallery, 'generate_metadata',
+                        lambda image, *a, **kw: calls.append(image) or ('T', 'D'))
+    with workflow.start() as url:
+        uuids = [pick(url, workflow, i) for i in range(2)]
+        for uuid in uuids:
+            assert _post(url, {'uuid': uuid}, '/schedule/approve')[0] == 200
+        from publicator.llm_meta import TODO_GENERATE
+        rows = json.loads(workflow.jp.read_text())
+        for row in rows:
+            row['title'] = row['description'] = TODO_GENERATE
+        workflow.jp.write_text(json.dumps(rows))
+        status, body = _post(url, {'source': 'claude'}, '/ai/batch')
+        assert status == 200 and body['succeeded'] == 2
+        assert calls == ['0.png', '1.png']
+
+
 def test_ai_saves_complete_pair_and_retries_failure_markers(workflow, monkeypatch):
     from publicator.llm_meta import TODO_GENERATE
     generated_pairs = []
