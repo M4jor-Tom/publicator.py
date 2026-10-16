@@ -162,9 +162,10 @@ def test_success_is_written_before_next_record_and_failures_continue(tmp_path, m
     calls = []
 
     def generated(path, model, **kwargs):
+        if calls:
+            saved = json.loads(json_path.read_text())
+            assert saved[2]["description"] == "description"
         calls.append(path)
-        saved = json.loads(json_path.read_text())
-        assert saved[0]["description"] == "description" if len(calls) > 1 else True
         if path.endswith("two.png"):
             raise RuntimeError("generation broke")
         return "title", "description"
@@ -172,6 +173,7 @@ def test_success_is_written_before_next_record_and_failures_continue(tmp_path, m
     monkeypatch.setattr(generate_meta, "generate_metadata", generated)
     assert generate_meta.generate_pending(str(json_path), str(tmp_path), source="openrouter",
         model_option=next(m for m in VISION_MODELS if m["openrouter_name"] == OPENROUTER_MODEL)) == (2, 1)
+    assert calls == [str(tmp_path / name) for name in ("three.png", "two.png", "one.png")]
     result = json.loads(json_path.read_text())
     assert [p["description"] for p in result] == ["description", MARKER, "description"]
     assert [p["title"] for p in result] == ["title", MARKER, "title"]

@@ -30,7 +30,7 @@ from publicator.images import (
 )
 from publicator.llm_meta import (
     DEFAULT_MODEL, TODO_GENERATE, VISION_MODELS,
-    generate_metadata, local_model_status,
+    batch_order, generate_metadata, local_model_status,
 )
 from publicator.prompts import Exact, Nearest
 from publicator.prompts import from_config as prompt_archive_from_config
@@ -285,10 +285,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
         else:
             self.send_response(404); self.end_headers()
 
-    def _ai(self, data: dict) -> None:
-        self._fields(data, {"uuid", "source", "model"})
-        pub = self._publication(data.get("uuid"))
-        workflow.require_metadata_generation(pub)
+    def _ai_model(self, data: dict):
         source, posted_model = data.get("source"), data.get("model")
         model = None
         if source == "claude":
@@ -302,9 +299,15 @@ class GalleryHandler(BaseHTTPRequestHandler):
                 status = self.local_model_statuses.get(model["ollama_name"], {})
                 if not status.get("fit") or not status.get("available"):
                     raise ValueError(status.get("reason") or "Local model unavailable")
-
         else:
             raise ValueError("source not allowed")
+        return source, model
+
+    def _ai(self, data: dict) -> None:
+        self._fields(data, {"uuid", "source", "model"})
+        pub = self._publication(data.get("uuid"))
+        workflow.require_metadata_generation(pub)
+        source, model = self._ai_model(data)
         index = index_by_basename(self.data_dir)
         path = next((index[f["basename"]] for f in pub.get("files", [])
                      if f.get("basename") in index), "")
@@ -343,6 +346,50 @@ class GalleryHandler(BaseHTTPRequestHandler):
         finally:
             with self.operation_lock:
                 self.ai_busy.discard(pub["uuid"])
+
+    def _ai_batch(self, data: dict) -> None:
+        self._fields(data, {"source", "model"})
+        source, model = self._ai_model(data)
+        publications = [p for p in self._publications()
+                        if p.get("state") == "SCHEDULED" and
+                        any(p.get(k) == TODO_GENERATE for k in ("title", "description"))]
+        if not publications:
+            self._send(200, {"succeeded": 0, "failed": 0, "results": []}); return
+        with self.operation_lock:
+            if any(p["uuid"] in self.ai_busy for p in publications):
+                self._send(409, {"error": "metadata generation already running"}); return
+            self.ai_busy.update(p["uuid"] for p in publications)
+        succeeded, failed, results, preferred_model = 0, 0, [], None
+        try:
+            index = index_by_basename(self.data_dir)
+            for pub in batch_order(publications):
+                uuid = pub["uuid"]
+                try:
+                    path = next((index[f["basename"]] for f in pub.get("files", [])
+                                 if f.get("basename") in index), "")
+                    if not path or not os.path.isfile(path):
+                        raise ValueError("stored artwork not found")
+                    image = thumb_for_ai(path, self.cache_dir, self.thumb_map.get(path))
+                    model_used = []
+                    title, description = generate_metadata(
+                        image, model, source=source, timeout=self.ai_timeout,
+                        install_missing=(source == "local"),
+                        **({"claude_model": self.ai_model} if source == "claude" else {}),
+                        **({"preferred_model": preferred_model, "model_used": model_used}
+                           if source == "openrouter" else {}))
+                    workflow.merge_generated_metadata(self.json_path, uuid, title, description,
+                                                      config=self.config)
+                    if source == "openrouter" and model_used:
+                        preferred_model = model_used[0]
+                    succeeded += 1
+                    results.append({"uuid": uuid, "saved": True})
+                except Exception as exc:
+                    failed += 1
+                    results.append({"uuid": uuid, "saved": False, "error": str(exc)})
+            self._send(200, {"succeeded": succeeded, "failed": failed, "results": results})
+        finally:
+            with self.operation_lock:
+                self.ai_busy.difference_update(p["uuid"] for p in publications)
 
     def _publish(self, data: dict) -> None:
         self._fields(data, {"uuid"})
@@ -477,6 +524,8 @@ class GalleryHandler(BaseHTTPRequestHandler):
             data = self._json_body()
             if self.path == "/ai":
                 self._ai(data)
+            elif self.path == "/ai/batch":
+                self._ai_batch(data)
             elif self.path == "/publish":
                 self._publish(data)
             elif self.path == "/search":

@@ -384,6 +384,40 @@ def test_schedule_repacks_pins_and_approval_freezes(workflow):
         assert b'Over capacity' not in _get(url)[1]  # automatic row moved out
 
 
+def test_ai_batch_is_last_first_exact_marker_only_and_continues_after_failure(workflow, monkeypatch):
+    from publicator.llm_meta import TODO_GENERATE, VISION_MODELS
+    generated = []
+    def provider(image, model, **kwargs):
+        generated.append(image)
+        if image == 'thumbnail.png' and len(generated) == 2:
+            raise RuntimeError('provider failed')
+        return 'Generated', 'Description'
+    monkeypatch.setattr(workflow.gallery, 'generate_metadata', provider)
+    with workflow.start() as url:
+        uuids = [pick(url, workflow, i) for i in range(3)]
+        for uuid in uuids:
+            assert _post(url, {'uuid': uuid}, '/schedule/approve')[0] == 200
+        rows = json.loads(workflow.jp.read_text())
+        rows[0]['title'] = 'Manual title'
+        rows[0]['description'] = TODO_GENERATE
+        rows[1]['title'] = TODO_GENERATE
+        rows[1]['description'] = 'Manual description'
+        rows[2]['title'] = TODO_GENERATE + ' '  # not an exact marker
+        workflow.jp.write_text(json.dumps(rows))
+        html = _get(url)[1]
+        assert b'Describe all marked' in html
+        status, body = _post(url, {'source': 'openrouter', 'model': VISION_MODELS[0]}, '/ai/batch')
+        assert status == 200 and body['succeeded'] == 1 and body['failed'] == 1
+        saved = json.loads(workflow.jp.read_text())
+        by_id = {p['uuid']: p for p in saved}
+        assert by_id[uuids[0]]['title'] == 'Manual title'
+        assert by_id[uuids[0]]['description'] == TODO_GENERATE
+        assert by_id[uuids[1]]['title'] == 'Generated'
+        assert by_id[uuids[1]]['description'] == 'Manual description'
+        assert by_id[uuids[2]]['title'] == TODO_GENERATE + ' '
+        assert [r['uuid'] for r in body['results']] == [uuids[1], uuids[0]]
+
+
 def test_ai_saves_complete_pair_and_retries_failure_markers(workflow, monkeypatch):
     from publicator.llm_meta import TODO_GENERATE
     generated_pairs = []

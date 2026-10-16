@@ -185,6 +185,14 @@ document.addEventListener('click', async e => {
       const limit = Number(document.getElementById('search-limit').value);
       const paths = [...document.querySelectorAll('[name="search-path"]:checked')].map(e => e.value);
       await post('/search', {limit, paths});
+    } else if (action === 'ai-batch') {
+      const opt = document.getElementById('ai-model').selectedOptions[0];
+      if (opt.dataset.source === 'local' && opt.dataset.installed === 'false' &&
+          !confirm('Install ' + opt.dataset.ollama + ' and generate?')) return;
+      const d = await post('/ai/batch', {source:opt.dataset.source,
+        model:opt.dataset.model ? JSON.parse(opt.dataset.model) : null});
+      sessionStorage.setItem('ai-batch-result', JSON.stringify(d));
+      await refresh(); return;
     } else if (action === 'ai') {
       const opt = document.getElementById('ai-model').selectedOptions[0];
       if (opt.dataset.source === 'local' && opt.dataset.installed === 'false' &&
@@ -233,6 +241,14 @@ document.getElementById('calendar-tab').addEventListener('click', async e => {
     if (row) { reveal(row.closest('[data-phase]').dataset.phase); row.scrollIntoView({block:'center'}); }
   } catch(e) { report(e.message, true); }
 });
+const batchResult = sessionStorage.getItem('ai-batch-result');
+if (batchResult) {
+  sessionStorage.removeItem('ai-batch-result');
+  try {
+    const d = JSON.parse(batchResult);
+    report('Batch descriptions: ' + d.succeeded + ' succeeded, ' + d.failed + ' failed.', d.failed > 0);
+  } catch(e) { report(e.message, true); }
+}
 const previous = sessionStorage.getItem('publish-result');
 if (previous) {
   try {
@@ -331,6 +347,7 @@ def render_page(*, thumb_map, candidates, publications, timeline, schedules, con
         body += f'<section id="{phase}-tab" class="grid" data-phase="{phase}" hidden>'
         if phase == 'describe':
             body += '<label>AI provider <select autocomplete="off" id="ai-model">' + model_options(vision_models, local_model_statuses or {}, ai_model, openrouter_model) + '</select></label>'
+            body += button('ai-batch', 'Describe all marked')
         for pub in groups[phase]:
             uuid = pub['uuid']; anchors[uuid] = 'publication-' + uuid
             ts = pub.get('apparitionTimestampIfDifferentThanSubmission')

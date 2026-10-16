@@ -132,15 +132,22 @@ def free_vision_models(catalogue):
                  if "image" in (m.get("architecture") or {}).get("input_modalities", ()))
 
 
-def _fallbacks(model, run):
-    """`model`, then every other free vision id. A generator on purpose: `run_llm`
-    only asks for alternatives after a failed attempt, so the happy path lists nothing."""
-    yield model
+def batch_order(records):
+    """Batch records are processed from last to first in persisted order."""
+    return reversed(records)
+
+
+def _fallbacks(model, run, preferred_model=None):
+    """Try a batch-learned OpenRouter model before the selected/dynamic fallbacks."""
+    if preferred_model and preferred_model.startswith("openrouter/"):
+        yield preferred_model
+    if model != preferred_model:
+        yield model
     if not model.startswith("openrouter/"):
         return          # the claude-cli path has no sibling, nor a key to reach one
     try:
         others = [m for m in free_vision_models(json.loads(run(FREE_MODELS_ARGV, "").stdout))
-                  if m != model]
+                  if m not in {model, preferred_model}]
     except (OSError, ValueError, KeyError, TypeError) as e:
         # Fail open (ADR 0004): the rescue path must never become the failure it
         # exists to rescue. Narrow on purpose — our own bugs still raise.
@@ -187,12 +194,14 @@ def _provider_unavailable(stderr):
         )))
 
 
-def run_llm(model, prompt, *, schema=None, cwd=None, attach=None, run=None, timeout=DEFAULT_TIMEOUT):
+def run_llm(model, prompt, *, schema=None, cwd=None, attach=None, run=None, timeout=DEFAULT_TIMEOUT,
+            preferred_model=None, model_used=None):
     # `timeout` budgets the whole call, not each attempt: the walk must not turn a
     # 300s ceiling into N x 300s on a request the gallery tab is blocking on.
     deadline = time.monotonic() + timeout
     last_error = None
-    for candidate in _fallbacks(model, run or functools.partial(_default_run, timeout=timeout)):
+    for candidate in _fallbacks(model, run or functools.partial(_default_run, timeout=timeout),
+                                 preferred_model=preferred_model):
         left = max(1, int(deadline - time.monotonic()))
         try:
             cp = _attempt(candidate, prompt, schema=schema, cwd=cwd, attach=attach,
@@ -217,6 +226,8 @@ def run_llm(model, prompt, *, schema=None, cwd=None, attach=None, run=None, time
         if candidate != model:      # the metadata did not come from the id you picked
             log.info("%s answered instead of the failed %s", candidate, model)
         log.debug("llm output: %s", out)
+        if model_used is not None:
+            model_used.append(candidate)
         return result
     raise last_error
 
@@ -309,7 +320,7 @@ def _local_metadata(image_path, model_option, *, timeout):
 
 def generate_metadata(image_path, model_option: dict[str, str] | None, *, source: str,
                       claude_model: str | None = None, run=None, timeout=DEFAULT_TIMEOUT,
-                      install_missing=False) -> tuple[str, str]:
+                      install_missing=False, preferred_model=None, model_used=None) -> tuple[str, str]:
     """Return validated title/description using the selected metadata provider."""
     abspath = os.path.abspath(image_path)
     if source == "local":
@@ -321,7 +332,8 @@ def generate_metadata(image_path, model_option: dict[str, str] | None, *, source
         if model_option is None:
             raise ValueError("OpenRouter generation requires a model option")
         obj = run_llm(model_option["openrouter_name"], _PROMPT_ATTACH,
-                      schema=TITLE_DESC_SCHEMA, attach=abspath, run=run, timeout=timeout)
+                      schema=TITLE_DESC_SCHEMA, attach=abspath, run=run, timeout=timeout,
+                      preferred_model=preferred_model, model_used=model_used)
     elif source == "claude":
         obj = run_llm(claude_model if claude_model is not None else DEFAULT_MODEL,
                       _PROMPT.format(name=os.path.basename(image_path)),

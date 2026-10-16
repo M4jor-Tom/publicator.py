@@ -11,7 +11,7 @@ from publicator.config import load_config
 from publicator.images import thumb_for_ai
 from publicator.llm_meta import (
     DEFAULT_TIMEOUT, OPENROUTER_MODEL, TODO_GENERATE, VISION_MODELS,
-    generate_metadata, local_model_status,
+    batch_order, generate_metadata, local_model_status,
 )
 from publicator import workflow
 
@@ -56,16 +56,21 @@ def generate_pending(json_path, data_dir, *, source, model_option, timeout=DEFAU
     config = load_config(data_dir)
     cache_dir = str(Path(data_dir) / ".thumbs")
     succeeded = failed = 0
-    for pub in pending:
+    preferred_model = None
+    for pub in batch_order(pending):
         uuid = pub.get("uuid", "<unknown>")
         art_path = "<unresolved>"
         try:
             art_path = str(entries.find_art_path(pub["files"][0]["basename"]))
             image = thumb_for_ai(art_path, cache_dir)
+            model_used = []
             title, description = generate_metadata(
                 image, model_option, source=source, timeout=timeout,
-                install_missing=install_missing,
+                install_missing=install_missing, preferred_model=preferred_model,
+                model_used=model_used,
             )
+            if source == "openrouter" and model_used:
+                preferred_model = model_used[0]
             workflow.merge_generated_metadata(json_path, pub["uuid"], title=title,
                                               description=description, config=config)
             succeeded += 1

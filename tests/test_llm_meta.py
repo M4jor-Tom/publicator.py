@@ -32,6 +32,20 @@ def make_run(stdout="", returncode=0, stderr="", capture=None):
     return run
 
 
+def test_run_llm_prefers_batch_model_and_reports_successful_candidate():
+    from types import SimpleNamespace
+    calls = []
+    def run(argv, prompt):
+        calls.append(argv)
+        return SimpleNamespace(returncode=0, stdout='{"title":"T","description":"D"}', stderr='')
+    used = []
+    result = llm_meta.run_llm("openrouter/selected", "prompt", schema=llm_meta.TITLE_DESC_SCHEMA,
+        attach="/image.png", run=run, preferred_model="openrouter/preferred", model_used=used)
+    assert result == {"title": "T", "description": "D"}
+    assert calls[0][2] == "openrouter/preferred"
+    assert used == ["openrouter/preferred"]
+
+
 def test_run_llm_builds_argv_and_parses_schema():
     cap = {}
     obj = llm_meta.run_llm("m", "hi", schema={"type": "object"}, cwd="/w",
