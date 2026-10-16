@@ -418,6 +418,51 @@ def test_ai_batch_is_last_first_exact_marker_only_and_continues_after_failure(wo
         assert [r['uuid'] for r in body['results']] == [uuids[1], uuids[0]]
 
 
+def test_ai_batch_reserves_only_records_still_eligible_at_admission(workflow, monkeypatch):
+    from publicator.llm_meta import TODO_GENERATE
+    generated = []
+    monkeypatch.setattr(workflow.gallery, 'generate_metadata',
+                        lambda *a, **kw: generated.append(a) or ('T', 'D'))
+    class AdmissionGate:
+        def __init__(self):
+            self.lock = threading.RLock()
+            self.waiting = threading.Event()
+            self.resume = threading.Event()
+            self.block_next = True
+        def acquire(self, *args, **kwargs):
+            if self.block_next:
+                self.block_next = False
+                self.waiting.set()
+                assert self.resume.wait(5)
+            return self.lock.acquire(*args, **kwargs)
+        def release(self):
+            self.lock.release()
+        def __enter__(self):
+            self.acquire()
+            return self
+        def __exit__(self, *args):
+            self.release()
+    with workflow.start() as url:
+        uuid = pick(url, workflow)
+        assert _post(url, {'uuid': uuid}, '/schedule/approve')[0] == 200
+        row = json.loads(workflow.jp.read_text())[0]
+        row['title'] = row['description'] = TODO_GENERATE
+        workflow.jp.write_text(json.dumps([row]))
+        gate = AdmissionGate()
+        workflow.handlers[-1].operation_lock = gate
+        response = []
+        request = threading.Thread(target=lambda: response.append(
+            _post(url, {'source': 'claude'}, '/ai/batch')))
+        request.start()
+        assert gate.waiting.wait(5)
+        assert _post(url, {'uuid': uuid, 'title': 'Manual', 'description': 'Draft'}, '/metadata')[0] == 200
+        gate.resume.set()
+        request.join(5)
+        assert not request.is_alive()
+        assert response[0][0] == 200 and response[0][1]['succeeded'] == 0
+        assert generated == []
+
+
 def test_ai_batch_keeps_persisted_order_for_non_openrouter_provider(workflow, monkeypatch):
     calls = []
     monkeypatch.setattr(workflow.gallery, 'thumb_for_ai', lambda path, *a: path.rsplit('/', 1)[-1])

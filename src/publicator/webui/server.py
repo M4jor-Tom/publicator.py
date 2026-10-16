@@ -350,15 +350,15 @@ class GalleryHandler(BaseHTTPRequestHandler):
     def _ai_batch(self, data: dict) -> None:
         self._fields(data, {"source", "model"})
         source, model = self._ai_model(data)
-        publications = [p for p in self._publications()
-                        if p.get("state") == "SCHEDULED" and
-                        any(p.get(k) == TODO_GENERATE for k in ("title", "description"))]
-        if not publications:
-            self._send(200, {"succeeded": 0, "failed": 0, "results": []}); return
         with self.operation_lock:
+            publications = [p for p in self._publications()
+                            if p.get("state") == "SCHEDULED" and
+                            any(p.get(k) == TODO_GENERATE for k in ("title", "description"))]
             if any(p["uuid"] in self.ai_busy for p in publications):
                 self._send(409, {"error": "metadata generation already running"}); return
             self.ai_busy.update(p["uuid"] for p in publications)
+        if not publications:
+            self._send(200, {"succeeded": 0, "failed": 0, "results": []}); return
         succeeded, failed, results, preferred_model = 0, 0, [], None
         try:
             index = index_by_basename(self.data_dir)
