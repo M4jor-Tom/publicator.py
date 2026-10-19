@@ -3,7 +3,7 @@
 Read-only and pure-ish: it derives everything from the prompt repository and
 stores nothing. `webui` imports this; this imports nothing from `webui`.
 
-Three things keep this honest, and all three are load-bearing (ADRs 0001-0004):
+Three load-bearing rules (see docs/features/prompt-mapping.md):
 
 * the filename grammar is CONFIG, not code — publicator knows the `version` and
   `lineage` roles, never the shape that carries them;
@@ -112,7 +112,7 @@ def rank_paths(paths, near: str) -> list[str]:
 class PromptArchive:
     """The prompt repository, indexed by content digest.
 
-    Git history IS the archive (ADR 0001), so there is no second store to drift.
+    Git history IS the archive, so there is no second store to drift.
     The index is rebuilt when HEAD moves — a sound cache key precisely because
     every archive write is a commit."""
 
@@ -266,7 +266,7 @@ class PromptArchive:
                                 key=lambda v: (-v.committed, v.version)))
 
     def resolve(self, identity: ImageIdentity, near: str = "") -> PromptMatch:
-        """One of three answers, never a nullable string (ADR 0002). `near` is
+        """One of three answers, never a nullable string. `near` is
         the image's own directory and only ever ORDERS Nearest candidates."""
         exact = self.versions().get(identity.version)
         if exact is not None:

@@ -5,9 +5,9 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-DOCS = sorted((ROOT / "docs").rglob("*.md")) + [ROOT / "CLAUDE.md"]
-# Backticked repo-relative paths with an extension or a trailing slash. Bare ADR
-# ids like `docs/adr/0005` and data-dir files (`publications.json`) are not repo paths.
+DOCS = sorted((ROOT / "docs").rglob("*.md")) + [ROOT / "AGENTS.md"]
+# Backticked repo-relative paths with an extension or a trailing slash.
+# Bare identifiers and data-dir files (`publications.json`) are not repo paths.
 PATH_RE = re.compile(r"`((?:src|tests|docs|\.claude)/[^`\s:]*(?:\.\w+|/))")
 
 
@@ -18,12 +18,12 @@ def test_referenced_repo_paths_exist(doc):
 
 
 def test_ui_docs_describe_search_and_application_owned_ai_flow():
-    claude = (ROOT / "CLAUDE.md").read_text()
+    guidance = (ROOT / "AGENTS.md").read_text()
     gallery = (ROOT / "docs/features/gallery-ui.md").read_text()
     ai = (ROOT / "docs/features/ai-metadata.md").read_text()
     config = (ROOT / "docs/features/config.md").read_text()
 
-    assert "nix run .#ui" in claude
+    assert "nix run .#ui" in guidance
     assert "runtime subset" in gallery
     assert "Empty/0, 25, 50, 75, or 100" in gallery
     assert "defaults to 25" in gallery and "all configured `publicable` paths selected" in gallery

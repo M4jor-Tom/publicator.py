@@ -14,7 +14,8 @@ instead of the Read-path prompt. Most of them also reject `--schema` — see
 A rate-limited `:free` model is a model-*selection* problem, not a timing one --
 the free tier shares one upstream pool across every OpenRouter user, so backing
 off changes nothing that another vendor's model wouldn't fix instantly. OpenRouter
-walks the other free vision ids after any failed model attempt; `_fallbacks`, ADR 0008.
+walks the other free vision ids after any failed model attempt; see `_fallbacks`
+and docs/features/ai-metadata.md.
 """
 import base64
 import functools
@@ -149,7 +150,7 @@ def _fallbacks(model, run, preferred_model=None):
         others = [m for m in free_vision_models(json.loads(run(FREE_MODELS_ARGV, "").stdout))
                   if m not in {model, preferred_model}]
     except (OSError, ValueError, KeyError, TypeError) as e:
-        # Fail open (ADR 0004): the rescue path must never become the failure it
+        # Fail open: the rescue path must never become the failure it
         # exists to rescue. Narrow on purpose — our own bugs still raise.
         log.warning("cannot list free vision models (%s); no model fallback", e)
         return
@@ -160,7 +161,7 @@ def _fallbacks(model, run, preferred_model=None):
 
 
 def _attempt(model, prompt, *, schema, cwd, attach, run, timeout):
-    """One model's shot: argv build plus ADR 0005's schema retry -> CompletedProcess."""
+    """One model's shot: argv build plus schema-rejection retry -> CompletedProcess."""
     if attach is not None:
         # API-key providers (openrouter/*): vision via -a attachment. The
         # claude-cli -o options don't exist on these models, so omit them.

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """CLI: how much of the data dir's art can be traced back to its prompt.
 
-Two of these numbers earn their place (ADRs 0003, 0004):
+Two numbers expose drift (see docs/features/prompt-mapping.md):
 
 * `parsed` drops to 0 if the filename grammar in publicator.toml drifts from
   the one identify_image.sh actually produces — they live in two repos and

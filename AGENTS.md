@@ -1,4 +1,4 @@
-# CLAUDE.md
+# AGENTS.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
@@ -56,6 +56,11 @@ nix run <this>#pw-daemon      # Playwright FIFO daemon for DOM probing (see docs
 
 ## Architecture
 
+The existing UI/CLI → application operations → Store boundary is recorded in
+`docs/adr/0009-separate-interfaces-application-operations-and-store.md`.
+UI and CLI are distinct interfaces, not required mirrors; callable operations
+in `workflow.py` own phase changes and `platforms.py` owns publisher dispatch.
+
 Per-feature maintenance docs: `docs/README.md` indexes `docs/features/` (one file per
 feature, fixed shape: Does/Run/Code/Tests/Config/Data/Decisions/Verify, then flow,
 invariants, gotchas). Read the feature file before touching its code.
@@ -84,8 +89,9 @@ resolves against CWD/`--data-dir`, per the code/data split above.
    publication states PICKED/SCHEDULED/DESCRIBED/APPEARED, shared title/description,
    and the publication-level apparitionTimestampIfDifferentThanSubmission.
    Apparitions retain delivery states/options and an optional actual `url`.
-   Picking never selects a platform or generates metadata. Dates and metadata
-   require explicit approval; successful deliveries lock shared content.
+   Picking never selects a platform or generates metadata. Dates and manual
+   metadata require explicit approval; a complete AI-generated pair advances to
+   DESCRIBED. Successful deliveries lock shared content.
    Phase 4 is image rows × registered-platform columns, with persistent selection
    and success-aware retry through `platforms.py`. DeviantArt is the only initial
    executable registration; historical other-platform data remains readable.
@@ -120,13 +126,13 @@ Most free OpenRouter vision models **reject `--schema`**; `run_llm` retries once
 with the shape in the prompt and remembers the verdict per model (see
 `NO_SCHEMA_SUPPORT`). Don't "fix" a schema failure by chasing a model id that
 supports structured outputs — the free ones churn; rationale and the rejected
-alternatives are in `docs/adr/0005`. A **429 is a different beast**: the
+alternatives are in `docs/features/ai-metadata.md`. A **429 is a different beast**: the
 `:free` tier shares one upstream pool per vendor, so backing off is useless
 and `run_llm` walks the other free vision ids after any failed OpenRouter
 attempt (same vendor last, using the plugin's cache so ids resolve through
 `llm -m`), logging at INFO which model answered. It does not silently switch to
 Claude or local Ollama; after the catalogue is exhausted, the last error is
-reported (`docs/adr/0008`).
+reported (see `docs/features/ai-metadata.md`).
 Every AI caller downscales through
 `images.thumb_for_ai` first.
 
@@ -168,8 +174,8 @@ which drops to 0 if that grammar drifts from what `identify_image.sh` produces,
 and `nearest`, which rising means archive writes are failing. Both apps that
 shell out to git (`ui`, `prompt-audit`) must list `pkgs.git` in their
 flake `runtimeInputs` — `writeShellApplication` pins PATH to those.
-Feature doc: `docs/features/prompt-mapping.md`,
-decisions in `docs/adr/0001`–`0004`.
+Feature behavior, archive-write contracts and rationale:
+`docs/features/prompt-mapping.md`; grammar ownership: `docs/features/config.md`.
 
 **State & data.** `publications.json` is the source of truth. Publication state
 records completed phases, while apparitions carry delivery state. Automatic
@@ -190,6 +196,6 @@ flow.
 - Run apps from the data dir (or pass `--data-dir`) — see the code/data split above.
 - `.webp` is rejected by DeviantArt (top of this file); convert before publishing.
 - Login is out-of-band in real Firefox; Playwright cannot pass the PerimeterX wall.
-- `AGENTS.md` is a symlink to this file — edit `CLAUDE.md`, never `AGENTS.md`.
+- Repository guidance lives in `AGENTS.md` (a regular file, not a symlink).
 - Prompt lookup is content-addressed, never `basename`-at-`HEAD`; and the
   filename grammar lives in `publicator.toml`, not in the code.

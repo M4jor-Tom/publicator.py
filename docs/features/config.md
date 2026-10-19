@@ -9,7 +9,7 @@
 - **Tests:** `tests/test_config.py` (defaults, `[schedule]` pass-through, prompt grammar acceptance and rejection, tier/gallery allow-lists), `tests/test_deviantart.py` (`configure` resolves tags file under data dir, or leaves it unset), `tests/test_store.py` (validated store mutations), `tests/test_scheduling.py` (flat config becomes one profile, defaults, invalid profiles, day names), `tests/test_prompts.py` (`from_config` None without section or repo dir, archive otherwise), `tests/conftest.py` (`_restore_data_dir_globals` autouse fixture resets `configure` globals)
 - **Config:** `publicator.toml`, every key, see Keys; the UI's Search path choices are a runtime subset of `publicable` and never modify TOML. Absent or empty `[prompts]` gives `prompts = None` (feature off).
 - **Data:** `publicator.toml` (read only; missing file is not an error); `<tags>` (read by `_step_add_tags` at STEPS entry 8); `<publicable[i]>/` (scanned by the UI and prompt-audit; Search can choose a runtime subset only); `<prompts.repo>/` (git repo digested by `prompts.PromptArchive` when set and present); `src/publicator/publicationsSchema.json` (code asset via `__file__`, parsed once at import, never read from the data dir)
-- **Decisions:** `docs/adr/0003-declare-the-filename-grammar-in-publicator-toml.md`
+- **Decisions:** The data repository owns filename grammar and digest choice; publicator depends only on named roles, expressed with stdlib `re` rather than a custom parser. See [Prompt grammar ownership](#prompt-grammar-ownership).
 - **Verify:** `nix develop -c pytest tests/test_config.py -q`
 - **Verify:** `nix develop -c pytest tests/test_deviantart.py tests/test_store.py tests/test_scheduling.py tests/test_prompts.py -q`
 - **Verify:** `nix develop -c pytest -q`
@@ -43,11 +43,43 @@ on all mutations, including delivery successes. Dispatcher configuration is
 passed through to publisher preflight and persistence so --json outside the
 data directory does not accidentally use another allow-list.
 
+### Prompt grammar ownership
+
+`identify_image.sh` in the data repository produces image names; that repository's
+`publicator.toml` declares how to interpret them. Publicator knows the required
+`version` role (the exact content digest) and optional `lineage` role (a weak file
+hint), not the separators, field order, UUID format, or digest algorithm. The
+instance UUID is deliberately not captured: the resolver has no use for it.
+For example, the existing data convention can be declared as:
+
+```toml
+[prompts]
+repo = "huggingface_prompts"
+filename = '^(?P<lineage>.+)_(?P<version>[0-9a-f]{40})_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.[^.]+$'
+version_hash = "sha1"
+```
+
+This is an example, **not a fallback grammar**. Omitting `[prompts]` disables
+lookup; publicator must not guess a convention. `_load_prompts` compiles and
+validates once at the configuration boundary. Tests use a different filename
+shape, `sha256`, and no lineage group to prove that the contract is role-based.
+
+Hardcoding the shape would turn a data-repo naming change into a code release.
+A template mini-language would need new ambiguity/greediness rules for basenames
+containing separators; fixed separators and field lists assume today's shape.
+Parsing the producer's shell script at runtime is worse than declaring the regex.
+Named `re` groups already express the needed contract without another parser.
+
+The producer and declaration can still drift across repositories. Prompt-audit's
+`parsed: N of M` exposes this: a drop to zero calls for a TOML fix, not a code
+fallback. Archive lookup and its separate `nearest` health metric belong to
+[prompt mapping](prompt-mapping.md).
+
 ## Invariants
 
 - **A missing `publicator.toml` never crashes.** Apps must run on an unconfigured data dir and fail later with a domain error, not `FileNotFoundError`; `load_config` returns `{tiers:[], galleries:[], publicable:[], tags:None, schedule:{}, prompts:None}` (`test_config.py::test_load_config_defaults_when_file_missing`).
 - **Config and every path key resolve under the data dir; code assets via `__file__`.** Code/data split, the repo holds no account content; `deviantart.configure` (`DATA_DIR / tags`), `prompts.from_config` (`data_dir/repo`), `config.SCHEMA` (`test_deviantart.py::test_configure_resolves_tags_file_under_data_dir`). UI Search accepts only a runtime subset of configured `publicable` paths; it cannot accept arbitrary filesystem paths or write the TOML.
-- **`[prompts]` is validated at load; nothing in `src/` hardcodes the filename shape or `sha1`.** ADR 0003, a bad pattern fails at the boundary, not while rendering a card; `_load_prompts`; `prompts.py` uses `hashlib.new(self.version_hash, ...)` (`test_config.py::test_load_config_rejects_*`, `::*_without_lineage_group`).
+- **`[prompts]` is validated at load; nothing in `src/` hardcodes the filename shape or `sha1`.** A bad pattern fails at the boundary, not while rendering a card; `_load_prompts`; `prompts.py` uses `hashlib.new(self.version_hash, ...)` (`test_config.py::test_load_config_rejects_*`, `::*_without_lineage_group`).
 - **`[schedule]` passes through `load_config` verbatim.** One place owns cadence math so the browser never does weekday/hour work; profile/default validation lives in `scheduling.schedule_profiles` / `scheduling.schedule_data`, timezone defaults in `scheduling.zone` (`test_config.py::test_load_config_reads_*_schedule*`, `test_scheduling.py::test_invalid_profiles_*`).
 - **Every written tier / gallery must be in the `[deviantart]` allow-lists.** DA's comboboxes match exact text at STEPS entries 10-11 (`_pick_in_combo`); an unlisted value fails mid-submit after upload and leaves a draft; `validate_publications` guards store mutations and publisher preflights (`test_config.py::test_validate_rejects_*`).
 - Relies on `deviantart.configure()` mutating process-global module state (`DATA_DIR`/`LOGIN_DIR`/`SESSION_DIR`/`TAGS_FILE`, `entries.DATA_DIR`) that `tests/conftest.py::_restore_data_dir_globals` resets between tests, owned by `docs/features/deviantart-publish.md`.

@@ -6,7 +6,7 @@
 - **Tests:** `tests/test_page.py` (escaping, phase forms, accessible selection grid), `tests/test_server.py` (real HTTP + real JSON persistence, reopen, AI races, retry, batch guards), `tests/test_scheduling.py` (server allocation).
 - **Config:** `publicator.toml`: `publicable`, `[deviantart]` allow-lists, read-only `[schedule]` profiles, optional `[prompts]`; local model availability from llmfit/Ollama.
 - **Data:** `publications.json` is authoritative on every request/refresh; `.thumbs/` is a lazy content-addressed cache. Disk deletion is restricted to unpicked candidate paths; no persisted publication is removed by the UI.
-- **Decisions:** Native inputs/popovers and server-rendered HTML; no database/frontend framework, RAM-only publish queue, or browser-clock allocation. Provider/browser calls run without store mutation locks.
+- **Decisions:** Native inputs/popovers and server-rendered HTML; no database/frontend framework, RAM-only publish queue, or browser-clock allocation. Provider/browser calls run without store mutation locks. [Architecture: UI/CLI → application operations → Store](../adr/0009-separate-interfaces-application-operations-and-store.md).
 - **Verify:** `nix develop -c pytest tests/test_page.py tests/test_server.py tests/test_scheduling.py tests/test_docs.py -q`
 
 ## How it works

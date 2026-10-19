@@ -43,7 +43,7 @@ def test_audit_counts_each_resolution_state(tmp_path):
 
 def test_report_leads_with_the_parse_rate(tmp_path):
     """`parsed` dropping to 0 is how grammar drift between identify_image.sh
-    and publicator.toml is caught (ADR 0003)."""
+    and publicator.toml is caught."""
     lines = format_report(audit(str(tmp_path), setup_dir(tmp_path))).splitlines()
     assert lines[0].startswith("parsed")
     assert "3 of 4" in lines[0]

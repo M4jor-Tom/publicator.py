@@ -13,7 +13,7 @@ _SCHEMA = json.loads(SCHEMA.read_text())  # static bundled asset; load once, not
 
 def _load_prompts(cfg: dict) -> dict | None:
     """[prompts]: the ART repo declares its own image-filename grammar, so
-    publicator stays agnostic of it (ADR 0003). We depend on ROLES — a required
+    publicator stays agnostic of it. We depend on ROLES — a required
     `version` capture (which exact prompt text) and an optional `lineage` one
     (which logical prompt file) — never on the shape that carries them.
     Absent section -> feature off. Validated here, at the trust boundary: a bad
@@ -43,7 +43,7 @@ def load_config(cwd="."):
     """publicator.toml config (read from <cwd>). Missing file -> empty defaults.
     Returns tiers/galleries (DA allow-lists), publicable (candidate dirs),
     tags (DA tag-list path), schedule (cadence for the gallery client),
-    prompts (image-filename grammar + prompt repo, see ADR 0003)."""
+    prompts (image-filename grammar + prompt repo, see docs/features/config.md)."""
     f = Path(cwd) / "publicator.toml"
     cfg = tomllib.loads(f.read_text()) if f.exists() else {}
     da = cfg.get("deviantart", {})

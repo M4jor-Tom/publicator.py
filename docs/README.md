@@ -7,7 +7,7 @@ Decisions / Verify**; Run and Verify repeat, one command per line), then `## How
 `## Open items` (config.md adds a `## Keys` table). `tests/test_docs.py` fails when any doc names a repo path that no
 longer exists.
 
-First visit: read `CLAUDE.md` (architecture and gotchas), then the feature you touch.
+First visit: read `AGENTS.md` (architecture and gotchas), then the feature you touch.
 
 ## Features, in pipeline order
 
@@ -21,18 +21,16 @@ First visit: read `CLAUDE.md` (architecture and gotchas), then the feature you t
 - [Prompt mapping (image -> generation prompt)](features/prompt-mapping.md) — content-addressed lookup of an image's prompt in the archive repo: Exact, Nearest or Unknown
 - [DeviantArt publishing (Playwright submit flow)](features/deviantart-publish.md) — drives Firefox through DA's submit form for pending entries
 
-## Decisions
+## Architecture decisions
 
-`adr/` records why a design was chosen over its alternatives. Each feature file
-links the ADRs that constrain it; do not reverse one without a new ADR.
+`adr/` records cross-cutting architecture: component boundaries, responsibilities,
+alternatives and trade-offs. Feature-specific behavior, constraints, rationale
+and operational checks live with their owning feature in `features/`, not in
+separate ADRs. The former feature ADRs have been consolidated into
+[prompt mapping](features/prompt-mapping.md), [configuration](features/config.md)
+and [AI metadata](features/ai-metadata.md); their history remains in Git.
 
-- [0001 Archive prompts at identity-mint time](adr/0001-archive-prompts-at-identity-mint-time.md)
-- [0002 Resolve prompts to a three-state type](adr/0002-resolve-prompts-to-a-three-state-type.md)
-- [0003 Declare the filename grammar in publicator.toml](adr/0003-declare-the-filename-grammar-in-publicator-toml.md)
-- [0004 Fail open when prompt archiving fails](adr/0004-fail-open-when-prompt-archiving-fails.md)
-- [0005 Retry without --schema when a model rejects it](adr/0005-retry-without-schema-when-a-model-rejects-it.md)
-- [0007 Local vision models with Ollama and llmfit](adr/0007-local-vision-models-with-ollama-and-llmfit.md)
-- [0008 Walk the free vision catalogue after any failed model attempt](adr/0008-walk-the-free-vision-catalogue-on-any-error.md)
+- [0009 Separate UI/CLI interfaces, application operations and Store](adr/0009-separate-interfaces-application-operations-and-store.md)
 
 ## Maintaining
 
@@ -43,7 +41,9 @@ links the ADRs that constrain it; do not reverse one without a new ADR.
   `src/publicator/publicationsSchema.json` is the data schema (see publications-store.md).
 - Code change: update the feature file's block and invariants in the same commit.
 - New feature: add `features/<slug>.md` in the same shape and a line above.
-- New decision: add `adr/000N-*.md` and link it from the feature's **Decisions** line.
+- Feature decision: maintain the owning feature's **Decisions**, flow and invariants.
+- Architecture decision: add the next `adr/NNNN-*.md`, link it above and from
+  affected features. Preserve numbering; do not reuse former feature ADR numbers.
 - Design specs, implementation plans, and task trackers live in `/tmp`, never in
   Git. Feature files record non-code-obvious constraints, decisions, and operational
   knowledge; do not duplicate behavior that is obvious from reading the code.

@@ -39,7 +39,7 @@ def test_parse_identity_without_a_lineage_group_yields_none_lineage():
 
 
 def test_nearest_has_no_text_attribute():
-    """The anti-conflation device of ADR 0002: a near-miss cannot be rendered
+    """A near-miss cannot be rendered
     as the real prompt because it has no field to render."""
     near = Nearest(candidates=(Lineage(path="a/b", versions=()),))
     assert not hasattr(near, "text")

@@ -7,9 +7,9 @@
 - **Tests:** `tests/test_prompts.py` (index, three-state resolve, ranking, HEAD refresh, git failures), `tests/test_prompt_view.py` (Exact/Nearest rendering, escaping, every candidate listed), `tests/test_prompt_audit.py` (counts, feature off), `tests/test_config.py` (`[prompts]` grammar validation and rejections), `tests/test_server.py` (search semantics, feature-off inertness, skipped vs maybe), `tests/test_page.py` (block injection, search box, banners, placeholder survival)
 - **Config:** `publicator.toml` `[prompts]`: `repo` (joined to the data dir; dir absent = off silently), `filename` (Python `re` as TOML literal `'...'`; needs `(?P<version>)`, optional `(?P<lineage>)`), `version_hash` (in `hashlib.algorithms_available`; real data `sha1`). Section absent = `config['prompts']` `None`, off. Also `publicable` (dirs walked), `[schedule].timezone` (dates Nearest versions).
 - **Data:** `<data-dir>/<prompts.repo>` (the `huggingface_prompts` submodule; read-only via `git cat-file`, `git log --all`, `git rev-parse HEAD`); `<publicable dir>/**` (image filenames parsed with the grammar); `publications.json` (search drops already-published hits via `load_publicated_hashes`; pending entries get prompt blocks); `.thumbs/` (allow-list extended for search results).
-- **Decisions:** `docs/adr/0001-archive-prompts-at-identity-mint-time.md`, `docs/adr/0002-resolve-prompts-to-a-three-state-type.md`, `docs/adr/0003-declare-the-filename-grammar-in-publicator-toml.md`, `docs/adr/0004-fail-open-when-prompt-archiving-fails.md`
+- **Decisions:** Git history is the only prompt archive; archive before minting an identity but never block image preservation; distinguish exact content from uncertain lineage in the result type. Filename grammar ownership belongs to [configuration](config.md#prompt-grammar-ownership).
 - **Verify:** `nix develop -c pytest tests/test_prompts.py tests/test_prompt_view.py tests/test_prompt_audit.py tests/test_config.py tests/test_server.py tests/test_page.py -q`
-- **Verify:** `rg -n 'sha1|_\[0-9a-f\]\{40\}' src/publicator/` (must print nothing; ADR 0003)
+- **Verify:** `rg -n 'sha1|_\[0-9a-f\]\{40\}' src/publicator/` (must print nothing; grammar and algorithm belong to configuration)
 - **Verify:** `nix run .#prompt-audit -- --data-dir <data-dir>` (`parsed` must be non-zero; compare with the baseline and update it after each generation batch: 2026-09-28 parsed 1255 of 4066, exact 455 images / 62 versions, nearest 793 / 355, unknown 7. `nearest` rising means archive writes are failing)
 
 ## How it works
@@ -26,6 +26,52 @@
 10. `search`, cont.: `truncated` set when a list exceeds `SEARCH_LIMIT` (200) before the cap; survivors sha512-hashed, already-published dropped; `_register_thumbs` extends the `/thumbs` allow-list; `render_page` shows both lists plus banners.
 11. prompt-audit: `audit()` iterates `collect_images` over `<data_dir>/<publicable>`, counts files, `archive.parse` -> parsed, `archive.resolve` -> exact/nearest/unknown plus distinct version sets; `format_report` prints `parsed   : N of M files` first.
 
+### Archive writes (data repository)
+
+The write-side contract lives in the separate `huggingface_prompts` repository,
+not in publicator. `identify_image.sh` attempts to stage and commit the prompt
+**before** computing the content digest embedded in the image identity. Unchanged
+content makes no new commit; changed content produces `snapshot: <path>`. Resolve
+the prompt path absolutely before using `git -C`, whose pathspecs are relative to
+the repository rather than the caller's directory.
+
+Archive guards warn on **stderr**, still print exactly one identity on stdout,
+and exit zero. `rename_image.sh` captures stdout as the new filename and moves a
+download from the fixed `~/Downloads/image.webp` path. Refusing an identity leaves
+the image there to be overwritten by the next generation; printing a warning on
+stdout corrupts its filename. The priority is **image > prompt > link**. Do not
+add fail-closed exits, `set -e`, interactive prompts, or image-management duties
+to the identity minter to compensate for an archive failure.
+
+An index lock or interrupted commit can heal retroactively if the same content
+is committed before it is edited again. The gitignored scratch file `prompt`
+is permanently unarchivable while ignored. Archive-at-mint is an **attempt**, not
+a referential-integrity guarantee; `Nearest`/`Unknown` and the audit must remain.
+
+Git is the archive because it already holds content, dates and historical paths.
+A digest sidecar directory or JSONL manifest would duplicate that store and need
+its own integrity/concurrency rules. No backfill can recover never-committed
+content: the 2026-08-21 audit found only 58 of 421 referenced versions recoverable
+from all refs, reflogs and dangling objects; 363 (86%) had never been saved.
+There was no secondary prompt in the image metadata.
+
+### Exact content versus lineage
+
+A version digest identifies immutable text; a lineage basename is only a hint
+because prompts evolve, move, and share basenames. Looking up basename at HEAD
+was silently wrong on 404 of 426 measured pairs (14 correct, 8 missing).
+`Exact.version.text` is authoritative; `Nearest.candidates` instead exposes all
+plausible lineages and their archived versions under an explicit “NOT ARCHIVED”
+warning. `Unknown` explains why neither can be found. Historical paths can be
+plural even for an Exact hit: identical text in different files is still exact.
+
+A nullable string cannot represent all three outcomes. A text-plus-confidence
+flag is too easy for a renderer to ignore, and a single fuzzy winner hides real
+ambiguity. Keeping prompt text off `Nearest` prevents accidental conflation;
+ranking orders candidates rather than excluding them. Prompt-text search is
+therefore Exact-only and announces excluded candidates. Search must resolve and
+filter before capping/hashing, not filter `find_candidates`' random sample.
+
 ## Invariants
 
 - **`Nearest` carries no `.text` and no `.version`.** basename@HEAD was wrong on 404 of 426 pairs, so the absent field is enforced by the language; class `Nearest`; `test_prompts.py::test_nearest_has_no_text_attribute`; `test_prompt_view.py::test_nearest_is_labelled_as_not_archived`.
@@ -37,7 +83,7 @@
 - **Feature off (`archive=None`): no search form, no prompt blocks, lookups `Unknown`, audit counts files only, nothing raises.** Keeps the gallery usable; `from_config`; `_prompt_html`/`search` early returns; `search_enabled`; `test_search_is_inert_when_the_feature_is_off`; `test_audit_without_a_prompts_section_*`.
 - **Any git failure (missing binary, broken repo, non-zero exit) yields `b''` from `PromptArchive._git`, so an empty index.** The review UI must stay usable; `tests/test_prompts.py::test_missing_repo_yields_an_empty_index`.
 - Relies on `[prompts]` validated at config load (`ValueError`, never at first lookup), owned by `docs/features/config.md`.
-- **Index cached on `git rev-parse HEAD`, rebuilt under a `threading.Lock`, probed at most every `HEAD_PROBE_TTL` (2s).** Each archive write is a commit (ADR 0001) so HEAD is the invalidation key; `_refresh`; `test_index_refreshes_when_head_moves`, `test_index_does_not_refresh_within_the_head_probe_ttl`.
+- **Index cached on `git rev-parse HEAD`, rebuilt under a `threading.Lock`, probed at most every `HEAD_PROBE_TTL` (2s).** Each successful archive write is a commit, so HEAD is the invalidation key; `_refresh`; `test_index_refreshes_when_head_moves`, `test_index_does_not_refresh_within_the_head_probe_ttl`.
 - Relies on `?prompt=` matching Exact text only, Nearest shown as `N candidates skipped`, over-`SEARCH_LIMIT` results announced as truncated (`GalleryHandler.search`), owned by `docs/features/gallery-ui.md`.
 - **Prompt text is html-escaped and `__CARDS__` is the last placeholder replaced.** Prompt files are arbitrary text; `prompt_view._body`/`_lineage_link`; `render_page` final `.replace('__CARDS__', ...)`; `test_exact_escapes_html_in_the_prompt`; `test_prompt_text_containing_a_placeholder_survives_as_literal_text`.
 - **webui imports prompts; `prompts.py` imports only stdlib.** Same one-way rule as `deviantart.py`, keeps the resolver testable without the server; `prompts.py` import block.
@@ -59,9 +105,19 @@
 - prompt-audit's `unknown` counts only parsed files whose version and lineage both miss; non-prompt-bearing names are in `files` but neither parsed nor unknown.
 - The data repo's `huggingface_prompts/.gitignore` contains `prompt`: an image generated from that scratch file is permanently unarchivable (always Nearest/Unknown). Invisible from this repo.
 
+### Verify the write-side contract
+
+Use a disposable clone of the prompt repository, never the real archive. Run its
+`test_identify_image.sh`, then check that an initial prompt creates a snapshot,
+an unchanged repeat creates none, and an edit creates another. Digesting all
+stored blob contents with the configured `version_hash` must find the digest
+printed in each successful archive's identity; the git object ID is not that key.
+Repeat with a locked index and with a gitignored prompt: both must still exit
+zero, print exactly one stdout line, and send the warning only to stderr.
+
 ## Open items
 
 - Unbuilt, not rejected: storing the resolved prompt in `publications.json`, feeding it to `llm_meta`. Rejected on principle: on-disk index, client-side prompt-UI JS.
-- Write side: `identify_image.sh` carries the ADR 0001/0004 guards and has `test_identify_image.sh`, but `huggingface_prompts` history holds no `snapshot:` commits yet, so a flat `nearest` is not yet evidence the guards work in production.
+- Write-side deployment must be verified in the data repository: the earlier inspection found `identify_image.sh` guards and `test_identify_image.sh` but no `snapshot:` commits. Do not treat a flat `nearest` count alone as proof that production archive writes work.
 - `test_concurrent_queries_never_raise_or_tear` is a smoke/deadlock test; it cannot reliably force the torn-index race red.
 - A persistent index keyed on HEAD was considered and never needed; the `HEAD_PROBE_TTL` throttle was enough.
