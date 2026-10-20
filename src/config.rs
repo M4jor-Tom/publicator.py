@@ -1,7 +1,7 @@
 use crate::error::{Error, Result};
 use crate::model::Publications;
 use openssl::hash::{Hasher, MessageDigest};
-use pcre2::bytes::Regex;
+use pcre2::bytes::{Regex, RegexBuilder};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -72,7 +72,7 @@ impl Config {
             schedule: toml::Table,
             #[serde(default)]
             deviantart: Da,
-            prompts: Option<Prompts>,
+            prompts: Option<toml::Table>,
         }
         #[derive(Deserialize, Default)]
         struct Da {
@@ -81,19 +81,31 @@ impl Config {
             #[serde(default)]
             galleries: Vec<String>,
         }
-        #[derive(Deserialize)]
-        struct Prompts {
-            repo: String,
-            filename: String,
-            version_hash: String,
-        }
         let raw: Raw =
             toml::from_str(&text).map_err(|e| Error::Config(format!("{}: {e}", path.display())))?;
-        let prompts = raw.prompts.map(|p| PromptConfig {
-            repo: p.repo,
-            filename: p.filename,
-            version_hash: p.version_hash,
-        });
+        let prompts = raw
+            .prompts
+            .filter(|table| !table.is_empty())
+            .map(|table| {
+                let required = |key: &str| {
+                    table
+                        .get(key)
+                        .and_then(toml::Value::as_str)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_owned)
+                        .ok_or_else(|| {
+                            Error::Config(format!(
+                                "publicator.toml [prompts].{key}: missing or invalid string"
+                            ))
+                        })
+                };
+                Ok::<PromptConfig, Error>(PromptConfig {
+                    repo: required("repo")?,
+                    filename: required("filename")?,
+                    version_hash: required("version_hash")?,
+                })
+            })
+            .transpose()?;
         if let Some(ref p) = prompts {
             PromptGrammar::compile(p)?;
         }
@@ -109,7 +121,10 @@ impl Config {
 }
 impl PromptGrammar {
     pub fn compile(config: &PromptConfig) -> Result<Self> {
-        let pattern = Regex::new(&format!(r"\A(?:{})", config.filename))
+        let pattern = RegexBuilder::new()
+            .utf(true)
+            .ucp(true)
+            .build(&format!(r"\A(?:{})", config.filename))
             .map_err(|e| Error::Config(format!("publicator.toml [prompts].filename: {e}")))?;
         if !pattern
             .capture_names()
@@ -118,16 +133,18 @@ impl PromptGrammar {
         {
             return Err(Error::Config("publicator.toml [prompts].filename: missing required (?P<version>...) capture group".into()));
         }
-        let digest = match config.version_hash.as_str() {
-            "sha1" => MessageDigest::sha1(),
-            "sha256" => MessageDigest::sha256(),
-            _ => {
-                return Err(Error::Config(format!(
-                    "publicator.toml [prompts].version_hash: unknown digest {:?}",
-                    config.version_hash
-                )));
-            }
+        let digest_name = match config.version_hash.as_str() {
+            "blake2b" => "BLAKE2B-512".to_owned(),
+            "blake2s" => "BLAKE2S-256".to_owned(),
+            name if name.starts_with("sha3_") => name.replace('_', "-"),
+            name => name.to_owned(),
         };
+        let digest = MessageDigest::from_name(&digest_name).ok_or_else(|| {
+            Error::Config(format!(
+                "publicator.toml [prompts].version_hash: unsupported digest {:?}",
+                config.version_hash
+            ))
+        })?;
         Ok(Self { pattern, digest })
     }
     pub fn identity(&self, basename: &str) -> Result<Option<ImageIdentity>> {
@@ -145,7 +162,8 @@ impl PromptGrammar {
             version: String::from_utf8_lossy(v.as_bytes()).into_owned(),
             lineage: c
                 .name("lineage")
-                .map(|m| String::from_utf8_lossy(m.as_bytes()).into_owned()),
+                .map(|m| String::from_utf8_lossy(m.as_bytes()).into_owned())
+                .filter(|lineage| !lineage.is_empty()),
         }))
     }
     pub fn digest(&self, bytes: &[u8]) -> Result<String> {

@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use publicator::{
     config::{Config, Paths, validate_publications},
-    error::{Error, Result},
+    error::Result,
     model::Publications,
 };
 use std::{fs, path::PathBuf};
@@ -26,14 +26,11 @@ fn run() -> Result<()> {
         Command::Validate { data_dir, json } => {
             let paths = Paths::resolve(data_dir.as_deref(), json.as_deref())?;
             let config = Config::load(&paths.data_dir)?;
-            let bytes = fs::read(&paths.json).map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    Error::NotFound(paths.json.display().to_string())
-                } else {
-                    e.into()
-                }
-            })?;
-            let rows: Publications = serde_json::from_slice(&bytes)?;
+            let rows: Publications = match fs::read(&paths.json) {
+                Ok(bytes) => serde_json::from_slice(&bytes)?,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+                Err(e) => return Err(e.into()),
+            };
             validate_publications(&rows, &config)?;
             println!("Valid");
         }

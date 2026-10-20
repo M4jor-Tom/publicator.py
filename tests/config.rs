@@ -44,6 +44,86 @@ fn prompt_grammar_uses_configured_captures_and_digest() {
         sha1.digest(b"abc").unwrap(),
         "a9993e364706816aba3e25717850c26c9cd0d89d"
     );
+    for (name, want) in [
+        (
+            "sha512",
+            "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f",
+        ),
+        (
+            "sha3_256",
+            "3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532",
+        ),
+        (
+            "blake2b",
+            "ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d17d87c5392aab792dc252d5de4533cc9518d38aa8dbf1925ab92386edd4009923",
+        ),
+    ] {
+        let g = PromptGrammar::compile(&PromptConfig {
+            repo: "r".into(),
+            filename: r"(?P<version>.+)".into(),
+            version_hash: name.into(),
+        })
+        .unwrap();
+        assert_eq!(&g.digest(b"abc").unwrap(), want, "{name}");
+    }
+    let unknown = PromptGrammar::compile(&PromptConfig {
+        repo: "r".into(),
+        filename: r"(?P<version>.+)".into(),
+        version_hash: "not-a-real-digest".into(),
+    })
+    .err()
+    .unwrap();
+    assert!(unknown.to_string().contains("version_hash"));
+}
+
+#[test]
+fn prompt_grammar_uses_pcre_unicode_lookbehind_and_named_backreference() {
+    let g = PromptGrammar::compile(&PromptConfig {
+        repo: "r".into(),
+        filename: r"(?<=^)(?P<lineage>\p{Greek}*)-(?P<version>\p{Greek}+)-(?P=lineage)".into(),
+        version_hash: "sha256".into(),
+    })
+    .unwrap();
+    assert_eq!(g.identity("αβ-γ-αβ").unwrap().unwrap().version, "γ");
+    assert_eq!(g.identity("-γ-").unwrap().unwrap().lineage, None);
+    assert!(g.identity("xαβ-γ-αβ").unwrap().is_none());
+}
+
+#[test]
+fn empty_prompts_disable_prompt_grammar_and_incomplete_prompts_name_field() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("publicator.toml"), "[prompts]\n").unwrap();
+    assert!(Config::load(dir.path()).unwrap().prompts.is_none());
+    fs::write(
+        dir.path().join("publicator.toml"),
+        "[prompts]\nrepo = 'archive'\n",
+    )
+    .unwrap();
+    let err = Config::load(dir.path()).unwrap_err().to_string();
+    assert!(err.contains("prompts") && err.contains("filename"));
+}
+
+#[test]
+fn missing_publications_file_validates_as_empty_but_malformed_json_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let binary = env!("CARGO_BIN_EXE_publicator");
+    let missing = std::process::Command::new(binary)
+        .args(["validate", "--data-dir", dir.path().to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        missing.status.success(),
+        "{}",
+        String::from_utf8_lossy(&missing.stderr)
+    );
+    assert_eq!(String::from_utf8(missing.stdout).unwrap().trim(), "Valid");
+    fs::write(dir.path().join("publications.json"), "{bad").unwrap();
+    let malformed = std::process::Command::new(binary)
+        .args(["validate", "--data-dir", dir.path().to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!malformed.status.success());
+    assert!(String::from_utf8_lossy(&malformed.stderr).contains("JSON error"));
 }
 
 #[test]
