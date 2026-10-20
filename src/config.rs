@@ -180,6 +180,14 @@ pub fn validate_publications(rows: &Publications, config: &Config) -> Result<()>
     let schema: serde_json::Value =
         serde_json::from_str(include_str!("../assets/publicationsSchema.json"))?;
     let validator = jsonschema::validator_for(&schema).map_err(|e| Error::Config(e.to_string()))?;
+    validate_publications_with(rows, config, &validator)
+}
+
+pub(crate) fn validate_publications_with(
+    rows: &Publications,
+    config: &Config,
+    validator: &jsonschema::Validator,
+) -> Result<()> {
     if let Some(e) = validator
         .iter_errors(&serde_json::Value::Array(rows.clone()))
         .next()
