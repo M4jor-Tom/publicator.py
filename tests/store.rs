@@ -5,10 +5,7 @@ use publicator::{
     error::Error,
 };
 use serde_json::json;
-use std::{
-    io::Write,
-    sync::{Arc, Barrier},
-};
+use std::sync::{Arc, Barrier};
 
 #[test]
 fn round_trips_unknown_fields_and_missing_files_are_empty() {
@@ -128,16 +125,19 @@ fn external_json_path_uses_data_directory_allow_lists() {
 fn child_process_waits_for_parent_lock() {
     const CHILD: &str = "PUBLICATOR_LOCK_CHILD";
     if let Ok(path) = std::env::var(CHILD) {
-        let mut lock = std::fs::OpenOptions::new()
+        let path = std::path::PathBuf::from(path);
+        let ready = path.with_extension("ready");
+        let acquired = path.with_extension("acquired");
+        std::fs::write(ready, b"ready").unwrap();
+        let lock = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open(path)
             .unwrap();
         fs2::FileExt::lock_exclusive(&lock).unwrap();
-        lock.write_all(b"child acquired").unwrap();
+        std::fs::write(acquired, b"acquired").unwrap();
         return;
     }
-    // Helper completion is coordinated with a sentinel: child blocks while the parent holds the lock.
     let f = Fixture::new();
     let lock_path = f.store.paths().json.with_extension("json.lock");
     std::fs::File::create(&lock_path).unwrap();
@@ -156,11 +156,25 @@ fn child_process_waits_for_parent_lock() {
         .env(CHILD, &lock_path)
         .spawn()
         .unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(150));
+    let ready = lock_path.with_extension("ready");
+    let acquired = lock_path.with_extension("acquired");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !ready.exists() && std::time::Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert!(ready.exists(), "child must signal readiness before locking");
     assert!(
-        child.try_wait().unwrap().is_none(),
-        "child must block on persistent lock"
+        !acquired.exists(),
+        "child must block while parent holds the lock"
     );
     fs2::FileExt::unlock(&lock).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !acquired.exists() && std::time::Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert!(
+        acquired.exists(),
+        "child must acquire after parent releases lock"
+    );
     assert!(child.wait().unwrap().success());
 }

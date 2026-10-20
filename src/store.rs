@@ -70,6 +70,11 @@ impl Store {
     }
 
     fn mutate_unlocked<R>(&self, f: impl FnOnce(&mut Publications) -> Result<R>) -> Result<R> {
+        let original = match fs::read(&self.paths.json) {
+            Ok(bytes) => Some(bytes),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.into()),
+        };
         let mut rows = self.read_unlocked()?;
         let output = f(&mut rows)?;
         validate_publications_with(&rows, &self.config, &self.validator)?;
@@ -82,9 +87,28 @@ impl Store {
         serde_json::to_writer_pretty(temp.as_file_mut(), &rows)?;
         temp.as_file_mut().flush()?;
         temp.as_file_mut().sync_all()?;
+        let mut backup = if let Some(bytes) = &original {
+            let mut backup = NamedTempFile::new_in(parent)?;
+            backup.write_all(bytes)?;
+            backup.as_file_mut().sync_all()?;
+            Some(backup)
+        } else {
+            None
+        };
         temp.persist(&self.paths.json)
             .map_err(|e| Error::Io(e.error))?;
-        File::open(parent)?.sync_all()?;
+        if let Err(sync_error) = File::open(parent).and_then(|directory| directory.sync_all()) {
+            let rollback = match backup.take() {
+                Some(backup) => backup
+                    .persist(&self.paths.json)
+                    .map(|_| ())
+                    .map_err(|e| e.error),
+                None => fs::remove_file(&self.paths.json),
+            };
+            rollback?;
+            File::open(parent)?.sync_all()?;
+            return Err(sync_error.into());
+        }
         Ok(output)
     }
 
