@@ -155,7 +155,7 @@ fn published_hashes(rows: &[Value]) -> HashSet<String> {
 }
 
 pub fn thumb_name(path: &Path, sha: &str) -> Result<String> {
-    if sha.len() < 32 || !sha.as_bytes().iter().all(u8::is_ascii_hexdigit) {
+    if sha.len() != 128 || !sha.as_bytes().iter().all(u8::is_ascii_hexdigit) {
         return Err(Error::Validation(
             "thumbnail identity must be a SHA-512 hex digest".into(),
         ));

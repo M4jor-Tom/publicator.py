@@ -128,12 +128,32 @@ fn cache_reuses_content_identity_and_really_resizes() {
         .output()
         .unwrap();
     assert_eq!(String::from_utf8(out.stdout).unwrap(), "300x200");
+
+    let sentinel = f.image("sentinel.png", 7, 5);
+    fs::copy(&sentinel, &t).unwrap();
+    let cached_bytes = fs::read(&t).unwrap();
     fs::rename(&p, f.path("renamed.png")).unwrap();
-    assert!(
-        ensure_thumb(&f.path("renamed.png"), &f.path(".thumbs"), &name)
-            .unwrap()
-            .exists()
+    assert_eq!(
+        ensure_thumb(&f.path("renamed.png"), &f.path(".thumbs"), &name).unwrap(),
+        t
     );
+    assert_eq!(fs::read(&t).unwrap(), cached_bytes);
+}
+
+#[test]
+fn sha512_thumbnail_identity_rejects_short_and_malformed_digests() {
+    let f = Fixture::new();
+    let source = f.image("image.png", 10, 10);
+    let short = "a".repeat(32);
+    let malformed = "g".repeat(128);
+    assert!(thumb_name(&source, &short).is_err());
+    assert!(thumb_name(&source, &malformed).is_err());
+
+    let cache = f.path(".thumbs");
+    fs::create_dir_all(&cache).unwrap();
+    fs::copy(&source, cache.join(format!("{short}.png"))).unwrap();
+    assert!(prepare_ai_image(&source, &cache, Some(&short)).is_err());
+    assert!(prepare_ai_image(&source, &cache, Some(&malformed)).is_err());
 }
 
 #[test]
