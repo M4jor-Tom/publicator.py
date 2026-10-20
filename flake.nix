@@ -125,7 +125,7 @@
         login = login;
       };
       devShells.${system}.default = pkgs.mkShell {
-        packages = [ devPython pkgs.git pkgs.imagemagick pkgs.playwright-driver.browsers claude pkgs.ollama pkgs.llmfit ];
+        packages = [ devPython pkgs.git pkgs.imagemagick pkgs.playwright-driver.browsers claude pkgs.ollama pkgs.llmfit pkgs.rustc pkgs.cargo pkgs.rustfmt pkgs.clippy pkgs.pkg-config pkgs.openssl pkgs.pcre2 ];
         shellHook = ''
           export PLAYWRIGHT_BROWSERS_PATH=${pkgs.playwright-driver.browsers}
           export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=true
