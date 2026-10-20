@@ -112,6 +112,119 @@ fn merge_does_not_overwrite_a_manual_field() {
 }
 
 #[test]
+fn valid_generated_field_persists_beside_a_blank_manual_title_without_approving() {
+    let f = Fixture::new();
+    let mut publication = row(1, "SCHEDULED");
+    publication["title"] = json!("");
+    publication["description"] = json!(GENERATE_MARKER);
+    f.write(json!([publication]));
+    merge_generated_markers(
+        &f.store,
+        &id(1),
+        &Metadata {
+            title: "AI title".into(),
+            description: "AI description".into(),
+        },
+    )
+    .unwrap();
+    let saved = f.store.read().unwrap();
+    assert_eq!(saved[0]["title"], "");
+    assert_eq!(saved[0]["description"], "AI description");
+    assert_eq!(saved[0]["state"], "SCHEDULED");
+}
+
+#[test]
+fn valid_generated_field_persists_beside_a_blank_manual_description_without_approving() {
+    let f = Fixture::new();
+    let mut publication = row(1, "SCHEDULED");
+    publication["title"] = json!(GENERATE_MARKER);
+    publication["description"] = json!("");
+    f.write(json!([publication]));
+    merge_generated_markers(
+        &f.store,
+        &id(1),
+        &Metadata {
+            title: "AI title".into(),
+            description: "AI description".into(),
+        },
+    )
+    .unwrap();
+    let saved = f.store.read().unwrap();
+    assert_eq!(saved[0]["title"], "AI title");
+    assert_eq!(saved[0]["description"], "");
+    assert_eq!(saved[0]["state"], "SCHEDULED");
+}
+
+#[test]
+fn valid_generated_field_preserves_nonexact_marker_manual_counterpart() {
+    let f = Fixture::new();
+    let mut publication = row(1, "SCHEDULED");
+    publication["title"] = json!("manual [[PUBLICATOR:TODO_GENERATE]] text");
+    publication["description"] = json!(GENERATE_MARKER);
+    f.write(json!([publication]));
+    merge_generated_markers(
+        &f.store,
+        &id(1),
+        &Metadata {
+            title: "AI title".into(),
+            description: "AI description".into(),
+        },
+    )
+    .unwrap();
+    let saved = f.store.read().unwrap();
+    assert_eq!(
+        saved[0]["title"],
+        "manual [[PUBLICATOR:TODO_GENERATE]] text"
+    );
+    assert_eq!(saved[0]["description"], "AI description");
+    assert_eq!(saved[0]["state"], "SCHEDULED");
+}
+
+#[test]
+fn stale_generated_result_with_no_markers_never_approves_manual_draft() {
+    let f = Fixture::new();
+    let mut publication = row(1, "SCHEDULED");
+    publication["title"] = json!("Manual title");
+    publication["description"] = json!("Manual description");
+    f.write(json!([publication]));
+    merge_generated_markers(
+        &f.store,
+        &id(1),
+        &Metadata {
+            title: "Stale AI title".into(),
+            description: "Stale AI description".into(),
+        },
+    )
+    .unwrap();
+    let saved = f.store.read().unwrap();
+    assert_eq!(saved[0]["title"], "Manual title");
+    assert_eq!(saved[0]["description"], "Manual description");
+    assert_eq!(saved[0]["state"], "SCHEDULED");
+}
+
+#[test]
+fn merging_both_markers_with_valid_pair_advances_to_described() {
+    let f = Fixture::new();
+    let mut publication = row(1, "SCHEDULED");
+    publication["title"] = json!(GENERATE_MARKER);
+    publication["description"] = json!(GENERATE_MARKER);
+    f.write(json!([publication]));
+    merge_generated_markers(
+        &f.store,
+        &id(1),
+        &Metadata {
+            title: "AI title".into(),
+            description: "AI description".into(),
+        },
+    )
+    .unwrap();
+    let saved = f.store.read().unwrap();
+    assert_eq!(saved[0]["title"], "AI title");
+    assert_eq!(saved[0]["description"], "AI description");
+    assert_eq!(saved[0]["state"], "DESCRIBED");
+}
+
+#[test]
 fn provider_result_merges_only_fields_still_marked_after_concurrent_edit() {
     let f = Arc::new(Fixture::new());
     let mut publication = row(1, "SCHEDULED");
@@ -152,6 +265,92 @@ fn provider_result_merges_only_fields_still_marked_after_concurrent_edit() {
     assert_eq!(saved[0]["title"], "New manual title");
     assert_eq!(saved[0]["description"], "AI description");
     assert_eq!(saved[0]["state"], "DESCRIBED");
+}
+
+#[test]
+fn blocked_provider_persists_remaining_marked_field_after_blank_manual_edit() {
+    let f = Arc::new(Fixture::new());
+    let mut publication = row(1, "SCHEDULED");
+    publication["title"] = json!(GENERATE_MARKER);
+    publication["description"] = json!(GENERATE_MARKER);
+    f.write(json!([publication]));
+    let started = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let worker = {
+        let (f, started, release) = (Arc::clone(&f), Arc::clone(&started), Arc::clone(&release));
+        std::thread::spawn(move || {
+            started.wait();
+            release.wait();
+            merge_generated_markers(
+                &f.store,
+                &id(1),
+                &Metadata {
+                    title: "AI title".into(),
+                    description: "AI description".into(),
+                },
+            )
+            .unwrap();
+        })
+    };
+    started.wait();
+    save_metadata(
+        &f.store,
+        &id(1),
+        &MetadataPatch {
+            title: Some("".into()),
+            description: None,
+        },
+    )
+    .unwrap();
+    release.wait();
+    worker.join().unwrap();
+    let saved = f.store.read().unwrap();
+    assert_eq!(saved[0]["title"], "");
+    assert_eq!(saved[0]["description"], "AI description");
+    assert_eq!(saved[0]["state"], "SCHEDULED");
+}
+
+#[test]
+fn blocked_stale_provider_result_does_not_approve_manual_edits() {
+    let f = Arc::new(Fixture::new());
+    let mut publication = row(1, "SCHEDULED");
+    publication["title"] = json!(GENERATE_MARKER);
+    publication["description"] = json!(GENERATE_MARKER);
+    f.write(json!([publication]));
+    let started = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let worker = {
+        let (f, started, release) = (Arc::clone(&f), Arc::clone(&started), Arc::clone(&release));
+        std::thread::spawn(move || {
+            started.wait();
+            release.wait();
+            merge_generated_markers(
+                &f.store,
+                &id(1),
+                &Metadata {
+                    title: "Stale AI title".into(),
+                    description: "Stale AI description".into(),
+                },
+            )
+            .unwrap();
+        })
+    };
+    started.wait();
+    save_metadata(
+        &f.store,
+        &id(1),
+        &MetadataPatch {
+            title: Some("New manual title".into()),
+            description: Some("New manual description".into()),
+        },
+    )
+    .unwrap();
+    release.wait();
+    worker.join().unwrap();
+    let saved = f.store.read().unwrap();
+    assert_eq!(saved[0]["title"], "New manual title");
+    assert_eq!(saved[0]["description"], "New manual description");
+    assert_eq!(saved[0]["state"], "SCHEDULED");
 }
 
 #[test]

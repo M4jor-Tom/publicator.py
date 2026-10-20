@@ -146,21 +146,28 @@ pub fn fail_generation(store: &Store, uuid: &str) -> Result<()> {
 }
 
 pub fn merge_generated_markers(store: &Store, uuid: &str, pair: &Metadata) -> Result<()> {
+    validate_metadata(&pair.title, &pair.description)?;
     store.mutate(|rows| {
         let row = find_mut(rows, uuid)?;
         require_scheduled_metadata(row)?;
+        let mut applied = false;
         for (key, value) in [("title", &pair.title), ("description", &pair.description)] {
             if row.get(key).and_then(Value::as_str) == Some(GENERATE_MARKER) {
                 row[key] = json!(value);
+                applied = true;
             }
         }
-        validate_metadata(
-            row.get("title").and_then(Value::as_str).unwrap_or_default(),
-            row.get("description")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-        )?;
-        row["state"] = json!("DESCRIBED");
+        if applied
+            && validate_metadata(
+                row.get("title").and_then(Value::as_str).unwrap_or_default(),
+                row.get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            )
+            .is_ok()
+        {
+            row["state"] = json!("DESCRIBED");
+        }
         Ok(())
     })
 }
