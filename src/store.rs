@@ -44,18 +44,14 @@ impl Store {
         let _process = MUTATION_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         let lock = self.lock_file()?;
         lock.lock_shared()?;
-        let result = self.read_unlocked();
-        FileExt::unlock(&lock)?;
-        result
+        self.read_unlocked()
     }
 
     pub fn mutate<R>(&self, f: impl FnOnce(&mut Publications) -> Result<R>) -> Result<R> {
         let _process = MUTATION_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         let lock = self.lock_file()?;
         lock.lock_exclusive()?;
-        let result = self.mutate_unlocked(f);
-        FileExt::unlock(&lock)?;
-        result
+        self.mutate_unlocked(f)
     }
 
     fn read_unlocked(&self) -> Result<Publications> {
@@ -70,11 +66,6 @@ impl Store {
     }
 
     fn mutate_unlocked<R>(&self, f: impl FnOnce(&mut Publications) -> Result<R>) -> Result<R> {
-        let original = match fs::read(&self.paths.json) {
-            Ok(bytes) => Some(bytes),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(e.into()),
-        };
         let mut rows = self.read_unlocked()?;
         let output = f(&mut rows)?;
         validate_publications_with(&rows, &self.config, &self.validator)?;
@@ -87,28 +78,9 @@ impl Store {
         serde_json::to_writer_pretty(temp.as_file_mut(), &rows)?;
         temp.as_file_mut().flush()?;
         temp.as_file_mut().sync_all()?;
-        let mut backup = if let Some(bytes) = &original {
-            let mut backup = NamedTempFile::new_in(parent)?;
-            backup.write_all(bytes)?;
-            backup.as_file_mut().sync_all()?;
-            Some(backup)
-        } else {
-            None
-        };
-        temp.persist(&self.paths.json)
-            .map_err(|e| Error::Io(e.error))?;
-        if let Err(sync_error) = File::open(parent).and_then(|directory| directory.sync_all()) {
-            let rollback = match backup.take() {
-                Some(backup) => backup
-                    .persist(&self.paths.json)
-                    .map(|_| ())
-                    .map_err(|e| e.error),
-                None => fs::remove_file(&self.paths.json),
-            };
-            rollback?;
-            File::open(parent)?.sync_all()?;
-            return Err(sync_error.into());
-        }
+        commit(temp, &self.paths.json, parent, |parent| {
+            File::open(parent)?.sync_all()
+        })?;
         Ok(output)
     }
 
@@ -123,5 +95,57 @@ impl Store {
             .read(true)
             .write(true)
             .open(path)?)
+    }
+}
+
+fn commit(
+    temp: NamedTempFile,
+    target: &std::path::Path,
+    parent: &std::path::Path,
+    sync_parent: impl FnOnce(&std::path::Path) -> std::io::Result<()>,
+) -> Result<()> {
+    temp.persist(target).map_err(|e| Error::Io(e.error))?;
+    sync_parent(parent).map_err(|source| Error::DurabilityUncertain {
+        path: target.to_owned(),
+        source,
+    })
+}
+
+#[cfg(test)]
+mod commit_tests {
+    use super::*;
+
+    #[test]
+    fn directory_sync_failure_reports_uncertain_commit_and_keeps_new_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("publications.json");
+        let mut temp = NamedTempFile::new_in(dir.path()).unwrap();
+        temp.write_all(b"new committed bytes").unwrap();
+        let result = commit(temp, &target, dir.path(), |_| {
+            Err(std::io::Error::other("injected directory sync failure"))
+        });
+        match result {
+            Err(Error::DurabilityUncertain { path, source }) => {
+                assert_eq!(path, target);
+                assert_eq!(source.to_string(), "injected directory sync failure");
+            }
+            other => panic!("expected durability-uncertain result, got {other:?}"),
+        }
+        assert_eq!(fs::read(target).unwrap(), b"new committed bytes");
+    }
+
+    #[test]
+    fn rename_failure_preserves_original_bytes() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("publications.json");
+        fs::write(&target, b"original bytes").unwrap();
+        let mut temp = NamedTempFile::new_in(dir.path()).unwrap();
+        temp.write_all(b"replacement bytes").unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
+        let result = commit(temp, &target, dir.path(), |_| Ok(()));
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(matches!(result, Err(Error::Io(_))));
+        assert_eq!(fs::read(target).unwrap(), b"original bytes");
     }
 }

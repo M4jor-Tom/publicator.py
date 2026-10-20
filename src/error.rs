@@ -22,6 +22,14 @@ pub enum Error {
     Provider(String),
     #[error("protocol error: {0}")]
     Protocol(String),
+    #[error(
+        "publication database commit at {path} may be visible but is not confirmed durable; refresh before retrying: {source}"
+    )]
+    DurabilityUncertain {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("reconciliation required: {0}")]
     ReconciliationRequired(String),
 }

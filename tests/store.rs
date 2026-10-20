@@ -41,17 +41,24 @@ fn invalid_edit_does_not_replace_original() {
 }
 
 #[test]
-fn failed_replacement_preserves_original_bytes() {
+fn failed_staging_preserves_original_after_mutation_callback() {
     use std::os::unix::fs::PermissionsExt;
     let f = Fixture::new();
     f.write(json!([row(1, "PICKED")]));
+    f.store.read().unwrap(); // Create the persistent lock before making the directory unwritable.
     let before = std::fs::read(&f.store.paths().json).unwrap();
+    let called = std::cell::Cell::new(false);
     std::fs::set_permissions(f.root.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
     let result = f.store.mutate(|rows| {
+        called.set(true);
         rows.push(row(2, "PICKED"));
         Ok(())
     });
     std::fs::set_permissions(f.root.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        called.get(),
+        "mutation callback must run before staging failure"
+    );
     assert!(result.is_err());
     assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), before);
 }
@@ -122,23 +129,26 @@ fn external_json_path_uses_data_directory_allow_lists() {
 }
 
 #[test]
-fn child_process_waits_for_parent_lock() {
-    const CHILD: &str = "PUBLICATOR_LOCK_CHILD";
+fn child_store_mutation_waits_for_parent_lock() {
+    const CHILD: &str = "PUBLICATOR_STORE_LOCK_CHILD";
     if let Ok(path) = std::env::var(CHILD) {
-        let path = std::path::PathBuf::from(path);
-        let ready = path.with_extension("ready");
-        let acquired = path.with_extension("acquired");
+        let json_path = std::path::PathBuf::from(path);
+        let ready = json_path.with_extension("ready");
+        let completed = json_path.with_extension("completed");
+        let paths = Paths::resolve(json_path.parent(), Some(&json_path)).unwrap();
+        let store = publicator::store::Store::new(paths, Config::default()).unwrap();
         std::fs::write(ready, b"ready").unwrap();
-        let lock = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)
+        store
+            .mutate(|rows| {
+                rows.push(row(2, "PICKED"));
+                Ok(())
+            })
             .unwrap();
-        fs2::FileExt::lock_exclusive(&lock).unwrap();
-        std::fs::write(acquired, b"acquired").unwrap();
+        std::fs::write(completed, b"completed").unwrap();
         return;
     }
     let f = Fixture::new();
+    f.write(json!([row(1, "PICKED")]));
     let lock_path = f.store.paths().json.with_extension("json.lock");
     std::fs::File::create(&lock_path).unwrap();
     let lock = std::fs::OpenOptions::new()
@@ -150,31 +160,39 @@ fn child_process_waits_for_parent_lock() {
     let mut child = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
-            "child_process_waits_for_parent_lock",
+            "child_store_mutation_waits_for_parent_lock",
             "--nocapture",
         ])
-        .env(CHILD, &lock_path)
+        .env(CHILD, &f.store.paths().json)
         .spawn()
         .unwrap();
-    let ready = lock_path.with_extension("ready");
-    let acquired = lock_path.with_extension("acquired");
+    let ready = f.store.paths().json.with_extension("ready");
+    let completed = f.store.paths().json.with_extension("completed");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while !ready.exists() && std::time::Instant::now() < deadline {
         std::thread::yield_now();
     }
-    assert!(ready.exists(), "child must signal readiness before locking");
     assert!(
-        !acquired.exists(),
-        "child must block while parent holds the lock"
+        ready.exists(),
+        "child must signal readiness before Store mutation"
     );
-    fs2::FileExt::unlock(&lock).unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while !acquired.exists() && std::time::Instant::now() < deadline {
+    let held_deadline = std::time::Instant::now() + std::time::Duration::from_millis(150);
+    while !completed.exists() && std::time::Instant::now() < held_deadline {
         std::thread::yield_now();
     }
     assert!(
-        acquired.exists(),
-        "child must acquire after parent releases lock"
+        !completed.exists(),
+        "Store mutation must not complete while parent holds the lock"
+    );
+    fs2::FileExt::unlock(&lock).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !completed.exists() && std::time::Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert!(
+        completed.exists(),
+        "Store mutation must complete after release"
     );
     assert!(child.wait().unwrap().success());
+    assert_eq!(f.store.read().unwrap().len(), 2);
 }
