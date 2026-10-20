@@ -2,7 +2,7 @@ use crate::{
     config::Config,
     error::{Error, Result},
     images::{Candidate, file_sha512},
-    model::{Phase, has_delivery_success, phase},
+    model::{GENERATE_MARKER, Phase, has_delivery_success, phase, validate_metadata},
     scheduling::{profiles, repack, resolve_wall_clock},
     store::Store,
 };
@@ -15,6 +15,18 @@ pub enum DateEdit {
     Custom(String),
     Epoch(i64),
     Suggested,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Metadata {
+    pub title: String,
+    pub description: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MetadataPatch {
+    pub title: Option<String>,
+    pub description: Option<String>,
 }
 
 fn find_mut<'a>(rows: &'a mut [Value], uuid: &str) -> Result<&'a mut Value> {
@@ -63,6 +75,106 @@ pub fn pick(store: &Store, candidate: &Candidate, now: i64) -> Result<String> {
         }));
         repack(rows, store.config(), now)?;
         Ok(uuid)
+    })
+}
+
+fn require_scheduled_metadata(row: &Value) -> Result<()> {
+    if has_delivery_success(row) || phase(row)? != Phase::Scheduled {
+        return Err(Error::InvalidState(
+            "metadata operations require undelivered SCHEDULED publication".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn save_metadata(store: &Store, uuid: &str, patch: &MetadataPatch) -> Result<()> {
+    store.mutate(|rows| {
+        let row = find_mut(rows, uuid)?;
+        require_scheduled_metadata(row)?;
+        if patch
+            .title
+            .as_ref()
+            .is_some_and(|title| title.chars().count() > 50)
+        {
+            return Err(Error::Validation("title exceeds 50 characters".into()));
+        }
+        if let Some(title) = &patch.title {
+            row["title"] = json!(title);
+        }
+        if let Some(description) = &patch.description {
+            row["description"] = json!(description);
+        }
+        Ok(())
+    })
+}
+
+pub fn approve_metadata(store: &Store, uuid: &str) -> Result<()> {
+    store.mutate(|rows| {
+        let row = find_mut(rows, uuid)?;
+        require_scheduled_metadata(row)?;
+        validate_metadata(
+            row.get("title").and_then(Value::as_str).unwrap_or_default(),
+            row.get("description")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        )?;
+        row["state"] = json!("DESCRIBED");
+        Ok(())
+    })
+}
+
+pub fn save_generated_pair(store: &Store, uuid: &str, pair: &Metadata) -> Result<()> {
+    store.mutate(|rows| {
+        let row = find_mut(rows, uuid)?;
+        require_scheduled_metadata(row)?;
+        validate_metadata(&pair.title, &pair.description)?;
+        row["title"] = json!(pair.title);
+        row["description"] = json!(pair.description);
+        row["state"] = json!("DESCRIBED");
+        Ok(())
+    })
+}
+
+pub fn fail_generation(store: &Store, uuid: &str) -> Result<()> {
+    store.mutate(|rows| {
+        let row = find_mut(rows, uuid)?;
+        require_scheduled_metadata(row)?;
+        row["title"] = json!(GENERATE_MARKER);
+        row["description"] = json!(GENERATE_MARKER);
+        Ok(())
+    })
+}
+
+pub fn merge_generated_markers(store: &Store, uuid: &str, pair: &Metadata) -> Result<()> {
+    store.mutate(|rows| {
+        let row = find_mut(rows, uuid)?;
+        require_scheduled_metadata(row)?;
+        for (key, value) in [("title", &pair.title), ("description", &pair.description)] {
+            if row.get(key).and_then(Value::as_str) == Some(GENERATE_MARKER) {
+                row[key] = json!(value);
+            }
+        }
+        validate_metadata(
+            row.get("title").and_then(Value::as_str).unwrap_or_default(),
+            row.get("description")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        )?;
+        row["state"] = json!("DESCRIBED");
+        Ok(())
+    })
+}
+
+pub fn return_to_metadata(store: &Store, uuid: &str) -> Result<()> {
+    store.mutate(|rows| {
+        let row = find_mut(rows, uuid)?;
+        if has_delivery_success(row) || phase(row)? != Phase::Described {
+            return Err(Error::InvalidState(
+                "return to metadata requires undelivered DESCRIBED publication".into(),
+            ));
+        }
+        row["state"] = json!("SCHEDULED");
+        Ok(())
     })
 }
 
