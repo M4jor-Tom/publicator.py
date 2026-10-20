@@ -44,6 +44,17 @@ pub fn has_delivery_success(row: &serde_json::Value) -> bool {
             a.get("state").and_then(serde_json::Value::as_str) == Some("published_or_scheduled")
         })
 }
+pub fn deliveries_complete(row: &serde_json::Value) -> bool {
+    row.get("apparitions")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|apps| {
+            !apps.is_empty()
+                && apps.iter().all(|a| {
+                    a.get("state").and_then(serde_json::Value::as_str)
+                        == Some("published_or_scheduled")
+                })
+        })
+}
 pub fn validate_metadata(title: &str, description: &str) -> Result<()> {
     if [title, description]
         .iter()

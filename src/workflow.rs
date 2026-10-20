@@ -2,12 +2,23 @@ use crate::{
     config::Config,
     error::{Error, Result},
     images::{Candidate, file_sha512},
-    model::{GENERATE_MARKER, Phase, has_delivery_success, phase, validate_metadata},
+    model::{
+        GENERATE_MARKER, Phase, deliveries_complete, has_delivery_success, phase, validate_metadata,
+    },
     scheduling::{profiles, repack, resolve_wall_clock},
     store::Store,
 };
 use chrono_tz::Tz;
 use serde_json::{Value, json};
+
+pub const REGISTERED_PLATFORMS: &[&str] = &["deviantart"];
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PlatformOptions {
+    pub price: Option<Option<f64>>,
+    pub tiers: Option<Vec<String>>,
+    pub galleries: Option<Vec<String>>,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DateEdit {
@@ -248,6 +259,199 @@ pub fn approve_date(store: &Store, uuid: &str, now: i64) -> Result<()> {
         }
         row["state"] = json!("SCHEDULED");
         repack(rows, store.config(), now)
+    })
+}
+
+pub fn select(
+    store: &Store,
+    uuid: Option<&str>,
+    platform: Option<&str>,
+    selected: bool,
+) -> Result<()> {
+    if let Some(platform) = platform
+        && !REGISTERED_PLATFORMS.contains(&platform)
+    {
+        return Err(Error::Validation(format!(
+            "unregistered platform: {platform}"
+        )));
+    }
+    if uuid.is_some() != platform.is_some() {
+        return Err(Error::Validation(
+            "uuid and platform must be provided together".into(),
+        ));
+    }
+    store.mutate(|rows| {
+        let selected_rows: Vec<&mut Value> = if let Some(uuid) = uuid {
+            vec![find_mut(rows, uuid)?]
+        } else {
+            rows.iter_mut().collect()
+        };
+        for pub_ in selected_rows {
+            let is_target = matches!(phase(pub_)?, Phase::Described | Phase::Appeared);
+            if !is_target {
+                if uuid.is_some() {
+                    return Err(Error::InvalidState(
+                        "platform selection requires DESCRIBED or APPEARED publication".into(),
+                    ));
+                }
+                continue;
+            }
+            let names: Vec<&str> = platform
+                .map(|name| vec![name])
+                .unwrap_or_else(|| REGISTERED_PLATFORMS.to_vec());
+            for name in names {
+                let title = pub_
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let description = pub_
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let profile_name = pub_
+                    .get("scheduleProfile")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                let apps = pub_
+                    .get_mut("apparitions")
+                    .and_then(Value::as_array_mut)
+                    .ok_or_else(|| Error::Validation("apparitions must be an array".into()))?;
+                let existing = apps
+                    .iter()
+                    .position(|app| app.get("platformName").and_then(Value::as_str) == Some(name));
+                match (selected, existing) {
+                    (_, Some(index))
+                        if apps[index].get("state").and_then(Value::as_str)
+                            == Some("published_or_scheduled") =>
+                    {
+                        if uuid.is_some() && !selected {
+                            return Err(Error::InvalidState(
+                                "successful selection is locked".into(),
+                            ));
+                        }
+                    }
+                    (true, Some(_)) => {}
+                    (true, None) => {
+                        validate_metadata(&title, &description)?;
+                        let mut app = json!({"platformName": name, "state": "unpublished"});
+                        if name == "deviantart" {
+                            if let Some(profile) =
+                                profiles(store.config())?.into_iter().find(|profile| {
+                                    Some(profile.name.as_str()) == profile_name.as_deref()
+                                })
+                            {
+                                if !profile.default_tiers.is_empty() {
+                                    app["tiers"] = json!(profile.default_tiers);
+                                }
+                                if let Some(price) = profile.default_price {
+                                    app["priceIfNotFree"] = json!(price);
+                                }
+                            }
+                        }
+                        apps.push(app);
+                        pub_["state"] = json!("DESCRIBED");
+                    }
+                    (false, Some(index)) => {
+                        apps.remove(index);
+                    }
+                    (false, None) => {}
+                }
+            }
+            if pub_
+                .get("apparitions")
+                .and_then(Value::as_array)
+                .is_some_and(|apps| !apps.is_empty())
+            {
+                pub_["state"] = if deliveries_complete(pub_) {
+                    json!("APPEARED")
+                } else {
+                    json!("DESCRIBED")
+                };
+            }
+        }
+        Ok(())
+    })
+}
+
+pub fn save_options(store: &Store, uuid: &str, options: PlatformOptions) -> Result<()> {
+    if options
+        .price
+        .flatten()
+        .is_some_and(|price| !price.is_finite() || price < 0.0)
+    {
+        return Err(Error::Validation(
+            "price must be a finite nonnegative number".into(),
+        ));
+    }
+    store.mutate(|rows| {
+        let pub_ = find_mut(rows, uuid)?;
+        if phase(pub_)? != Phase::Described {
+            return Err(Error::InvalidState("options require DESCRIBED".into()));
+        }
+        let apps = pub_
+            .get_mut("apparitions")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| Error::Validation("apparitions must be an array".into()))?;
+        let app = apps
+            .iter_mut()
+            .find(|app| app.get("platformName").and_then(Value::as_str) == Some("deviantart"))
+            .ok_or_else(|| Error::InvalidState("undelivered selection required".into()))?;
+        if app.get("state").and_then(Value::as_str) != Some("unpublished") {
+            return Err(Error::InvalidState("undelivered selection required".into()));
+        }
+        if let Some(price) = options.price {
+            if let Some(price) = price {
+                app["priceIfNotFree"] = json!(price);
+            } else if let Some(object) = app.as_object_mut() {
+                object.remove("priceIfNotFree");
+            }
+        }
+        if let Some(tiers) = options.tiers {
+            app["tiers"] = json!(tiers);
+        }
+        if let Some(galleries) = options.galleries {
+            app["galleries"] = json!(galleries);
+        }
+        Ok(())
+    })
+}
+
+pub fn record_delivery(
+    store: &Store,
+    uuid: &str,
+    platform: &str,
+    actual_url: Option<&str>,
+) -> Result<()> {
+    if !REGISTERED_PLATFORMS.contains(&platform) {
+        return Err(Error::Validation(format!(
+            "unregistered platform: {platform}"
+        )));
+    }
+    store.mutate(|rows| {
+        let pub_ = find_mut(rows, uuid)?;
+        let apps = pub_
+            .get_mut("apparitions")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| Error::Validation("apparitions must be an array".into()))?;
+        let app = apps
+            .iter_mut()
+            .find(|app| app.get("platformName").and_then(Value::as_str) == Some(platform))
+            .ok_or_else(|| Error::NotFound(format!("{uuid}:{platform}")))?;
+        if app.get("state").and_then(Value::as_str) != Some("unpublished") {
+            return Err(Error::InvalidState("delivery target is not pending".into()));
+        }
+        app["state"] = json!("published_or_scheduled");
+        if let Some(url) = actual_url {
+            app["url"] = json!(url);
+        }
+        pub_["state"] = if deliveries_complete(pub_) {
+            json!("APPEARED")
+        } else {
+            json!("DESCRIBED")
+        };
+        Ok(())
     })
 }
 
