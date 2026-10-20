@@ -4,6 +4,7 @@ pub mod error;
 pub mod images;
 pub mod migration;
 pub mod model;
+pub mod prompts;
 pub mod scheduling;
 pub mod store;
 pub mod workflow;
