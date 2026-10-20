@@ -1,6 +1,9 @@
-use publicator::metadata::{
-    GenerationRequest, Metadata, ModelOption, Source, VISION_MODELS, available_sources,
-    metadata_prompt, parse_metadata, title_description_schema,
+use publicator::{
+    images::PreparedImage,
+    metadata::{
+        GenerationRequest, Metadata, ModelOption, Source, VISION_MODELS, available_sources,
+        image_data_url, metadata_prompt, parse_metadata, title_description_schema,
+    },
 };
 use serde_json::json;
 use std::time::Duration;
@@ -54,6 +57,22 @@ fn metadata_contract_has_two_sources_and_explicit_model_mappings() {
         timeout: Duration::from_secs(1),
         install_missing: false,
     };
+}
+
+#[test]
+fn image_data_url_encodes_bytes_with_the_prepared_image_mime() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("image.jpg");
+    std::fs::write(&path, [0xfb, 0xff]).unwrap();
+    let image = PreparedImage {
+        path,
+        mime: "image/jpeg".into(),
+    };
+
+    assert_eq!(
+        image_data_url(&image).unwrap(),
+        "data:image/jpeg;base64,+/8="
+    );
 }
 
 #[tokio::test]

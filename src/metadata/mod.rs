@@ -1,5 +1,6 @@
 use crate::{
     error::{Error, Result},
+    images::PreparedImage,
     model::validate_metadata,
 };
 use serde::{Deserialize, Serialize};
@@ -84,6 +85,24 @@ impl MetadataClient {
             _llmfit_program: llmfit_program,
         }
     }
+}
+
+pub fn image_data_url(image: &PreparedImage) -> Result<String> {
+    if !matches!(
+        image.mime.as_str(),
+        "image/jpeg" | "image/png" | "image/gif" | "image/webp" | "image/bmp" | "image/tiff"
+    ) {
+        return Err(Error::InvalidState(format!(
+            "unsupported AI image MIME type: {}",
+            image.mime
+        )));
+    }
+    let bytes = std::fs::read(&image.path)?;
+    Ok(format!(
+        "data:{};base64,{}",
+        image.mime,
+        openssl::base64::encode_block(&bytes)
+    ))
 }
 
 pub fn parse_metadata(content: &str) -> Result<Metadata> {
