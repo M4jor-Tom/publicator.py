@@ -2,6 +2,7 @@ pub mod calendar;
 pub mod config;
 pub mod error;
 pub mod images;
+pub mod metadata;
 pub mod migration;
 pub mod model;
 pub mod prompts;

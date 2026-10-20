@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+pub mod http;
 
 use publicator::{
     config::{Config, Paths},
