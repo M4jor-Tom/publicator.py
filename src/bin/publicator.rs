@@ -108,11 +108,11 @@ fn paths(data_dir: Option<PathBuf>, json: Option<PathBuf>) -> Result<(Paths, Con
     Ok((paths, config, store))
 }
 fn metadata_client() -> MetadataClient {
-    MetadataClient::new(
-        reqwest::Client::new(),
-        Endpoints::default(),
-        PathBuf::from("llmfit"),
-    )
+    let mut endpoints = Endpoints::default();
+    if let Some(ollama) = std::env::var_os("PUBLICATOR_OLLAMA_URL") {
+        endpoints.ollama = ollama.to_string_lossy().into_owned();
+    }
+    MetadataClient::new(reqwest::Client::new(), endpoints, PathBuf::from("llmfit"))
 }
 fn choose_model(source: Source, requested: Option<&str>) -> Result<ModelOption> {
     let candidates = VISION_MODELS.iter().filter(|m| match source {
