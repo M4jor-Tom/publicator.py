@@ -128,6 +128,51 @@ fn external_json_path_uses_data_directory_allow_lists() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn json_symlink_aliases_share_the_target_and_persistent_lock() {
+    use std::os::unix::fs::symlink;
+    let f = Fixture::new();
+    let target = f.path("target.json");
+    std::fs::write(
+        &target,
+        serde_json::to_vec(&json!([row(1, "PICKED")])).unwrap(),
+    )
+    .unwrap();
+    let alias = f.path("alias.json");
+    symlink(&target, &alias).unwrap();
+    let target_store = publicator::store::Store::new(
+        Paths::resolve(Some(f.root.path()), Some(&target)).unwrap(),
+        Config::default(),
+    )
+    .unwrap();
+    let alias_store = publicator::store::Store::new(
+        Paths::resolve(Some(f.root.path()), Some(&alias)).unwrap(),
+        Config::default(),
+    )
+    .unwrap();
+    assert_eq!(target_store.paths().json, alias_store.paths().json);
+    alias_store
+        .mutate(|rows| {
+            rows[0]["future"] = json!(true);
+            Ok(())
+        })
+        .unwrap();
+    assert!(alias.is_symlink());
+    assert_eq!(target_store.read().unwrap()[0]["future"], true);
+    assert!(target.with_extension("json.lock").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn dangling_json_symlink_is_rejected_instead_of_becoming_an_empty_database() {
+    use std::os::unix::fs::symlink;
+    let f = Fixture::new();
+    let alias = f.path("dangling.json");
+    symlink(f.path("missing-target.json"), &alias).unwrap();
+    assert!(Paths::resolve(Some(f.root.path()), Some(&alias)).is_err());
+}
+
 #[test]
 fn child_store_mutation_waits_for_parent_lock() {
     const CHILD: &str = "PUBLICATOR_STORE_LOCK_CHILD";

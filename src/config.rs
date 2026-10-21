@@ -27,6 +27,24 @@ impl Paths {
         } else {
             data_dir.join(json)
         };
+        let json = match std::fs::canonicalize(&json) {
+            Ok(target) => target,
+            Err(error) => {
+                if std::fs::symlink_metadata(&json).is_ok() {
+                    return Err(error.into());
+                }
+                let parent = json.parent().unwrap_or_else(|| Path::new("."));
+                match std::fs::canonicalize(parent) {
+                    Ok(parent) => parent.join(json.file_name().ok_or_else(|| {
+                        Error::Config("publication database path has no filename".into())
+                    })?),
+                    Err(parent_error) if parent_error.kind() == std::io::ErrorKind::NotFound => {
+                        json
+                    }
+                    Err(parent_error) => return Err(parent_error.into()),
+                }
+            }
+        };
         Ok(Self { data_dir, json })
     }
 }

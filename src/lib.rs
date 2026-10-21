@@ -7,6 +7,7 @@ pub mod metadata;
 pub mod migration;
 pub mod model;
 pub mod prompts;
+pub mod publish_journal;
 pub mod publish_protocol;
 pub mod scheduling;
 pub mod store;
