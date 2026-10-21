@@ -657,6 +657,86 @@ done"#, pid_file.display())).unwrap();
     }
 
     #[tokio::test]
+    async fn terminal_read_timeout_keeps_attempt_unknown_and_blocks_retry() {
+        let root = tempfile::tempdir().unwrap();
+        let image = root.path().join("art.png");
+        assert!(
+            std::process::Command::new("magick")
+                .args(["-size", "4x3", "xc:white"])
+                .arg(&image)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let sha = crate::images::file_sha512(&image).unwrap();
+        let id = "00000000-0000-4000-8000-000000000001";
+        std::fs::write(root.path().join("publications.json"), serde_json::to_vec(&json!([{
+            "uuid":id,"state":"DESCRIBED","title":"Title","description":"Description",
+            "submissionTimestamp":1_700_002_800,"apparitionTimestampIfDifferentThanSubmission":1_700_002_800,
+            "files":[{"basename":"art.png","sha512sum":sha}],
+            "apparitions":[{"platformName":"deviantart","state":"unpublished","tiers":[],"galleries":[]}]
+        }])).unwrap()).unwrap();
+        std::fs::write(root.path().join("tags.txt"), "tag\n").unwrap();
+        let store = Arc::new(
+            crate::store::Store::new(
+                Paths::resolve(Some(root.path()), None).unwrap(),
+                Config {
+                    tags: Some("tags.txt".into()),
+                    ..Config::default()
+                },
+            )
+            .unwrap(),
+        );
+        let application = Application::new(
+            store,
+            MetadataClient::new(
+                reqwest::Client::new(),
+                Endpoints {
+                    openrouter: "http://127.0.0.1:1".into(),
+                    ollama: "http://127.0.0.1:1".into(),
+                },
+                "llmfit".into(),
+            ),
+            || 0,
+        );
+        let worker = root.path().join("worker.sh");
+        std::fs::write(&worker, "#!/bin/sh\n[ \"$1\" = \"--check-steps\" ] && exit 0\nIFS= read -r open || exit 1\necho '{\"protocol\":1,\"type\":\"ready\"}'\nIFS= read -r submit || exit 1\nsleep 10\n").unwrap();
+        let mut permissions = std::fs::metadata(&worker).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&worker, permissions).unwrap();
+        let publisher =
+            Publisher::new(worker, root.path().join("skill.md")).with_timeouts(Timeouts {
+                ready: Duration::from_millis(250),
+                artwork: Duration::from_millis(50),
+                cleanup: Duration::from_millis(50),
+            });
+        let report = publisher
+            .publish(
+                &application,
+                PublishRequest {
+                    uuids: None,
+                    headless: true,
+                },
+                Arc::new(AtomicBool::new(false)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(report.unknown, 1);
+        assert!(report.error.unwrap().contains("artwork timeout"));
+        let retry = publisher
+            .publish(
+                &application,
+                PublishRequest {
+                    uuids: None,
+                    headless: true,
+                },
+                Arc::new(AtomicBool::new(false)),
+            )
+            .await;
+        assert!(matches!(retry, Err(Error::ReconciliationRequired(_))));
+    }
+
+    #[tokio::test]
     async fn large_submit_to_nonreading_worker_times_out_with_unknown_intent() {
         let root = tempfile::tempdir().unwrap();
         let image = root.path().join("art.png");
