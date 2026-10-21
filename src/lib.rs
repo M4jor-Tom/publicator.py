@@ -1,3 +1,4 @@
+pub mod application;
 pub mod calendar;
 pub mod config;
 pub mod error;
