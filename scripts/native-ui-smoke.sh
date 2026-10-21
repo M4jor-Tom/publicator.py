@@ -59,8 +59,10 @@ bridge=$!
 ready noVNC-http curl --fail --silent "http://127.0.0.1:$web_port/vnc.html"
 
 printf 'noVNC: http://127.0.0.1:%s/vnc.html?autoconnect=1&resize=scale\nartifacts: %s\n' "$web_port" "$work"
-for scenario in empty history mixed; do
-  fixture="$work/$scenario"
+for scenario in empty history mixed reopen; do
+  fixture_scenario=$scenario
+  [[ "$scenario" == reopen ]] && fixture_scenario=mixed
+  fixture="$work/$fixture_scenario"
   mkdir -p "$fixture"
   "$repo/target/debug/examples/ui_acceptance" \
     --fixture-dir "$fixture" --scenario "$scenario" >"$work/$scenario.stdout" 2>"$work/$scenario.stderr" &
