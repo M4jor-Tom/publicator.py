@@ -6,6 +6,7 @@ edition = "2024"
 [features]
 default = []
 desktop = ["dep:iced", "dep:image", "iced/image-without-codecs", "tokio/rt-multi-thread"]
+gpu = ["desktop", "iced/wgpu"]
 
 [[bin]]
 name = "publicator-ui"
@@ -20,6 +21,11 @@ required-features = ["desktop"]
 [[test]]
 name = "ui_workflow"
 path = "tests/ui_workflow.rs"
+required-features = ["desktop"]
+
+[[example]]
+name = "ui_acceptance"
+path = "examples/ui_acceptance.rs"
 required-features = ["desktop"]
 
 [dependencies]

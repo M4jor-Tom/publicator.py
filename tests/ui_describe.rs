@@ -964,3 +964,28 @@ fn describe_view_constructs_from_loaded_state() {
     let _: Element<'_, Message> = describe::view(&app);
     assert_eq!(VISION_MODELS.len(), 2);
 }
+
+#[tokio::test]
+async fn native_multiline_description_editor_keeps_unicode_and_literal_markup() {
+    let fixture = Fixture::new();
+    let mut scheduled = row(900, "SCHEDULED");
+    scheduled["description"] = json!("");
+    fixture.write(json!([scheduled]));
+    let (mut app, _) = fixture_app(&fixture, "http://127.0.0.1:1".into());
+    let uuid = id(900);
+    let _ = app.update(Message::DescriptionAction {
+        uuid: uuid.clone(),
+        action: iced::widget::text_editor::Action::Edit(iced::widget::text_editor::Edit::Paste(
+            std::sync::Arc::new("first line\n雪 <script>alert('literal')</script>".into()),
+        )),
+    });
+    let saved = run_task(app.update(Message::SaveDraft(uuid))).await;
+    assert!(matches!(
+        saved,
+        Message::SaveFinished { result: Ok(()), .. }
+    ));
+    assert_eq!(
+        fixture.read()[0]["description"],
+        "first line\n雪 <script>alert('literal')</script>"
+    );
+}

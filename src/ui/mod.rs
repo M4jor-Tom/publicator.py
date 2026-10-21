@@ -79,6 +79,10 @@ pub enum Message {
         field: Field,
         text: String,
     },
+    DescriptionAction {
+        uuid: String,
+        action: iced::widget::text_editor::Action,
+    },
     Tick,
     SaveFinished {
         uuid: String,
@@ -253,6 +257,7 @@ pub struct App {
     candidates: Vec<Candidate>,
     previews: HashMap<std::path::PathBuf, Option<Result<std::path::PathBuf, String>>>,
     describe_previews: HashMap<String, Option<Result<std::path::PathBuf, String>>>,
+    description_editors: HashMap<String, iced::widget::text_editor::Content>,
 
     pending_delete: Option<Candidate>,
     custom_dates: HashMap<String, (String, String)>,
@@ -330,6 +335,7 @@ impl App {
             candidates: Vec::new(),
             previews: HashMap::new(),
             describe_previews: HashMap::new(),
+            description_editors: HashMap::new(),
             pending_delete: None,
             custom_dates: HashMap::new(),
             source: Source::OpenRouter,
@@ -538,6 +544,29 @@ impl App {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::LoadFinished(Ok(rows)) => {
+                self.description_editors.retain(|uuid, _| {
+                    rows.iter()
+                        .any(|row| row.get("uuid").and_then(Value::as_str) == Some(uuid))
+                });
+                for row in &rows {
+                    let Some(uuid) = row.get("uuid").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let description = row.get("description").and_then(Value::as_str).unwrap_or("");
+                    let editor = self
+                        .description_editors
+                        .entry(uuid.to_owned())
+                        .or_insert_with(|| {
+                            iced::widget::text_editor::Content::with_text(description)
+                        });
+                    if !self
+                        .drafts
+                        .get(uuid)
+                        .is_some_and(|draft| draft.is_field_dirty(Field::Description))
+                    {
+                        *editor = iced::widget::text_editor::Content::with_text(description);
+                    }
+                }
                 self.publications = Some(rows);
                 self.load_error = None;
                 self.search_authorized = true;
@@ -709,6 +738,21 @@ impl App {
                     Err(error) => format!("Generation failed: {error}"),
                 });
                 return Self::load_task(self.application.clone());
+            }
+            Message::DescriptionAction { uuid, action } => {
+                if self.busy_uuids.contains(&uuid) {
+                    return Task::none();
+                }
+                let Some(editor) = self.description_editors.get_mut(&uuid) else {
+                    return Task::none();
+                };
+                editor.perform(action);
+                let text = editor.text();
+                return self.update(Message::Edited {
+                    uuid,
+                    field: Field::Description,
+                    text,
+                });
             }
             Message::Edited { uuid, field, text } => {
                 if self.busy_uuids.contains(&uuid) {
@@ -2100,6 +2144,7 @@ mod tests {
                 candidates: Vec::new(),
                 previews: HashMap::new(),
                 describe_previews: HashMap::new(),
+                description_editors: HashMap::new(),
                 pending_delete: None,
                 custom_dates: HashMap::new(),
                 source: Source::OpenRouter,

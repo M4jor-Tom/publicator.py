@@ -3,6 +3,7 @@ use publicator::{
     application::Application,
     config::{Config, Paths},
     metadata::{Endpoints, MetadataClient},
+    publishing::Publisher,
     store::Store,
     ui::UiOptions,
 };
@@ -31,7 +32,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         endpoints.ollama = ollama.to_string_lossy().into_owned();
     }
     let metadata = MetadataClient::new(reqwest::Client::new(), endpoints, PathBuf::from("llmfit"));
-    let application = Arc::new(Application::new(store, metadata, unix_now));
+    let worker = std::env::var_os("PUBLICATOR_WORKER")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("python/publicator_da/worker.py"));
+    let skill = std::env::var_os("PUBLICATOR_SKILL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(".claude/skills/publish-deviantart/SKILL.md"));
+    let application = Arc::new(
+        Application::new(store, metadata, unix_now).with_publisher(Publisher::new(worker, skill)),
+    );
     Ok(publicator::ui::run(
         application,
         UiOptions {

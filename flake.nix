@@ -74,20 +74,42 @@
       # login must happen in a genuine browser (no navigator.webdriver). It
       # writes the logged-in + cleared session to the repo-local profile that
       # the UI then copies. Reproducible: firefox is flake-pinned.
-      rustCli = pkgs.rustPlatform.buildRustPackage {
+      rustWorker = pkgs.writeShellScriptBin "publicator-da-worker" ''
+        export PYTHONPATH=${src}/python
+        export PLAYWRIGHT_BROWSERS_PATH=${browsers}
+        export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=true
+        exec ${python}/bin/python -m publicator_da.worker "$@"
+      '';
+      rustSkill = "${src}/.claude/skills/publish-deviantart/SKILL.md";
+      rustRuntime = [ pkgs.git pkgs.imagemagick pkgs.llmfit rustWorker ];
+      desktopRuntime = [
+        pkgs.libxkbcommon pkgs.wayland pkgs.libGL
+        pkgs.libx11 pkgs.libxcursor pkgs.libxi pkgs.libxrandr pkgs.libxinerama pkgs.libxext
+      ];
+      wrapRustProgram = { package, binary, runtime, libraries ? [ ] }:
+        pkgs.symlinkJoin {
+          name = package.name;
+          paths = [ package ];
+          nativeBuildInputs = [ pkgs.makeWrapper ];
+          postBuild = ''
+            wrapProgram $out/bin/${binary} \
+              --prefix PATH : ${pkgs.lib.makeBinPath runtime} \
+              --set PUBLICATOR_WORKER ${rustWorker}/bin/publicator-da-worker \
+              --set PUBLICATOR_SKILL ${rustSkill} \
+              ${pkgs.lib.optionalString (libraries != [ ]) "--prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath libraries}"}
+          '';
+        };
+      rustCliUnwrapped = pkgs.rustPlatform.buildRustPackage {
         pname = "publicator-rust-cli";
         version = "0.1.0";
         src = ./.;
         cargoLock.lockFile = ./Cargo.lock;
+        cargoBuildFlags = [ "--no-default-features" "--bin" "publicator" ];
         nativeBuildInputs = [ pkgs.pkg-config ];
         buildInputs = [ pkgs.openssl ];
         doCheck = false;
       };
-      desktopRuntime = [
-        pkgs.libxkbcommon pkgs.wayland
-        pkgs.libx11 pkgs.libxcursor pkgs.libxi pkgs.libxrandr pkgs.libxinerama pkgs.libxext
-      ];
-      rustDesktop = pkgs.rustPlatform.buildRustPackage {
+      rustDesktopUnwrapped = pkgs.rustPlatform.buildRustPackage {
         pname = "publicator-rust-desktop";
         version = "0.1.0";
         src = ./.;
@@ -97,12 +119,17 @@
         buildInputs = [ pkgs.openssl ] ++ desktopRuntime;
         doCheck = false;
       };
-      rustWorker = pkgs.writeShellScriptBin "publicator-da-worker" ''
-        export PYTHONPATH=${src}/python
-        export PLAYWRIGHT_BROWSERS_PATH=${browsers}
-        export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=true
-        exec ${python}/bin/python -m publicator_da.worker "$@"
-      '';
+      rustCli = wrapRustProgram {
+        package = rustCliUnwrapped;
+        binary = "publicator";
+        runtime = rustRuntime;
+      };
+      rustDesktop = wrapRustProgram {
+        package = rustDesktopUnwrapped;
+        binary = "publicator-ui";
+        runtime = rustRuntime ++ [ pkgs.ollama ];
+        libraries = desktopRuntime;
+      };
       rustCommand = name: subcommand: extra: {
         type = "app";
         program = "${pkgs.writeShellApplication {
@@ -132,6 +159,7 @@
     in {
       packages.${system} = {
         publicator-core = rustCli;
+        publicator-desktop = rustDesktop;
         publicator-rust-cli = rustCli;
         publicator-rust-desktop = rustDesktop;
       };
@@ -190,10 +218,18 @@
         login = login;
       };
       devShells.${system}.default = pkgs.mkShell {
-        packages = [ devPython pkgs.git pkgs.imagemagick pkgs.playwright-driver.browsers claude pkgs.ollama pkgs.llmfit pkgs.rustc pkgs.cargo pkgs.rustfmt pkgs.clippy pkgs.pkg-config pkgs.openssl pkgs.pcre2 ];
+        packages = [
+          devPython pkgs.git pkgs.imagemagick pkgs.playwright-driver.browsers claude
+          pkgs.ollama pkgs.llmfit pkgs.rustc pkgs.cargo pkgs.rustfmt pkgs.clippy
+          pkgs.pkg-config pkgs.openssl pkgs.pcre2 pkgs.jq pkgs.curl pkgs.xvfb pkgs.xvfb-run pkgs.x11vnc
+          pkgs.novnc pkgs.python312Packages.websockify pkgs.xdotool pkgs.xwininfo
+          pkgs.xprop pkgs.xdpyinfo pkgs.wmctrl pkgs.openbox pkgs.nodejs pkgs.playwright-test
+        ];
         shellHook = ''
           export PLAYWRIGHT_BROWSERS_PATH=${pkgs.playwright-driver.browsers}
           export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=true
+          export NOVNC_WEB=${pkgs.novnc}/share/webapps/novnc
+          export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath desktopRuntime}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
           export PYTHONPATH="$PWD/src''${PYTHONPATH:+:$PYTHONPATH}"
         '';
       };

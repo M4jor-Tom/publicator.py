@@ -151,7 +151,6 @@ pub fn view(state: &App) -> Element<'_, Message> {
             .unwrap_or((saved_title, saved_description));
         let busy = state.busy_uuids.contains(&uuid);
         let title_uuid = uuid.clone();
-        let description_uuid = uuid.clone();
         let mut card = column![
             text(uuid.clone()),
             text_input("Title", &title)
@@ -161,15 +160,22 @@ pub fn view(state: &App) -> Element<'_, Message> {
                     text: value
                 })
                 .on_submit(Message::SaveDraft(uuid.clone())),
-            text_input("Description", &description)
-                .on_input(move |value| Message::Edited {
-                    uuid: description_uuid.clone(),
-                    field: super::drafts::Field::Description,
-                    text: value
-                })
-                .on_submit(Message::SaveDraft(uuid.clone())),
         ]
         .spacing(5);
+        if let Some(editor) = state.description_editors.get(&uuid) {
+            let description_uuid = uuid.clone();
+            card = card.push(
+                iced::widget::text_editor(editor)
+                    .placeholder("Description")
+                    .height(Length::Fixed(120.0))
+                    .on_action(move |action| Message::DescriptionAction {
+                        uuid: description_uuid.clone(),
+                        action,
+                    }),
+            );
+        } else {
+            card = card.push(text(description.clone()));
+        }
         if state.revealed_publication() == Some(uuid.as_str()) {
             card = card.push(text("Opened from Calendar"));
         }
