@@ -1,10 +1,12 @@
 # Roadmap
 
-## Rust / Iced migration — PAUSED
+## Rust / Iced migration — IN PROGRESS
+
+**Resumed by owner, 2026-10-21:** Continue from Task20 fix2, complete Tasks21–23, run the required validation/reviews, then parent fast-forwards `master` preserving all commits and pushes normally. After successful integration/push, remove this worktree only when clean. This supersedes the historical pause and worktree-preservation instructions below; no real-data/provider/profile/publishing permissions are added.
 
 **Checkpoint:** 2026-10-21T07:01:52Z. The owner requested: “Pause execution, move plan in docs/ROADMAP for now. We'll resume it later.”
 
-The workflow and its active child are stopped. **Do not resume implementation, launch agents, merge or push until the owner explicitly resumes.** This file is now the durable plan/checkpoint; recording it here is an explicit exception to the earlier scratch-only plan rule. Logs, review reports and temporary fixtures still do not belong in Git.
+The previous workflow and its active child were stopped. The owner has now explicitly resumed execution; use a fresh continuation at the checkpoint below, not the obsolete workflow script. This file remains the durable plan/checkpoint and the explicit exception to the earlier scratch-only plan rule. Logs, review reports and temporary fixtures still do not belong in Git.
 
 ### Current state
 
@@ -54,7 +56,7 @@ The stash object was created/stored **without removing the working changes**; it
 3. Continue **Task20 fix2 from reviewed BASE `288a46b...`**, retaining all follow-up commits in its review range. Capture/freeze the batch UUIDs or reject changed membership at actual Application admission. A UI-only comparison followed by unscoped `generate_marked` can still race. Preserve marker-only merge, reverse persisted OpenRouter order, forward local order, first-answer-model preference, dirty flush, target-only busy-through-persistence and unrelated edits. Do not replace batch semantics with a loop of `generate_one`.
 4. Verify local Good/installed and Good/missing/confirmation paths; refusal/cancel/bad/unknown/unavailable state; stale source/model/target/batch; saved rows and fake call logs. Finish/report/commit the fix and obtain independent scoped approval before Task21.
 5. Execute Tasks21–23 and their carried obligations below. Resolve review findings; perform simplification then ponytail review and apply valid changes. Require full final whole-branch review, a fix wave if needed, and fresh final verification.
-6. Only when **everything is implemented and checked**, the owner has already authorized preserving all feature commits by fast-forwarding `master` and pushing the intended remote. Parent performs this, with clean worktrees/ancestry/remote checks; no force push, protection bypass or early integration. Keep the feature branch/worktree. No merge or push has happened at this pause.
+6. Only when **everything is implemented and checked**, the owner has already authorized preserving all feature commits by fast-forwarding `master` and pushing the intended remote. Parent performs this, with clean worktrees/ancestry/remote checks; no force push, protection bypass or early integration. Keep the feature branch; the latest owner request authorizes removing the worktree when clean after final integration/push. No merge or push happened at the pause.
 
 ### Open obligations that must not be lost
 
@@ -298,7 +300,7 @@ No Rust implementation, native-window compatibility, real provider result or cur
 - The existing `.claude/skills/publish-deviantart/SKILL.md` is a static browser recovery contract, not a dependency on the removed Claude CLI.
 - For later delegation, use the owner's **luna-6** preference; resolve its exact registered provider/model ID first. This plan was drafted/reviewed directly after explicit owner permission because the attempted subagent models could not launch.
 
-**Approval boundary:** Execution is PAUSED by the latest owner instruction. Resume only when explicitly requested. After all implementation, native/package acceptance, final review/fixes and fresh verification pass, the parent is authorized to fast-forward master preserving every feature commit and push without force. No early integration/push or real data/profile/model/provider/publishing effects.
+**Approval boundary:** The owner has explicitly resumed execution from Task20 fix2. After all implementation, native/package acceptance, final review/fixes and fresh verification pass, the parent is authorized to fast-forward master preserving every feature commit and push without force. No early integration/push or real data/profile/model/provider/publishing effects.
 
 ---
 
@@ -1168,7 +1170,7 @@ The example epoch matches 2027-01-15 20:00 Europe/Paris (19:00 UTC). `failed`/`u
 
 If an execution-time API/dependency/renderer incompatibility appears, stop that task and replan the smallest seam; do not hide it by removing a safety test. Provider API/model churn is not authority to add a paid/Claude fallback. Worker browser uncertainty is not authority to retry a sent job or modify the original login profile. Failed subagent infrastructure requires same-protocol recovery or explicit owner-approved execution-mode fallback; registry presence alone is not account support.
 
-**Execution instruction:** PAUSED. Do not launch or resume implementation until the owner asks. Then continue the exact checkpoint using fresh luna-6 implementers and independent reviews; do not rerun the obsolete Task6 script. Children never merge/push. Only the parent integrates/pushes after all final gates; no live artwork/provider/profile effects are authorized.
+**Execution instruction:** RESUMED by owner. Continue the exact Task20 fix2 checkpoint using fresh luna-6 implementers and independent reviews; do not rerun the obsolete Task6 script. Children never merge/push or remove the worktree. Only the parent integrates/pushes after all final gates and removes the worktree when clean afterward; no live artwork/provider/profile effects are authorized.
 
 ## Other backlog (unchanged)
 
