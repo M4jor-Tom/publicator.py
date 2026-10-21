@@ -22,6 +22,9 @@ use std::{
     time::Duration,
 };
 
+#[cfg(test)]
+use std::process::{Command, Stdio};
+
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 struct FixtureSettings {
@@ -33,6 +36,7 @@ struct FixtureSettings {
     local_delay_ms: u64,
     openrouter_failures: usize,
     local_failures: usize,
+    worker_outcomes: Vec<String>,
     tiers: Vec<String>,
     galleries: Vec<String>,
 }
@@ -48,6 +52,7 @@ impl Default for FixtureSettings {
             local_delay_ms: 0,
             openrouter_failures: 0,
             local_failures: 0,
+            worker_outcomes: vec!["failed".into(), "scheduled".into(), "unknown".into()],
             tiers: vec!["Fixture Basic".into(), "Fixture Premium".into()],
             galleries: vec!["Fixture Gallery A".into(), "Fixture Gallery B".into()],
         }
@@ -106,6 +111,22 @@ fn fixture_rows(scenario: &str, dir: &Path) -> Vec<Value> {
     match scenario {
         "empty" => Vec::new(),
         "history" => vec![row(1, "APPEARED", [80, 140, 210], dir)],
+        "publish" => {
+            let mut history = row(22, "APPEARED", [220, 180, 50], dir);
+            history["apparitions"] = json!([
+                {
+                    "platformName": "deviantart",
+                    "state": "published_or_scheduled",
+                    "url": "https://example.test/historical/22"
+                },
+                {"platformName": "historical-platform", "state": "unpublished"}
+            ]);
+            vec![
+                row(20, "DESCRIBED", [100, 100, 220], dir),
+                row(21, "DESCRIBED", [150, 100, 30], dir),
+                history,
+            ]
+        }
         "mixed" => {
             for (name, color) in [
                 ("candidate-a.png", [140, 20, 120]),
@@ -179,6 +200,36 @@ models = ["google/gemma-4-26B-A4B-it", "google/gemma-4-31B-it"]
 print(json.dumps(dict(models=[dict(name=name, fit_level=settings["fit_level"], notes=[settings["fit_reason"]]) for name in models])))
 "#
         ),
+    );
+}
+
+fn write_worker(path: &Path) {
+    write_executable(
+        path,
+        r#"#!/bin/sh
+if [ "$1" = "--check-steps" ]; then exit 0; fi
+settings="$(dirname -- "$0")/native-fixture.json"
+calls="$(dirname -- "$0")/worker-calls.jsonl"
+while IFS= read -r line; do
+  kind=$(printf '%s' "$line" | jq -r .type)
+  case "$kind" in
+    open) echo '{"protocol":1,"type":"ready"}' ;;
+    submit)
+      printf '%s\n' "$line" >> "$calls"
+      count=$(wc -l < "$calls")
+      attempt=$(printf '%s' "$line" | jq -r .attempt_id)
+      uuid=$(printf '%s' "$line" | jq -r .uuid)
+      outcome=$(jq -r --argjson count "$count" '.worker_outcomes[$count - 1] // "unknown"' "$settings")
+      case "$outcome" in
+        failed) printf '{"protocol":1,"type":"failed","attempt_id":"%s","uuid":"%s","error":"fixture failure"}\n' "$attempt" "$uuid" ;;
+        scheduled) printf '{"protocol":1,"type":"scheduled","attempt_id":"%s","uuid":"%s","url":"https://example.test/fixture/%s"}\n' "$attempt" "$uuid" "$uuid" ;;
+        *) printf '{"protocol":1,"type":"unknown","attempt_id":"%s","uuid":"%s","error":"disposable fixture ambiguity"}\n' "$attempt" "$uuid" ;;
+      esac
+      ;;
+    close) exit 0 ;;
+  esac
+done
+"#,
     );
 }
 
@@ -375,6 +426,103 @@ mod tests {
     use publicator::metadata::VISION_MODELS;
 
     #[test]
+    fn fixture_worker_outcomes_are_configurable_for_retry_and_reconciliation() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = FixtureSettings {
+            worker_outcomes: vec![
+                "scheduled".into(),
+                "failed".into(),
+                "scheduled".into(),
+                "unknown".into(),
+            ],
+            ..FixtureSettings::default()
+        };
+        fs::write(
+            dir.path().join("native-fixture.json"),
+            serde_json::to_vec(&settings).unwrap(),
+        )
+        .unwrap();
+        let worker = dir.path().join("worker.sh");
+        write_worker(&worker);
+        let mut child = Command::new(&worker)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        writeln!(stdin, "{{\"type\":\"open\"}}").unwrap();
+        for suffix in 1..=4 {
+            writeln!(
+                stdin,
+                "{{\"type\":\"submit\",\"attempt_id\":\"00000000-0000-4000-8000-{suffix:012}\",\"uuid\":\"00000000-0000-4000-8000-{suffix:012}\"}}"
+            )
+            .unwrap();
+        }
+        writeln!(stdin, "{{\"type\":\"close\"}}").unwrap();
+        drop(stdin);
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let events = String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(events[0]["type"], "ready");
+        let protocol_events = events[1..]
+            .iter()
+            .cloned()
+            .map(serde_json::from_value::<publicator::publish_protocol::WorkerEvent>)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(protocol_events.len(), 4);
+        assert_eq!(
+            events[1..]
+                .iter()
+                .map(|event| event["type"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["scheduled", "failed", "scheduled", "unknown"]
+        );
+        assert_eq!(
+            events[1..]
+                .iter()
+                .map(|event| event["attempt_id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            (1..=4)
+                .map(|suffix| format!("00000000-0000-4000-8000-{suffix:012}"))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("worker-calls.jsonl"))
+                .unwrap()
+                .lines()
+                .count(),
+            4
+        );
+    }
+
+    #[test]
+    fn publish_fixture_has_two_registered_targets_and_unregistered_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let rows = fixture_rows("publish", dir.path());
+        assert_eq!(rows.len(), 3);
+        assert_eq!(
+            rows.iter()
+                .filter(|row| {
+                    row["apparitions"].as_array().unwrap().iter().any(|app| {
+                        app["platformName"] == "deviantart" && app["state"] == "unpublished"
+                    })
+                })
+                .count(),
+            2
+        );
+        assert_eq!(
+            rows[2]["apparitions"][1]["platformName"],
+            "historical-platform"
+        );
+        assert_eq!(rows[2]["apparitions"][1]["state"], "unpublished");
+    }
+
+    #[test]
     fn fixture_initialization_preserves_existing_publication_bytes() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("publications.json");
@@ -481,8 +629,10 @@ fn main() -> iced::Result {
     let rows = fixture_rows(seed_scenario, &art);
     let settings_path = dir.join("native-fixture.json");
     let settings = load_fixture_settings(&dir);
+    fs::write(dir.join("tags.txt"), "fixture-tag\n").unwrap();
     let config = Config {
         publicable: vec!["art".into()],
+        tags: Some("tags.txt".into()),
         tiers: settings.tiers.clone(),
         galleries: settings.galleries.clone(),
         ..Config::default()
@@ -494,36 +644,7 @@ fn main() -> iced::Result {
     let llmfit = dir.join("llmfit");
     write_llmfit(&llmfit, &settings_path);
     let worker = dir.join("worker.sh");
-    write_executable(
-        &worker,
-        &format!(
-            r#"#!/bin/sh
-if [ "$1" = "--check-steps" ]; then exit 0; fi
-while IFS= read -r line; do
-  kind=$(printf '%s' "$line" | jq -r .type)
-  case "$kind" in
-    open) echo '{{"protocol":1,"type":"ready"}}' ;;
-    submit)
-      printf '%s\n' "$line" >> '{}'
-      count=$(wc -l < '{}')
-      attempt=$(printf '%s' "$line" | jq -r .attempt_id)
-      uuid=$(printf '%s' "$line" | jq -r .uuid)
-      if [ "$count" -eq 1 ]; then
-        printf '{{"protocol":1,"type":"failed","attempt_id":"%s","uuid":"%s","reason":"fixture failure"}}\n' "$attempt" "$uuid"
-      elif [ "$count" -eq 2 ]; then
-        printf '{{"protocol":1,"type":"scheduled","attempt_id":"%s","uuid":"%s","url":"https://example.test/fixture/%s"}}\n' "$attempt" "$uuid" "$uuid"
-      else
-        printf '{{"protocol":1,"type":"unknown","attempt_id":"%s","uuid":"%s","error":"disposable fixture ambiguity"}}\n' "$attempt" "$uuid"
-      fi
-      ;;
-    close) exit 0 ;;
-  esac
-done
-"#,
-            dir.join("worker-calls.jsonl").display(),
-            dir.join("worker-calls.jsonl").display()
-        ),
-    );
+    write_worker(&worker);
     let skill = dir.join("skill.md");
     fs::write(&skill, "fixture skill: no remote publication").unwrap();
     let metadata = MetadataClient::new(
