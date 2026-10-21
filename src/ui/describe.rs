@@ -9,6 +9,8 @@ use iced::{
 };
 use serde_json::Value;
 
+const SCROLL_ID: &str = "describe-publications";
+
 pub(super) fn preview_tasks(state: &mut App, start: usize, end: usize) -> Task<Message> {
     let Some(rows) = state.publications.as_ref() else {
         return Task::none();
@@ -20,8 +22,8 @@ pub(super) fn preview_tasks(state: &mut App, start: usize, end: usize) -> Task<M
             .filter(|result| result.is_none())
             .count(),
     );
-    let records: Vec<_> = rows
-        .iter()
+    let records: Vec<_> = ordered_rows(rows, state.revealed_publication())
+        .into_iter()
         .filter(|row| phase(row).ok() == Some(Phase::Scheduled))
         .skip(start)
         .take(end.saturating_sub(start))
@@ -131,7 +133,10 @@ pub fn view(state: &App) -> Element<'_, Message> {
         }
     }
     let mut cards = column![].spacing(12);
-    for row in state.publications.as_deref().unwrap_or_default() {
+    for row in ordered_rows(
+        state.publications.as_deref().unwrap_or_default(),
+        state.revealed_publication(),
+    ) {
         if phase(row).ok() != Some(Phase::Scheduled) {
             continue;
         }
@@ -165,6 +170,9 @@ pub fn view(state: &App) -> Element<'_, Message> {
                 .on_submit(Message::SaveDraft(uuid.clone())),
         ]
         .spacing(5);
+        if state.revealed_publication() == Some(uuid.as_str()) {
+            card = card.push(text("Opened from Calendar"));
+        }
         let dirty_title = state
             .drafts
             .get(&uuid)
@@ -211,6 +219,7 @@ pub fn view(state: &App) -> Element<'_, Message> {
     }
     content = content.push(
         scrollable(cards)
+            .id(SCROLL_ID)
             .height(Length::Fill)
             .on_scroll(|viewport| Message::DescribeViewport {
                 offset: viewport.absolute_offset().y,
@@ -228,4 +237,45 @@ pub fn view(state: &App) -> Element<'_, Message> {
         );
     }
     content.into()
+}
+
+fn ordered_rows<'a>(rows: &'a [Value], target: Option<&str>) -> Vec<&'a Value> {
+    let mut rows = rows
+        .iter()
+        .filter(|row| phase(row).ok() == Some(Phase::Scheduled))
+        .collect::<Vec<_>>();
+    if let Some(target) = target
+        && let Some(index) = rows
+            .iter()
+            .position(|row| row.get("uuid").and_then(Value::as_str) == Some(target))
+    {
+        rows.swap(0, index);
+    }
+    rows
+}
+
+pub(super) fn scroll_to_target() -> Task<Message> {
+    iced::widget::operation::scroll_to(
+        SCROLL_ID,
+        iced::widget::operation::AbsoluteOffset {
+            x: None,
+            y: Some(0.0),
+        },
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn revealed_scheduled_publication_is_first_without_reordering_saved_rows() {
+        let rows = vec![
+            serde_json::json!({"uuid":"first", "state":"SCHEDULED"}),
+            serde_json::json!({"uuid":"target", "state":"SCHEDULED"}),
+        ];
+        let ordered = ordered_rows(&rows, Some("target"));
+        assert_eq!(ordered[0]["uuid"], "target");
+        assert_eq!(rows[0]["uuid"], "first");
+    }
 }

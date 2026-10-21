@@ -1635,22 +1635,23 @@ async fn publication_jump_flushes_draft_then_reveals_target_phase_and_scroll_act
             .any(|action| async move { matches!(action, Action::Widget(_)) })
             .await
     );
-    assert_eq!(app.current_tab(), Tab::Schedule);
+    assert_eq!(app.current_tab(), Tab::Describe);
     assert_eq!(app.revealed_publication(), Some(uuid.as_str()));
     let saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&store.paths().json).unwrap()).unwrap();
     assert_eq!(saved[0]["title"], "Saved before jump");
-    let _: iced::Element<'_, Message> = publicator::ui::schedule::view(&app);
+    let _: iced::Element<'_, Message> = publicator::ui::describe::view(&app);
 }
 
 #[cfg(feature = "desktop")]
 #[tokio::test]
-async fn publication_jump_maps_picked_described_and_appeared_to_action_phases() {
+async fn publication_jump_maps_all_phases_to_the_next_action() {
     use iced_runtime::{Action, futures::futures::StreamExt};
     use publicator::ui::{Message, Tab};
     let (mut app, store, _root) = options_app();
     for (phase, expected) in [
         ("PICKED", Tab::Schedule),
+        ("SCHEDULED", Tab::Describe),
         ("DESCRIBED", Tab::Publish),
         ("APPEARED", Tab::Publish),
     ] {

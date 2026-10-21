@@ -1249,6 +1249,7 @@ impl App {
         if reveal.is_some() {
             tasks.push(match tab {
                 Tab::Schedule => schedule::scroll_to_target(),
+                Tab::Describe => describe::scroll_to_target(),
                 Tab::Publish => publish::scroll_to_target(),
                 _ => Task::none(),
             });
@@ -1262,7 +1263,8 @@ impl App {
             return Task::none();
         };
         let target = match phase(row) {
-            Ok(Phase::Picked | Phase::Scheduled) => Tab::Schedule,
+            Ok(Phase::Picked) => Tab::Schedule,
+            Ok(Phase::Scheduled) => Tab::Describe,
             Ok(Phase::Described | Phase::Appeared) => Tab::Publish,
             Err(error) => {
                 self.result = Some(format!("Publication cannot be opened: {error}"));
