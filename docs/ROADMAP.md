@@ -4,11 +4,21 @@
 
 **Resumed by owner, 2026-10-21:** Continue from Task20 fix2, complete Tasks21–23, run the required validation/reviews, then parent fast-forwards `master` preserving all commits and pushes normally. After successful integration/push, remove this worktree only when clean. This supersedes the historical pause and worktree-preservation instructions below; no real-data/provider/profile/publishing permissions are added.
 
+### Live execution checkpoint — 2026-10-21
+
+- **Tasks1–21:** implementation gates accepted, through `c9ff382cf17ab90e98da11cabee987ed4ec0150d`; full real-native acceptance is still required.
+- **Task22:** packaging/renderer/editor/harness implementation committed as `604d1dc86854ce6946cb93748f8d90637bdd12d0`. Core/desktop suites, worker tests, Nix builds/checks and partial real noVNC interaction passed; the full native scenario checklist and console triage are **incomplete**, so Task22 is **NOT accepted**.
+- **Next:** bounded real-native Pick/Schedule/Describe, Publish/recovery/close, Calendar/viewport/jump passes; then aggregate source-absent/package/replay checks and independent Task22 review. Task23 cutover/removal is blocked until22 passes. Final whole-branch review/fixes/fresh verification still precede parent-only fast-forward/push and removal of the clean worktree.
+- Source worktree is `feat/rust-iced` at `/tmp/publicator-rust-migration/worktree`; original `master` remains unchanged at `7b5c4d6e4c423e4e23c8897e5fcc13ae5237b41c`. No merge/push/worktree removal or live provider/model/profile/publishing effects occurred. Source/status checkpoint was clean before this documentation update; no unfinished source changes to apply from the old Task20 stash.
+- Current recovery map: `/tmp/publicator-rust-migration/sdd/progress.md` (parent-write-only); Task22 initial report honestly lists unverified stories. Do not redo accepted tasks or treat partial screenshots/green reducers as completed native acceptance. Historical paused-state details below are provenance, **not** the current frontier.
+
+### Historical pause checkpoint
+
 **Checkpoint:** 2026-10-21T07:01:52Z. The owner requested: “Pause execution, move plan in docs/ROADMAP for now. We'll resume it later.”
 
 The previous workflow and its active child were stopped. The owner has now explicitly resumed execution; use a fresh continuation at the checkpoint below, not the obsolete workflow script. This file remains the durable plan/checkpoint and the explicit exception to the earlier scratch-only plan rule. Logs, review reports and temporary fixtures still do not belong in Git.
 
-### Current state
+### State at the historical pause
 
 - **Accepted:** Tasks **1–19**, with the scoped carry-forward obligations below. Rust core, provider adapters, durable publisher orchestration, CLI, native shell/drafts and Pick/Schedule have passed their task reviews.
 - **In progress / NOT accepted:** **Task 20, Describe**, second fix round. Local fit/status and explicit consent are implemented; the remaining review finding is that local batch confirmation must remain bound to the exact UUID set through asynchronous Application admission.
