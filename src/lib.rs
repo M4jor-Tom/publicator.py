@@ -9,6 +9,7 @@ pub mod model;
 pub mod prompts;
 pub mod publish_journal;
 pub mod publish_protocol;
+pub mod publishing;
 pub mod scheduling;
 pub mod store;
 pub mod workflow;

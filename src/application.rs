@@ -33,6 +33,7 @@ pub struct Application {
     operation: Mutex<()>,
     busy: Mutex<HashSet<String>>,
     publishing: Mutex<bool>,
+    pub(crate) publisher: Option<crate::publishing::Publisher>,
 }
 impl Application {
     pub fn new(store: Arc<Store>, metadata: MetadataClient, clock: fn() -> i64) -> Self {
@@ -43,7 +44,11 @@ impl Application {
             operation: Mutex::new(()),
             busy: Mutex::new(HashSet::new()),
             publishing: Mutex::new(false),
+            publisher: None,
         }
+    }
+    pub(crate) fn store(&self) -> &Store {
+        &self.store
     }
     pub fn begin_publishing(&self) -> Result<PublishingLease<'_>> {
         let _op = self.operation.lock().unwrap();
