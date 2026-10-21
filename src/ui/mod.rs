@@ -1368,10 +1368,10 @@ impl App {
     fn selection_locked(&self, uuid: Option<&str>) -> bool {
         self.publish_locks.is_none()
             || self.publish_lock_error.is_some()
-            || self
-                .publish_locks
-                .as_ref()
-                .is_some_and(|locks| uuid.is_none_or(|id| locks.contains(id)))
+            || self.publish_locks.as_ref().is_some_and(|locks| match uuid {
+                Some(uuid) => locks.contains(uuid),
+                None => !locks.is_empty(),
+            })
     }
 
     fn options_locked(&self, uuid: &str) -> bool {
@@ -2182,6 +2182,16 @@ mod tests {
             },
             root,
         )
+    }
+
+    #[test]
+    fn select_all_is_unlocked_without_unresolved_attempts_and_locked_with_them() {
+        let (mut app, _root) = app();
+        assert!(!app.selection_locked(None));
+        app.publish_locks = Some(HashSet::from(["unresolved".into()]));
+        assert!(app.selection_locked(None));
+        assert!(app.selection_locked(Some("unresolved")));
+        assert!(!app.selection_locked(Some("other")));
     }
 
     fn dirty_draft(app: &mut App) {
