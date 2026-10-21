@@ -21,8 +21,8 @@ specific one). If it exits 0, the publication is done — stop here.
 
 If it exits non-zero, it prints `AUTOMATION FAILED: <reason>` to stderr and
 closes the browser cleanly. Fall through to the manual steps below to finish the
-current publication, then update `deviantart.py` to cover whatever
-tripped it (so the next run doesn't fall through).
+current publication, then update `python/publicator_da/browser.py` to cover whatever
+tripped it (so the next worker run doesn't fall through).
 
 ## Values for the current publication
 
