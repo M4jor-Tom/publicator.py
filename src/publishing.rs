@@ -178,18 +178,7 @@ impl Publisher {
             return result;
         }
         let detail = String::from_utf8_lossy(&diagnostics);
-        match result {
-            Ok(mut report) => {
-                if let Some(error) = &mut report.error {
-                    error.push_str(&format!("; worker stderr: {}", detail.trim()));
-                }
-                Ok(report)
-            }
-            Err(error) => Err(Error::Protocol(format!(
-                "{error}; worker stderr: {}",
-                detail.trim()
-            ))),
-        }
+        with_worker_diagnostics(result, &detail)
     }
     async fn run_batch(
         &self,
@@ -315,6 +304,26 @@ impl Publisher {
         )
         .await;
         Ok(report)
+    }
+}
+fn with_worker_diagnostics(result: Result<PublishReport>, detail: &str) -> Result<PublishReport> {
+    if detail.trim().is_empty() {
+        return result;
+    }
+    match result {
+        Ok(mut report) => {
+            if let Some(error) = &mut report.error {
+                error.push_str(&format!("; worker stderr: {}", detail.trim()));
+            }
+            Ok(report)
+        }
+        Err(error) => {
+            eprintln!(
+                "publisher worker stderr (original error preserved): {}",
+                detail.trim()
+            );
+            Err(error)
+        }
     }
 }
 impl Application {
@@ -812,5 +821,223 @@ done"#, pid_file.display())).unwrap();
             .unwrap();
         assert_eq!(report.unknown, 1);
         assert!(report.error.unwrap().contains("write timeout"));
+    }
+
+    fn publishing_boundary_fixture() -> (
+        TempDir,
+        Application,
+        crate::store::Store,
+        Publisher,
+        PathBuf,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let mut rows = Vec::new();
+        for n in 1..=2 {
+            let basename = format!("{n}.png");
+            let image = root.path().join(&basename);
+            assert!(
+                std::process::Command::new("magick")
+                    .args(["-size", "4x3", "xc:white"])
+                    .arg(&image)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let hash = crate::images::file_sha512(&image).unwrap();
+            rows.push(json!({
+                "uuid": format!("00000000-0000-4000-8000-{n:012}"),
+                "state": "DESCRIBED",
+                "title": "Title",
+                "description": "Description",
+                "submissionTimestamp": 1_700_002_800,
+                "apparitionTimestampIfDifferentThanSubmission": 1_700_002_800,
+                "files": [{"basename": basename, "sha512sum": hash}],
+                "apparitions": [{"platformName": "deviantart", "state": "unpublished", "tiers": [], "galleries": []}]
+            }));
+        }
+        std::fs::write(
+            root.path().join("publications.json"),
+            serde_json::to_vec(&rows).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(root.path().join("tags.txt"), "tag\n").unwrap();
+        let store = crate::store::Store::new(
+            Paths::resolve(Some(root.path()), None).unwrap(),
+            Config {
+                tags: Some("tags.txt".into()),
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        let app_store = Arc::new(store.clone());
+        let app = Application::new(
+            app_store,
+            MetadataClient::new(
+                reqwest::Client::new(),
+                Endpoints {
+                    openrouter: "http://127.0.0.1:1".into(),
+                    ollama: "http://127.0.0.1:1".into(),
+                },
+                "llmfit".into(),
+            ),
+            || 0,
+        );
+        let calls = root.path().join("calls.log");
+        let worker = root.path().join("worker.sh");
+        std::fs::write(
+            &worker,
+            format!(
+                r#"#!/bin/sh
+[ "$1" = "--check-steps" ] && exit 0
+while IFS= read -r line; do
+  kind=$(printf '%s' "$line" | jq -r .type)
+  case "$kind" in
+    open) echo '{{"protocol":1,"type":"ready"}}' ;;
+    submit)
+      uuid=$(printf '%s' "$line" | jq -r .uuid)
+      attempt=$(printf '%s' "$line" | jq -r .attempt_id)
+      echo "$uuid" >> '{}'
+      printf 'simulated worker stderr\n' >&2
+      printf '{{"protocol":1,"type":"scheduled","attempt_id":"%s","uuid":"%s","url":"https://example.invalid/work"}}\n' "$attempt" "$uuid"
+      ;;
+    close) exit 0 ;;
+  esac
+done"#,
+                calls.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&worker).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&worker, permissions).unwrap();
+        let publisher = Publisher::new(worker, root.path().join("skill.md"));
+        (root, app, store, publisher, calls)
+    }
+
+    #[tokio::test]
+    async fn pre_rename_failure_with_worker_stderr_remains_a_safe_io_error() {
+        let (root, app, store, publisher, calls) = publishing_boundary_fixture();
+        crate::store::fail_next_commit_for_test(crate::store::CommitFailureForTest::BeforeRename);
+        let error = publisher
+            .publish(
+                &app,
+                PublishRequest {
+                    uuids: None,
+                    headless: true,
+                },
+                Arc::new(AtomicBool::new(false)),
+            )
+            .await
+            .unwrap_err();
+        let displayed = error.to_string();
+        match error {
+            Error::Io(source) => assert_eq!(source.to_string(), "injected pre-rename failure"),
+            other => panic!("expected safe pre-rename I/O failure, got {other:?}"),
+        }
+        assert!(!displayed.contains("may be visible but is not confirmed durable"));
+        assert_eq!(
+            std::fs::read_to_string(calls)
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            ["00000000-0000-4000-8000-000000000001"]
+        );
+        assert_eq!(
+            store.read().unwrap()[0]["apparitions"][0]["state"],
+            "unpublished"
+        );
+        let journal = PublishJournal::new(root.path()).unwrap();
+        let attempt = std::fs::read_dir(root.path().join(".publicator/publish"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .file_name()
+            .into_string()
+            .unwrap();
+        let receipt_path = root
+            .path()
+            .join(".publicator/publish")
+            .join(&attempt)
+            .join("receipt.json");
+        let receipt: Value =
+            serde_json::from_slice(&std::fs::read(&receipt_path).unwrap()).unwrap();
+        assert_eq!(receipt["terminal"]["type"], "scheduled");
+        assert_eq!(receipt["applied"], false);
+        assert_eq!(journal.recover(&store).unwrap().replayed, vec![attempt]);
+        assert_eq!(
+            store.read().unwrap()[0]["apparitions"][0]["state"],
+            "published_or_scheduled"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_rename_failure_with_worker_stderr_keeps_typed_recoverable_receipt() {
+        let (root, app, store, publisher, calls) = publishing_boundary_fixture();
+        crate::store::fail_next_commit_for_test(crate::store::CommitFailureForTest::AfterRename);
+        let error = publisher
+            .publish(
+                &app,
+                PublishRequest {
+                    uuids: None,
+                    headless: true,
+                },
+                Arc::new(AtomicBool::new(false)),
+            )
+            .await
+            .unwrap_err();
+        let displayed = error.to_string();
+        match error {
+            Error::DurabilityUncertain { path, source } => {
+                assert_eq!(path, store.paths().json);
+                assert_eq!(
+                    source.to_string(),
+                    "injected post-rename directory sync failure"
+                );
+            }
+            other => panic!("expected typed uncertain commit, got {other:?}"),
+        }
+        assert!(displayed.contains("may be visible but is not confirmed durable"));
+        assert_eq!(
+            std::fs::read_to_string(calls)
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            ["00000000-0000-4000-8000-000000000001"]
+        );
+
+        let fresh_rows = store.read().unwrap();
+        assert_eq!(
+            fresh_rows[0]["apparitions"][0]["state"],
+            "published_or_scheduled"
+        );
+        assert_eq!(
+            fresh_rows[0]["apparitions"][0]["url"],
+            "https://example.invalid/work"
+        );
+        assert_eq!(fresh_rows[1]["apparitions"][0]["state"], "unpublished");
+
+        let journal = PublishJournal::new(root.path()).unwrap();
+        let attempt = std::fs::read_dir(root.path().join(".publicator/publish"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .file_name()
+            .into_string()
+            .unwrap();
+        let receipt_path = root
+            .path()
+            .join(".publicator/publish")
+            .join(&attempt)
+            .join("receipt.json");
+        let receipt: Value =
+            serde_json::from_slice(&std::fs::read(&receipt_path).unwrap()).unwrap();
+        assert_eq!(receipt["terminal"]["type"], "scheduled");
+        assert_eq!(receipt["applied"], false);
+        assert_eq!(journal.recover(&store).unwrap().replayed, vec![attempt]);
+        let receipt: Value =
+            serde_json::from_slice(&std::fs::read(&receipt_path).unwrap()).unwrap();
+        assert_eq!(receipt["applied"], true);
     }
 }

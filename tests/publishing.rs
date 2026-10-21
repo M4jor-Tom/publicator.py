@@ -95,6 +95,28 @@ fn fake_worker(f: &Fixture, body: &str) -> PathBuf {
     std::fs::set_permissions(&path, permissions).unwrap();
     path
 }
+fn proc_stat(pid: i32) -> Option<(char, i32, i32)> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, fields) = stat.rsplit_once(')')?;
+    let mut fields = fields.split_whitespace();
+    Some((
+        fields.next()?.chars().next()?,
+        fields.next()?.parse().ok()?,
+        fields.next()?.parse().ok()?,
+    ))
+}
+fn live_process_group_members(pgid: i32) -> Vec<(i32, char)> {
+    let mut members = std::fs::read_dir("/proc")
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_string_lossy().parse::<i32>().ok())
+        .filter_map(|pid| proc_stat(pid).map(|(state, _, group)| (pid, state, group)))
+        .filter(|(_, state, group)| *group == pgid && !matches!(state, 'Z' | 'X'))
+        .map(|(pid, state, _)| (pid, state))
+        .collect::<Vec<_>>();
+    members.sort_unstable();
+    members
+}
 #[tokio::test]
 async fn mixed_case_webp_is_converted_before_worker_start_submission() {
     let f = Fixture::new();
@@ -272,20 +294,65 @@ done"#,
 #[tokio::test]
 async fn shutdown_terminates_worker_descendants() {
     let f = configured_fixture();
-    let pid_file = f.path("descendant.pid");
+    let worker_info = f.path("worker.info");
+    let descendant_info = f.path("descendant.info");
+    let descendant_pid_file = f.path("descendant.pid");
+    let term_file = f.path("descendant.term");
+    let descendant = f.path("descendant.py");
+    std::fs::write(
+        &descendant,
+        r#"#!/usr/bin/env python3
+import os, signal, sys, time
+signal_path, info_path = sys.argv[1:]
+pid = os.getpid()
+def terminate(_signal, _frame):
+    with open(signal_path, "a") as log:
+        log.write(f"SIGTERM pid={pid}\n")
+    while True:
+        time.sleep(60)
+signal.signal(signal.SIGTERM, terminate)
+with open(info_path, "w") as info:
+    info.write(f"{pid} {os.getppid()} {os.getpgrp()}\n")
+while True:
+    time.sleep(60)
+"#,
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&descendant).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&descendant, permissions).unwrap();
     let worker = fake_worker(
         &f,
         &format!(
-            r#"sleep 60 >/dev/null 2>&1 &
+            r#"group=$(awk '{{print $5}}' "/proc/$$/stat")
+printf '%s %s\n' "$$" "$group" > '{}'
+trap 'while [ ! -e "{}" ]; do :; done; exit 0' TERM
+python3 '{}' '{}' '{}' >/dev/null 2>&1 &
 echo $! > '{}'
+while [ ! -s '{}' ]; do :; done
 while IFS= read -r line; do
-case "$line" in *'"type":"open"'*) echo '{{"protocol":1,"type":"ready"}}' ;;
-*'"type":"submit"'*) attempt=$(printf '%s' "$line" | sed -n 's/.*"attempt_id":"\([^"]*\)".*/\1/p'); uuid=$(printf '%s' "$line" | sed -n 's/.*"uuid":"\([^"]*\)".*/\1/p'); printf '{{"protocol":1,"type":"failed","attempt_id":"%s","uuid":"%s","error":"fake"}}\n' "$attempt" "$uuid";;
-*'"type":"close"'*) exit 0;; esac
+kind=$(printf '%s' "$line" | jq -r .type)
+case "$kind" in
+open) echo '{{"protocol":1,"type":"ready"}}' ;;
+submit)
+  uuid=$(printf '%s' "$line" | jq -r .uuid)
+  attempt=$(printf '%s' "$line" | jq -r .attempt_id)
+  printf '{{"protocol":1,"type":"failed","attempt_id":"%s","uuid":"%s","error":"fake"}}\n' "$attempt" "$uuid"
+  ;;
+close) while :; do :; done ;;
+esac
 done"#,
-            pid_file.display()
+            worker_info.display(),
+            term_file.display(),
+            descendant.display(),
+            term_file.display(),
+            descendant_info.display(),
+            descendant_pid_file.display(),
+            descendant_info.display()
         ),
     );
+
+    let started = std::time::Instant::now();
     let report = app(&f)
         .with_publisher(Publisher::new(worker, PathBuf::from("unused")))
         .publish(
@@ -297,17 +364,70 @@ done"#,
         )
         .await
         .unwrap();
+    let publish_elapsed = started.elapsed();
     assert_eq!(report.failed, 1);
-    let pid: i32 = std::fs::read_to_string(pid_file)
+
+    let descendant_pid: i32 = std::fs::read_to_string(&descendant_pid_file)
         .unwrap()
         .trim()
         .parse()
         .unwrap();
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok();
+    let first_descendant_status = proc_stat(descendant_pid);
+    let worker_fields = std::fs::read_to_string(&worker_info)
+        .unwrap()
+        .split_whitespace()
+        .map(|field| field.parse::<i32>().unwrap())
+        .collect::<Vec<_>>();
+    let [worker_pid, worker_group] = worker_fields.as_slice() else {
+        panic!("invalid worker PID/group witness: {worker_fields:?}");
+    };
+    let descendant_fields = std::fs::read_to_string(&descendant_info)
+        .unwrap()
+        .split_whitespace()
+        .map(|field| field.parse::<i32>().unwrap())
+        .collect::<Vec<_>>();
+    let [recorded_descendant, descendant_parent, descendant_group] = descendant_fields.as_slice()
+    else {
+        panic!("invalid descendant PID/group witness: {descendant_fields:?}");
+    };
+    assert_eq!(*recorded_descendant, descendant_pid);
+    assert_eq!(*descendant_parent, *worker_pid);
+    assert_eq!(*worker_group, *worker_pid);
+    assert_eq!(*descendant_group, *worker_group);
+    assert_ne!(
+        proc_stat(std::process::id() as i32).unwrap().2,
+        *worker_group
+    );
     assert!(
-        stat.as_ref()
-            .is_none_or(|stat| stat.split_whitespace().nth(2) == Some("Z")),
-        "descendant still running: {stat:?}"
+        std::fs::read_to_string(&term_file)
+            .unwrap()
+            .contains(&format!("SIGTERM pid={descendant_pid}"))
+    );
+    if let Some((_, _, group)) = first_descendant_status {
+        assert_eq!(group, *worker_group);
+    }
+
+    let first_live = live_process_group_members(*worker_group);
+    let wait_started = tokio::time::Instant::now();
+    let deadline = wait_started + Duration::from_secs(1);
+    let mut live = first_live.clone();
+    let mut terminal_descendant_status = proc_stat(descendant_pid);
+    while !live.is_empty()
+        || terminal_descendant_status
+            .is_some_and(|(state, _, group)| group == *worker_group && !matches!(state, 'Z' | 'X'))
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "owned worker group still has live processes after SIGKILL: {live:?}; descendant stat={terminal_descendant_status:?}; first post-return stat={first_descendant_status:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        live = live_process_group_members(*worker_group);
+        terminal_descendant_status = proc_stat(descendant_pid);
+    }
+    eprintln!(
+        "cleanup evidence: worker_pid={worker_pid} worker_pgid={worker_group} descendant_pid={descendant_pid} descendant_parent={descendant_parent} descendant_pgid={descendant_group} term_received=true first_post_return={first_descendant_status:?} first_live_group={first_live:?} terminal_descendant={terminal_descendant_status:?} terminal_live_group={live:?} publish_elapsed_ms={} post_signal_wait_ms={}",
+        publish_elapsed.as_millis(),
+        wait_started.elapsed().as_millis()
     );
 }
 #[tokio::test]
