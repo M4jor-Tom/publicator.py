@@ -47,7 +47,7 @@ impl Fixture {
     }
     pub fn image(&self, name: &str, width: u32, height: u32) -> std::path::PathBuf {
         let path = self.path(name);
-        std::process::Command::new("convert")
+        std::process::Command::new("magick")
             .arg("-size")
             .arg(format!("{width}x{height}"))
             .arg("xc:white")

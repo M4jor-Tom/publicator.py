@@ -192,7 +192,7 @@ pub fn ensure_thumb(path: &Path, cache: &Path, name: &str) -> Result<PathBuf> {
         .prefix(".thumb-")
         .suffix(&format!(".{extension}"))
         .tempfile_in(cache)?;
-    let status = Command::new("convert")
+    let status = Command::new("magick")
         .arg(path)
         .args(["-resize", "300x300>"])
         .arg(temp.path())
@@ -279,7 +279,7 @@ pub fn prepare_upload(source: &Path, attempt_dir: &Path) -> Result<PathBuf> {
         .prefix(".upload-")
         .suffix(".png")
         .tempfile_in(attempt_dir)?;
-    let status = Command::new("convert")
+    let status = Command::new("magick")
         .arg(source)
         .arg(temp.path())
         .status()?;

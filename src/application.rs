@@ -48,8 +48,10 @@ impl Application {
     pub fn begin_publishing(&self) -> Result<PublishingLease<'_>> {
         let _op = self.operation.lock().unwrap();
         let mut publishing = self.publishing.lock().unwrap();
-        if *publishing {
-            return Err(Error::Busy("publishing is already active".into()));
+        if *publishing || !self.busy.lock().unwrap().is_empty() {
+            return Err(Error::Busy(
+                "publishing or metadata generation is already active".into(),
+            ));
         }
         *publishing = true;
         Ok(PublishingLease { application: self })
@@ -68,6 +70,9 @@ impl Application {
         self.preflight_local(&request).await?;
         let _op = self.operation.lock().unwrap();
         let rows = self.store.read()?;
+        if *self.publishing.lock().unwrap() {
+            return Err(Error::Busy("publishing is already active".into()));
+        }
         let row = lookup(&rows, uuid)?;
         if phase(row)? != Phase::Scheduled {
             return Err(Error::InvalidState(
@@ -88,6 +93,9 @@ impl Application {
         self.preflight_local(request).await?;
         let _op = self.operation.lock().unwrap();
         let rows = self.store.read()?;
+        if *self.publishing.lock().unwrap() {
+            return Err(Error::Busy("publishing is already active".into()));
+        }
         let mut ids: Vec<String> = rows
             .iter()
             .filter(|row| {
