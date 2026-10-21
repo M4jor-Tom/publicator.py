@@ -145,6 +145,7 @@ pub enum Message {
         request_id: u64,
         model: ModelOption,
         selection: Option<String>,
+        batch_selection: Option<Vec<String>>,
         generate: bool,
         result: Result<LocalStatus, String>,
     },
@@ -154,6 +155,7 @@ struct LocalInstallConsent {
     request_id: u64,
     model: ModelOption,
     selection: Option<String>,
+    batch_selection: Option<Vec<String>>,
 }
 
 pub struct App {
@@ -182,6 +184,7 @@ pub struct App {
     busy_uuids: HashSet<String>,
     pending_generation: Option<String>,
     pending_generation_install: bool,
+    pending_generation_batch: Option<Vec<String>>,
     pending_approval: Option<String>,
     pending_return: Option<String>,
     pending_local_consent: Option<LocalInstallConsent>,
@@ -216,6 +219,7 @@ impl App {
             busy_uuids: HashSet::new(),
             pending_generation: None,
             pending_generation_install: false,
+            pending_generation_batch: None,
             pending_approval: None,
             pending_return: None,
             pending_local_consent: None,
@@ -292,7 +296,7 @@ impl App {
                 self.source = source;
                 self.local_fit = None;
                 if source == Source::Local {
-                    return self.local_fit_task(None, false);
+                    return self.local_fit_task(None, None, false);
                 }
             }
             Message::SelectSource(_) => {}
@@ -305,7 +309,7 @@ impl App {
                 self.model = model;
                 self.local_fit = None;
                 if self.source == Source::Local {
-                    return self.local_fit_task(None, false);
+                    return self.local_fit_task(None, None, false);
                 }
             }
             Message::SelectModel(_) => {}
@@ -320,7 +324,19 @@ impl App {
                     && self.source == Source::Local
                     && self.model == consent.model
                 {
-                    return self.confirm_generation(consent.selection);
+                    if let Some(batch_selection) = consent.batch_selection {
+                        if self.marked_generation_ids() == batch_selection {
+                            return self
+                                .confirm_generation(consent.selection, Some(batch_selection));
+                        }
+                        self.pending_local_consent = None;
+                        self.result = Some(
+                            "Marked batch changed while local install consent was pending".into(),
+                        );
+                        return Task::none();
+                    } else {
+                        return self.confirm_generation(consent.selection, None);
+                    }
                 }
             }
             Message::CancelLocalInstall => {
@@ -331,6 +347,7 @@ impl App {
                 request_id,
                 model,
                 selection,
+                batch_selection,
                 generate,
                 result,
             } => {
@@ -350,6 +367,7 @@ impl App {
                                 request_id,
                                 model,
                                 selection,
+                                batch_selection,
                             });
                         } else if generate && can_generate {
                             return self.continue_local_generation(selection);
@@ -404,6 +422,7 @@ impl App {
                             self.result = Some(format!("Save failed for {uuid}: {error}"));
                             self.pending_navigation = None;
                             self.pending_generation = None;
+                            self.pending_generation_batch = None;
                             self.pending_approval = None;
                             self.pending_return = None;
                             self.pending_close = false;
@@ -421,7 +440,12 @@ impl App {
                 }
                 if let Some(uuid) = self.pending_generation.take() {
                     let install = std::mem::take(&mut self.pending_generation_install);
-                    return self.start_generation((!uuid.is_empty()).then_some(uuid), install);
+                    let batch = self.pending_generation_batch.take();
+                    return self.start_generation(
+                        (!uuid.is_empty()).then_some(uuid),
+                        install,
+                        batch,
+                    );
                 }
                 if let Some(uuid) = self.pending_approval.take() {
                     return self.approve_metadata(uuid);
@@ -715,19 +739,25 @@ impl App {
         )
     }
 
-    fn confirm_generation(&mut self, selection: Option<String>) -> Task<Message> {
+    fn confirm_generation(
+        &mut self,
+        selection: Option<String>,
+        batch_selection: Option<Vec<String>>,
+    ) -> Task<Message> {
         if let Some(uuid) = selection.as_deref() {
             if self.drafts.get(uuid).is_some_and(Draft::is_dirty) {
                 self.pending_generation = Some(uuid.to_owned());
                 self.pending_generation_install = true;
+                self.pending_generation_batch = batch_selection;
                 return self.save_uuid(uuid);
             }
         } else if self.any_dirty() {
             self.pending_generation = Some(String::new());
             self.pending_generation_install = true;
+            self.pending_generation_batch = batch_selection;
             return self.save_next_dirty();
         }
-        self.start_generation(selection, true)
+        self.start_generation(selection, true, batch_selection)
     }
 
     fn request_generation(&mut self, uuid: String) -> Task<Message> {
@@ -735,33 +765,21 @@ impl App {
             return Task::none();
         }
         if self.source == Source::Local {
-            return self.local_fit_task(Some(uuid), true);
+            return self.local_fit_task(Some(uuid), None, true);
         }
         if self.drafts.get(&uuid).is_some_and(Draft::is_dirty) {
             self.pending_generation_install = false;
             self.pending_generation = Some(uuid.clone());
             return self.save_uuid(&uuid);
         }
-        self.start_generation(Some(uuid), false)
+        self.start_generation(Some(uuid), false, None)
     }
 
     fn request_batch_generation(&mut self) -> Task<Message> {
         if self.pending_local_consent.is_some() {
             return Task::none();
         }
-        let ids: Vec<_> = self
-            .publications
-            .as_deref()
-            .unwrap_or_default()
-            .iter()
-            .filter(|row| {
-                phase(row).ok() == Some(Phase::Scheduled)
-                    && ["title", "description"].iter().any(|key| {
-                        row.get(*key).and_then(Value::as_str) == Some(crate::model::GENERATE_MARKER)
-                    })
-            })
-            .filter_map(|row| row.get("uuid").and_then(Value::as_str).map(str::to_owned))
-            .collect();
+        let ids = self.marked_generation_ids();
         if ids
             .iter()
             .any(|id| self.drafts.get(id).is_some_and(Draft::is_dirty))
@@ -774,12 +792,32 @@ impl App {
             return Task::none();
         }
         if self.source == Source::Local {
-            return self.local_fit_task(None, true);
+            return self.local_fit_task(None, Some(ids), true);
         }
-        self.start_generation(None, false)
+        self.start_generation(None, false, None)
     }
 
-    fn local_fit_task(&mut self, selection: Option<String>, generate: bool) -> Task<Message> {
+    fn marked_generation_ids(&self) -> Vec<String> {
+        self.publications
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter(|row| {
+                phase(row).ok() == Some(Phase::Scheduled)
+                    && ["title", "description"].iter().any(|key| {
+                        row.get(*key).and_then(Value::as_str) == Some(crate::model::GENERATE_MARKER)
+                    })
+            })
+            .filter_map(|row| row.get("uuid").and_then(Value::as_str).map(str::to_owned))
+            .collect()
+    }
+
+    fn local_fit_task(
+        &mut self,
+        selection: Option<String>,
+        batch_selection: Option<Vec<String>>,
+        generate: bool,
+    ) -> Task<Message> {
         self.local_status_request = self.local_status_request.wrapping_add(1);
         let request_id = self.local_status_request;
         let application = self.application.clone();
@@ -797,6 +835,7 @@ impl App {
                 request_id,
                 model: message_model,
                 selection,
+                batch_selection,
                 generate,
                 result,
             },
@@ -815,13 +854,14 @@ impl App {
             self.pending_generation_install = false;
             return self.save_next_dirty();
         }
-        self.start_generation(selection, false)
+        self.start_generation(selection, false, None)
     }
 
     fn start_generation(
         &mut self,
         selection: Option<String>,
         install_missing: bool,
+        batch_selection: Option<Vec<String>>,
     ) -> Task<Message> {
         let request = GenerationRequest {
             source: self.source,
@@ -858,7 +898,14 @@ impl App {
                         .await
                         .map(|_| format!("Generated metadata for {uuid}"))
                 } else {
-                    application.generate_marked(&request).await.map(|report| {
+                    let generation = if let Some(expected) = batch_selection.as_deref() {
+                        application
+                            .generate_marked_expected(&request, expected)
+                            .await
+                    } else {
+                        application.generate_marked(&request).await
+                    };
+                    generation.map(|report| {
                         format!("Generated {}; {} failed", report.succeeded, report.failed)
                     })
                 }
@@ -1016,6 +1063,7 @@ mod tests {
                 busy_uuids: HashSet::new(),
                 pending_generation: None,
                 pending_generation_install: false,
+                pending_generation_batch: None,
                 pending_approval: None,
                 pending_return: None,
                 pending_local_consent: None,

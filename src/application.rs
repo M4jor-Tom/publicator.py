@@ -103,6 +103,23 @@ impl Application {
         self.generate_accepted(uuid, image, &request).await
     }
     pub async fn generate_marked(&self, request: &GenerationRequest) -> Result<BatchReport> {
+        self.generate_marked_inner(request, None).await
+    }
+
+    pub async fn generate_marked_expected(
+        &self,
+        request: &GenerationRequest,
+        expected_ids: &[String],
+    ) -> Result<BatchReport> {
+        self.generate_marked_inner(request, Some(expected_ids))
+            .await
+    }
+
+    async fn generate_marked_inner(
+        &self,
+        request: &GenerationRequest,
+        expected_ids: Option<&[String]>,
+    ) -> Result<BatchReport> {
         validate_request(request)?;
         let _op = self.operation.lock().unwrap();
         let rows = self.store.read()?;
@@ -119,6 +136,11 @@ impl Application {
             })
             .filter_map(|row| row.get("uuid").and_then(Value::as_str).map(str::to_owned))
             .collect();
+        if expected_ids.is_some_and(|expected| expected != ids) {
+            return Err(Error::InvalidState(
+                "marked batch changed while local install consent was pending".into(),
+            ));
+        }
         ids = batch_ids(ids, request.source);
         if ids.is_empty() {
             return Ok(BatchReport::default());

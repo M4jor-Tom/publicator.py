@@ -312,6 +312,64 @@ async fn missing_good_model_requires_confirmation_and_only_then_pulls() {
 }
 
 #[tokio::test]
+async fn batch_local_install_consent_rejects_a_changed_eligible_set() {
+    let f = Fixture::new();
+    f.image("1.png", 4, 4);
+    f.write(json!([marker_row(1), marker_row(2)]));
+    let before = std::fs::read(&f.store.paths().json).unwrap();
+    let tags = json!({"models": []});
+    let server = common::http::Server::start(vec![
+        ollama_reply("/api/tags", tags.clone()),
+        ollama_reply("/api/tags", tags.clone()),
+        ollama_reply("/api/tags", tags.clone()),
+        ollama_reply("/api/pull", json!({"status":"success"})),
+        ollama_reply(
+            "/api/chat",
+            json!({"message":{"content":json!({"title":"Should not run","description":"Changed batch."}).to_string()}}),
+        ),
+    ]);
+    let (mut app, _) = local_fixture_app(
+        &f,
+        fake_llmfit(&f, "Good", &["Fits host"]),
+        server.url().into(),
+    );
+    let selected = run_task(app.update(Message::SelectSource(Source::Local))).await;
+    let _ = app.update(selected);
+    let checked = run_task(app.update(Message::GenerateMarked)).await;
+    let _ = app.update(checked);
+    assert!(app.local_install_consent_pending());
+
+    // Confirmation creates an asynchronous Application task. Change eligibility
+    // before polling it to exercise the admission boundary, not just UI state.
+    let confirm = app.update(Message::ConfirmLocalInstall);
+    f.store
+        .mutate(|rows| {
+            rows[0]["title"] = json!("Manual title");
+            rows[0]["description"] = json!("Manual description");
+            Ok(())
+        })
+        .unwrap();
+    let saved = std::fs::read(&f.store.paths().json).unwrap();
+    assert_ne!(saved, before);
+    assert_eq!(f.read()[0]["title"], "Manual title");
+    let finished = run_task(confirm).await;
+    assert!(matches!(
+        finished,
+        Message::GenerationFinished {
+            result: Err(ref error),
+            ..
+        } if error.contains("marked batch changed")
+    ));
+    let _ = app.update(finished);
+    assert!(!app.local_install_consent_pending());
+    assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), saved);
+    assert_eq!(f.read()[0]["title"], "Manual title");
+    let calls = server.requests();
+    assert!(!calls.iter().any(|call| call["path"] == "/api/pull"));
+    assert!(!calls.iter().any(|call| call["path"] == "/api/chat"));
+}
+
+#[tokio::test]
 async fn cancel_missing_model_consent_keeps_saved_bytes_and_never_pulls_or_chats() {
     let f = Fixture::new();
     f.write(json!([marker_row(1)]));
