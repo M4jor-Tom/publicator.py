@@ -83,6 +83,10 @@
         buildInputs = [ pkgs.openssl ];
         doCheck = false;
       };
+      desktopRuntime = [
+        pkgs.libxkbcommon pkgs.wayland
+        pkgs.libx11 pkgs.libxcursor pkgs.libxi pkgs.libxrandr pkgs.libxinerama pkgs.libxext
+      ];
       rustDesktop = pkgs.rustPlatform.buildRustPackage {
         pname = "publicator-rust-desktop";
         version = "0.1.0";
@@ -90,7 +94,7 @@
         cargoLock.lockFile = ./Cargo.lock;
         cargoBuildFlags = [ "--features" "desktop" "--bin" "publicator-ui" ];
         nativeBuildInputs = [ pkgs.pkg-config ];
-        buildInputs = [ pkgs.openssl pkgs.libxkbcommon pkgs.wayland pkgs.libGL ];
+        buildInputs = [ pkgs.openssl ] ++ desktopRuntime;
         doCheck = false;
       };
       rustWorker = pkgs.writeShellScriptBin "publicator-da-worker" ''
@@ -145,7 +149,10 @@
           program = "${pkgs.writeShellApplication {
             name = "rust-ui";
             runtimeInputs = [ rustDesktop python pkgs.git pkgs.imagemagick pkgs.ollama pkgs.llmfit ];
-            text = ''exec ${rustDesktop}/bin/publicator-ui "$@"'';
+            text = ''
+              export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath desktopRuntime}
+              exec ${rustDesktop}/bin/publicator-ui "$@"
+            '';
           }}/bin/rust-ui";
         };
         # `claude` on PATH so llm-claude-cli can shell out for AI metadata

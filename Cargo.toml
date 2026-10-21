@@ -18,7 +18,7 @@ path = "tests/ui_drafts.rs"
 required-features = ["desktop"]
 
 [dependencies]
-iced = { version = "=0.14.0", optional = true, default-features = false, features = ["wgpu", "tiny-skia", "x11", "wayland", "tokio"] }
+iced = { version = "=0.14.0", optional = true, default-features = false, features = ["tiny-skia", "x11", "wayland", "tokio"] }
 chrono = "0.4"
 chrono-tz = "0.10"
 clap = { version = "4", features = ["derive"] }
