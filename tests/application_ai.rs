@@ -55,6 +55,36 @@ fn client(endpoint: String) -> MetadataClient {
 }
 
 #[tokio::test]
+async fn empty_local_marked_batch_is_noop_without_model_or_service_setup() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    f.write(json!([row(1, "SCHEDULED")]));
+    let marker = f.path("llmfit-called");
+    let tool = f.path("llmfit");
+    std::fs::write(
+        &tool,
+        format!(
+            "#!/bin/sh\ntouch '{}'\nprintf '%s' '{{\"models\":[]}}'\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let app = Application::new(
+        Arc::new(f.store.clone()),
+        local_client("http://127.0.0.1:1".into(), &tool),
+        || 1_700_000_000,
+    );
+    let report = app.generate_marked(&request(Source::Local)).await.unwrap();
+    assert_eq!(
+        (report.succeeded, report.failed, report.results.len()),
+        (0, 0, 0)
+    );
+    assert!(!marker.exists());
+    assert_eq!(f.read()[0], row(1, "SCHEDULED"));
+}
+
+#[tokio::test]
 async fn generation_lease_excludes_duplicate_and_same_uuid_edits_but_not_other_work() {
     let f = Fixture::new();
     f.image("1.png", 4, 4);

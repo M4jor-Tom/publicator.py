@@ -223,7 +223,7 @@ async fn run() -> Result<()> {
                     eprint!("Install {}? [Y/n] ", model.ollama_name);
                     let mut answer = String::new();
                     let read = io::stdin().read_line(&mut answer)?;
-                    if read != 0 && answer.trim().to_lowercase() != "n" {
+                    if parse_install_consent(&answer, read) {
                         true
                     } else {
                         return Err(Error::Provider("local model installation declined".into()));
@@ -397,6 +397,30 @@ async fn run() -> Result<()> {
     }
     Ok(())
 }
+fn parse_install_consent(answer: &str, bytes_read: usize) -> bool {
+    bytes_read > 0
+        && matches!(
+            answer.trim().to_ascii_lowercase().as_str(),
+            "" | "y" | "yes"
+        )
+}
+
+#[cfg(test)]
+mod consent_tests {
+    use super::parse_install_consent;
+
+    #[test]
+    fn only_enter_yes_or_y_authorize_model_installation() {
+        for answer in ["\n", "y", "Y", "yes", "YES"] {
+            assert!(parse_install_consent(answer, answer.len()), "{answer:?}");
+        }
+        for answer in ["n", "N", "no", "NO", "maybe", "anything"] {
+            assert!(!parse_install_consent(answer, answer.len()), "{answer:?}");
+        }
+        assert!(!parse_install_consent("", 0));
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     if let Err(error) = run().await {

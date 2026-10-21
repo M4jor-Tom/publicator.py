@@ -95,7 +95,6 @@ impl Application {
     }
     pub async fn generate_marked(&self, request: &GenerationRequest) -> Result<BatchReport> {
         validate_request(request)?;
-        self.preflight_local(request).await?;
         let _op = self.operation.lock().unwrap();
         let rows = self.store.read()?;
         if *self.publishing.lock().unwrap() {
@@ -112,12 +111,16 @@ impl Application {
             .filter_map(|row| row.get("uuid").and_then(Value::as_str).map(str::to_owned))
             .collect();
         ids = batch_ids(ids, request.source);
+        if ids.is_empty() {
+            return Ok(BatchReport::default());
+        }
         self.reserve(ids.clone())?;
         drop(_op);
         let _lease = Lease {
             busy: &self.busy,
             ids: ids.clone(),
         };
+        self.preflight_local(request).await?;
         let mut report = BatchReport::default();
         let mut preferred: Option<String> = None;
         for uuid in ids {
