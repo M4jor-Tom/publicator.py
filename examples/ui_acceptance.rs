@@ -37,6 +37,7 @@ struct FixtureSettings {
     openrouter_failures: usize,
     local_failures: usize,
     worker_outcomes: Vec<String>,
+    worker_gate: bool,
     tiers: Vec<String>,
     galleries: Vec<String>,
 }
@@ -53,6 +54,7 @@ impl Default for FixtureSettings {
             openrouter_failures: 0,
             local_failures: 0,
             worker_outcomes: vec!["failed".into(), "scheduled".into(), "unknown".into()],
+            worker_gate: false,
             tiers: vec!["Fixture Basic".into(), "Fixture Premium".into()],
             galleries: vec!["Fixture Gallery A".into(), "Fixture Gallery B".into()],
         }
@@ -208,8 +210,9 @@ fn write_worker(path: &Path) {
         path,
         r#"#!/bin/sh
 if [ "$1" = "--check-steps" ]; then exit 0; fi
-settings="$(dirname -- "$0")/native-fixture.json"
-calls="$(dirname -- "$0")/worker-calls.jsonl"
+dir=$(dirname -- "$0")
+settings="$dir/native-fixture.json"
+calls="$dir/worker-calls.jsonl"
 while IFS= read -r line; do
   kind=$(printf '%s' "$line" | jq -r .type)
   case "$kind" in
@@ -220,13 +223,25 @@ while IFS= read -r line; do
       attempt=$(printf '%s' "$line" | jq -r .attempt_id)
       uuid=$(printf '%s' "$line" | jq -r .uuid)
       outcome=$(jq -r --argjson count "$count" '.worker_outcomes[$count - 1] // "unknown"' "$settings")
+      if [ "$(jq -r '.worker_gate // false' "$settings")" = true ]; then
+        release="$dir/worker-$count-release"
+        printf '%s\n' "$$" > "$dir/worker-$count-pgid"
+        touch "$dir/worker-$count-started"
+        attempts=0
+        # A missing release must not strand the development fixture worker forever.
+        while [ ! -e "$release" ] && [ "$attempts" -lt 1200 ]; do
+          sleep 0.05
+          attempts=$((attempts + 1))
+        done
+        if [ ! -e "$release" ]; then outcome=unknown; fi
+      fi
       case "$outcome" in
         failed) printf '{"protocol":1,"type":"failed","attempt_id":"%s","uuid":"%s","error":"fixture failure"}\n' "$attempt" "$uuid" ;;
         scheduled) printf '{"protocol":1,"type":"scheduled","attempt_id":"%s","uuid":"%s","url":"https://example.test/fixture/%s"}\n' "$attempt" "$uuid" "$uuid" ;;
         *) printf '{"protocol":1,"type":"unknown","attempt_id":"%s","uuid":"%s","error":"disposable fixture ambiguity"}\n' "$attempt" "$uuid" ;;
       esac
       ;;
-    close) exit 0 ;;
+    close) touch "$dir/worker-cleaned"; exit 0 ;;
   esac
 done
 "#,
@@ -557,6 +572,59 @@ mod tests {
             serde_json::from_str::<Value>(&record).unwrap()["model"],
             "openrouter/fake-model"
         );
+    }
+
+    #[test]
+    fn fixture_worker_gate_holds_submit_until_explicit_release_and_records_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("native-fixture.json"),
+            serde_json::json!({
+                "worker_gate": true,
+                "worker_outcomes": ["scheduled"]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let worker = dir.path().join("worker.sh");
+        write_worker(&worker);
+        let mut child = Command::new(&worker)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        let mut stdout = BufReader::new(child.stdout.take().unwrap());
+        writeln!(stdin, "{{\"type\":\"open\"}}").unwrap();
+        let mut ready = String::new();
+        stdout.read_line(&mut ready).unwrap();
+        assert!(ready.contains("ready"));
+        writeln!(
+            stdin,
+            "{{\"type\":\"submit\",\"attempt_id\":\"attempt\",\"uuid\":\"uuid\"}}"
+        )
+        .unwrap();
+
+        let started = dir.path().join("worker-1-started");
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !started.exists() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(started.exists(), "submit reached the fixture gate");
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "worker remains active at gate"
+        );
+        assert!(!dir.path().join("worker-cleaned").exists());
+
+        fs::write(dir.path().join("worker-1-release"), "release").unwrap();
+        let mut terminal = String::new();
+        stdout.read_line(&mut terminal).unwrap();
+        assert!(terminal.contains("scheduled"));
+        writeln!(stdin, "{{\"type\":\"close\"}}").unwrap();
+        drop(stdin);
+        assert!(child.wait().unwrap().success());
+        assert!(dir.path().join("worker-cleaned").exists());
     }
 
     #[test]
