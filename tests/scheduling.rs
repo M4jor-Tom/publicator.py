@@ -146,6 +146,26 @@ fn repack_keeps_explicit_overcapacity_pins_and_custom_profile_mismatch() {
 }
 
 #[test]
+fn repack_preserves_existing_timestamp_for_automatic_unknown_profile() {
+    let cfg =
+        config("timezone='UTC'\n[[profiles]]\nname='default'\nday='tuesday'\nhour=20\nper_slot=1");
+    let existing = epoch("2026-01-13T20:00:00Z");
+    let mut rows: Publications = vec![json!({
+        "state":"PICKED",
+        "scheduleProfile":"removed-profile",
+        "scheduleIsManual":false,
+        "apparitionTimestampIfDifferentThanSubmission":existing
+    })];
+    repack(&mut rows, &cfg, epoch("2026-01-01T00:00:00Z")).unwrap();
+    assert_eq!(rows[0]["scheduleProfile"], "removed-profile");
+    assert_eq!(rows[0]["scheduleIsManual"], false);
+    assert_eq!(
+        rows[0]["apparitionTimestampIfDifferentThanSubmission"],
+        existing
+    );
+}
+
+#[test]
 fn repack_clears_automatic_suggestions_after_the_52_slot_horizon() {
     let cfg =
         config("timezone='UTC'\n[[profiles]]\nname='default'\nday='tuesday'\nhour=20\nper_slot=1");

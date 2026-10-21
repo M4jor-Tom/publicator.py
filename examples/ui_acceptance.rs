@@ -202,7 +202,7 @@ fn calendar_fixture(dir: &Path) -> (Vec<Value>, Config) {
     git(&["config", "user.name", "Calendar Fixture"]);
     git(&["config", "user.email", "calendar@example.invalid"]);
     git(&["add", "--all"]);
-    git(&["commit", "-qm", "archive disposable calendar prompts"]);
+    commit_prompt_archive_if_changed(&archive).expect("commit disposable prompt archive");
     let exact_digest = PromptGrammar::compile(&prompt_config)
         .unwrap()
         .digest(exact_text.as_bytes())
@@ -404,6 +404,39 @@ fn calendar_publication(
         "files": [{"basename": basename, "sha512sum": path.map(|path| publicator::images::file_sha512(path).unwrap()).unwrap_or_else(|| "0".repeat(128))}],
         "apparitions": apparitions,
     })
+}
+
+fn commit_prompt_archive_if_changed(archive: &Path) -> Result<(), String> {
+    let diff = std::process::Command::new("git")
+        .arg("-C")
+        .arg(archive)
+        .args(["diff", "--cached", "--quiet", "--exit-code"])
+        .output()
+        .map_err(|error| format!("check staged prompt archive changes: {error}"))?;
+    match diff.status.code() {
+        Some(0) => Ok(()),
+        Some(1) => {
+            let commit = std::process::Command::new("git")
+                .arg("-C")
+                .arg(archive)
+                .args(["commit", "-qm", "archive disposable calendar prompts"])
+                .output()
+                .map_err(|error| format!("commit prompt archive changes: {error}"))?;
+            if commit.status.success() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "commit prompt archive changes failed: {}",
+                    String::from_utf8_lossy(&commit.stderr)
+                ))
+            }
+        }
+        code => Err(format!(
+            "check staged prompt archive changes exited {:?}: {}",
+            code,
+            String::from_utf8_lossy(&diff.stderr)
+        )),
+    }
 }
 
 fn initialize_publications_if_absent(path: &Path, rows: &[Value]) -> std::io::Result<()> {
@@ -891,6 +924,66 @@ mod tests {
             "historical-platform"
         );
         assert_eq!(rows[2]["apparitions"][1]["state"], "unpublished");
+    }
+
+    #[test]
+    fn calendar_fixture_reinitialization_preserves_saved_publication_manifest_and_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let (rows, _) = calendar_fixture(dir.path());
+        let publications = dir.path().join("publications.json");
+        initialize_publications_if_absent(&publications, &rows).unwrap();
+        let saved = serde_json::json!({"human_edit":"keep me"});
+        fs::write(&publications, serde_json::to_vec(&saved).unwrap()).unwrap();
+        let manifest = fs::read(dir.path().join("calendar-fixture-manifest.json")).unwrap();
+        let archive = dir.path().join("prompt-archive");
+        let head = Command::new("git")
+            .arg("-C")
+            .arg(&archive)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        assert!(head.status.success());
+        let archive_status = Command::new("git")
+            .arg("-C")
+            .arg(&archive)
+            .args(["status", "--porcelain"])
+            .output()
+            .unwrap();
+        assert!(archive_status.status.success());
+        assert!(archive_status.stdout.is_empty());
+
+        let (second_rows, _) = calendar_fixture(dir.path());
+        initialize_publications_if_absent(&publications, &second_rows).unwrap();
+        assert_eq!(
+            fs::read(&publications).unwrap(),
+            serde_json::to_vec(&saved).unwrap()
+        );
+        assert_eq!(
+            fs::read(dir.path().join("calendar-fixture-manifest.json")).unwrap(),
+            manifest
+        );
+        let second_head = Command::new("git")
+            .arg("-C")
+            .arg(&archive)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        assert!(second_head.status.success());
+        assert_eq!(second_head.stdout, head.stdout);
+        let second_status = Command::new("git")
+            .arg("-C")
+            .arg(&archive)
+            .args(["status", "--porcelain"])
+            .output()
+            .unwrap();
+        assert!(second_status.status.success());
+        assert_eq!(second_status.stdout, archive_status.stdout);
+    }
+
+    #[test]
+    fn prompt_archive_setup_reports_git_errors_instead_of_treating_them_as_no_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(commit_prompt_archive_if_changed(dir.path()).is_err());
     }
 
     #[test]

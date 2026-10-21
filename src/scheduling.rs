@@ -258,6 +258,10 @@ pub fn repack(rows: &mut Publications, config: &Config, now: i64) -> Result<()> 
     for row in rows.iter().filter(|row| {
         phase(row).ok() != Some(Phase::Picked)
             || row.get("scheduleIsManual").and_then(JsonValue::as_bool) == Some(true)
+            || row
+                .get("scheduleProfile")
+                .and_then(JsonValue::as_str)
+                .is_some_and(|name| !all_profiles.iter().any(|profile| profile.name == name))
     }) {
         if let Some(ts) = effective_schedule(row) {
             *occupancy.entry(ts).or_insert(0) += 1;
@@ -280,9 +284,6 @@ pub fn repack(rows: &mut Publications, config: &Config, now: i64) -> Result<()> 
                 None
             }
         }) else {
-            row.as_object_mut()
-                .unwrap()
-                .remove("apparitionTimestampIfDifferentThanSubmission");
             continue;
         };
         if requested.is_none() {
