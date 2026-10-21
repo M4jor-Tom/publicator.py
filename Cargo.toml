@@ -8,6 +8,7 @@ chrono = "0.4"
 chrono-tz = "0.10"
 clap = { version = "4", features = ["derive"] }
 fs2 = "0.4"
+libc = "0.2"
 jsonschema = "0.29"
 openssl = "0.10"
 pcre2 = "0.2"

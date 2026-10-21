@@ -104,11 +104,34 @@ impl Publisher {
             let image = index_by_basename(&store.paths().data_dir)?
                 .remove(basename)
                 .ok_or_else(|| Error::NotFound(format!("artwork {basename}")))?;
+            if image
+                .extension()
+                .is_some_and(|ext| ext.to_string_lossy().eq_ignore_ascii_case("webp"))
+            {
+                return Err(Error::Validation(
+                    "WebP is not accepted by DeviantArt".into(),
+                ));
+            }
             let job = make_job(&approved, image)?;
             job_command_valid(&job)?;
             batch.push((approved, job));
         }
         let mut child = start_worker(&self.worker)?;
+        let diagnostics = child.stderr.take().map(|mut stderr| {
+            tokio::spawn(async move {
+                let mut retained = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let count = match stderr.read(&mut chunk).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(count) => count,
+                    };
+                    let remaining = 8192usize.saturating_sub(retained.len());
+                    retained.extend_from_slice(&chunk[..count.min(remaining)]);
+                }
+                retained
+            })
+        });
         let result = self
             .run_batch(
                 &mut child,
@@ -120,7 +143,29 @@ impl Publisher {
             )
             .await;
         shutdown(&mut child).await;
-        result
+        let diagnostics = match diagnostics {
+            Some(task) => task.await.unwrap_or_default(),
+            None => Vec::new(),
+        };
+        if diagnostics.is_empty() {
+            return result;
+        }
+        let detail = String::from_utf8_lossy(&diagnostics);
+        match result {
+            Ok(mut report) => {
+                let diagnostic = format!("worker stderr: {}", detail.trim());
+                report.error = Some(
+                    report
+                        .error
+                        .map_or(diagnostic.clone(), |error| format!("{error}; {diagnostic}")),
+                );
+                Ok(report)
+            }
+            Err(error) => Err(Error::Protocol(format!(
+                "{error}; worker stderr: {}",
+                detail.trim()
+            ))),
+        }
     }
     async fn run_batch(
         &self,
@@ -308,7 +353,7 @@ fn start_worker(path: &Path) -> Result<Child> {
     let mut c = Command::new(path);
     c.stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     #[cfg(unix)]
     c.process_group(0);
     Ok(c.spawn()?)
@@ -373,6 +418,16 @@ async fn read_matching_terminal(
     }
 }
 async fn shutdown(child: &mut Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        // The child is the process-group leader; signal the group so browser descendants
+        // receive the same bounded graceful-then-forced cleanup.
+        unsafe { libc::kill(-(pid as i32), libc::SIGTERM) };
+        let _ = tokio::time::timeout(CLEANUP_TIMEOUT, child.wait()).await;
+        unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+        let _ = child.wait().await;
+        return;
+    }
     let _ = tokio::time::timeout(CLEANUP_TIMEOUT, child.wait()).await;
     if child.try_wait().ok().flatten().is_none() {
         let _ = child.start_kill();

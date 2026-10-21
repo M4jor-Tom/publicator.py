@@ -1077,6 +1077,7 @@ dependencies = [
  "clap",
  "fs2",
  "jsonschema",
+ "libc",
  "openssl",
  "pcre2",
  "reqwest",
