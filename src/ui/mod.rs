@@ -1,7 +1,10 @@
 pub mod drafts;
+pub mod pick;
+pub mod schedule;
 
 use crate::{
     application::Application as CoreApplication,
+    images::Candidate,
     model::{Phase, phase},
     workflow::{self, MetadataPatch},
 };
@@ -77,6 +80,39 @@ pub enum Message {
     KeepEditing,
     Refresh,
     RetrySave,
+    Search,
+    SearchLimit(usize),
+    SearchPath(String),
+    SearchFinished(Result<Vec<Candidate>, String>),
+    PreviewFinished {
+        source: std::path::PathBuf,
+        result: Result<std::path::PathBuf, String>,
+    },
+    Pick(Candidate),
+    PickFinished(Result<(), String>),
+    AskDelete(Candidate),
+    ConfirmDelete,
+    CancelDelete,
+    WorkflowFinished {
+        message: String,
+        result: Result<(), String>,
+    },
+    CustomDate {
+        uuid: String,
+        value: String,
+    },
+    CustomTime {
+        uuid: String,
+        value: String,
+    },
+    SaveCustomDate(String),
+    PresetDate {
+        uuid: String,
+        profile: String,
+    },
+    SuggestedDate(String),
+    ApproveDate(String),
+    ReturnToPick(String),
 }
 
 pub struct App {
@@ -92,6 +128,12 @@ pub struct App {
     pending_navigation: Option<Tab>,
     pending_close: bool,
     started: Instant,
+    search_limit: usize,
+    search_paths: Vec<String>,
+    candidates: Vec<Candidate>,
+    previews: HashMap<std::path::PathBuf, Option<Result<std::path::PathBuf, String>>>,
+    pending_delete: Option<Candidate>,
+    custom_dates: HashMap<String, (String, String)>,
 }
 
 impl App {
@@ -109,8 +151,31 @@ impl App {
             pending_navigation: None,
             pending_close: false,
             started: Instant::now(),
+            search_limit: 25,
+            search_paths: application.store().config().publicable.clone(),
+            candidates: Vec::new(),
+            previews: HashMap::new(),
+            pending_delete: None,
+            custom_dates: HashMap::new(),
         };
         (app, Self::load_task(application))
+    }
+
+    pub fn from_application(
+        application: Arc<CoreApplication>,
+        options: UiOptions,
+    ) -> (Self, Task<Message>) {
+        Self::new(application, options)
+    }
+
+    pub fn search_limit(&self) -> usize {
+        self.search_limit
+    }
+    pub fn search_paths(&self) -> &[String] {
+        &self.search_paths
+    }
+    pub fn current_tab(&self) -> Tab {
+        self.active_tab
     }
 
     fn load_task(application: Arc<CoreApplication>) -> Task<Message> {
@@ -128,7 +193,7 @@ impl App {
         )
     }
 
-    fn update(&mut self, message: Message) -> Task<Message> {
+    pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::LoadFinished(Ok(rows)) => {
                 self.publications = Some(rows);
@@ -214,6 +279,102 @@ impl App {
                 }
             }
             Message::RetrySave => return self.save_next_dirty(),
+            Message::SearchLimit(limit) => {
+                if [0, 25, 50, 75, 100].contains(&limit) {
+                    self.search_limit = limit;
+                }
+            }
+            Message::SearchPath(path) => {
+                if self.search_paths.contains(&path) {
+                    self.search_paths.retain(|p| p != &path);
+                } else if self.application.store().config().publicable.contains(&path) {
+                    self.search_paths.push(path);
+                }
+            }
+            Message::Search => {
+                if self.search_authorized {
+                    return pick::search_task(self);
+                }
+            }
+            Message::SearchFinished(Ok(candidates)) => {
+                self.candidates = candidates;
+                self.pending_delete = None;
+                self.previews.clear();
+                self.result = Some(
+                    if self.candidates.len() == self.search_limit && self.search_limit > 0 {
+                        format!(
+                            "Found at least {} candidates; search limit reached",
+                            self.search_limit
+                        )
+                    } else {
+                        format!("Found {} candidates", self.candidates.len())
+                    },
+                );
+                return pick::preview_tasks(self);
+            }
+            Message::PreviewFinished { source, result } => {
+                self.previews.insert(source, Some(result));
+            }
+            Message::SearchFinished(Err(error)) => {
+                self.result = Some(format!("Search failed: {error}"))
+            }
+            Message::Pick(candidate) => return pick::pick_task(self, candidate),
+            Message::PickFinished(Ok(())) => {
+                self.busy = false;
+                self.active_tab = Tab::Schedule;
+                self.result = Some("Picked candidate".into());
+                return Self::load_task(self.application.clone());
+            }
+            Message::PickFinished(Err(error)) => {
+                self.busy = false;
+                self.result = Some(format!("Pick failed: {error}"));
+            }
+            Message::AskDelete(candidate) => {
+                if self
+                    .candidates
+                    .iter()
+                    .any(|authorized| authorized == &candidate)
+                {
+                    self.pending_delete = Some(candidate);
+                }
+            }
+            Message::ConfirmDelete => return pick::delete_task(self),
+            Message::CancelDelete => self.pending_delete = None,
+            Message::WorkflowFinished { message, result } => {
+                self.busy = false;
+                match result {
+                    Ok(()) => {
+                        self.result = Some(message);
+                        return Self::load_task(self.application.clone());
+                    }
+                    Err(error) => self.result = Some(format!("{message}: {error}")),
+                }
+            }
+            Message::CustomDate { uuid, value } => {
+                let initial = self
+                    .publication(&uuid)
+                    .map(|row| schedule::date_parts(self, row))
+                    .unwrap_or_default();
+                let (date, _) = self.custom_dates.entry(uuid).or_insert(initial);
+                *date = value;
+            }
+            Message::CustomTime { uuid, value } => {
+                let initial = self
+                    .publication(&uuid)
+                    .map(|row| schedule::date_parts(self, row))
+                    .unwrap_or_default();
+                let (_, time) = self.custom_dates.entry(uuid).or_insert(initial);
+                *time = value;
+            }
+            Message::SaveCustomDate(uuid) => return schedule::custom_task(self, uuid),
+            Message::PresetDate { uuid, profile } => {
+                return schedule::date_task(self, uuid, workflow::DateEdit::Preset(profile));
+            }
+            Message::SuggestedDate(uuid) => {
+                return schedule::date_task(self, uuid, workflow::DateEdit::Suggested);
+            }
+            Message::ApproveDate(uuid) => return schedule::approve_task(self, uuid),
+            Message::ReturnToPick(uuid) => return schedule::return_task(self, uuid),
         }
         Task::none()
     }
@@ -331,6 +492,12 @@ impl App {
             text(format!("{} publications", rows.len()))
         ]
         .spacing(16);
+        if self.active_tab == Tab::Pick {
+            content = content.push(pick::view(self));
+        }
+        if self.active_tab == Tab::Schedule {
+            content = content.push(schedule::view(self));
+        }
         if self.active_tab == Tab::Describe {
             let cards = rows.iter().filter_map(|row| {
                 if phase(row).ok() != Some(Phase::Scheduled) {
@@ -443,6 +610,12 @@ mod tests {
                 pending_navigation: None,
                 pending_close: false,
                 started: Instant::now(),
+                search_limit: 25,
+                search_paths: Vec::new(),
+                candidates: Vec::new(),
+                previews: HashMap::new(),
+                pending_delete: None,
+                custom_dates: HashMap::new(),
             },
             root,
         )

@@ -5,7 +5,7 @@ edition = "2024"
 
 [features]
 default = []
-desktop = ["dep:iced", "tokio/rt-multi-thread"]
+desktop = ["dep:iced", "dep:image", "iced/image-without-codecs", "tokio/rt-multi-thread"]
 
 [[bin]]
 name = "publicator-ui"
@@ -17,8 +17,14 @@ name = "ui_drafts"
 path = "tests/ui_drafts.rs"
 required-features = ["desktop"]
 
+[[test]]
+name = "ui_workflow"
+path = "tests/ui_workflow.rs"
+required-features = ["desktop"]
+
 [dependencies]
-iced = { version = "=0.14.0", optional = true, default-features = false, features = ["tiny-skia", "x11", "wayland", "tokio"] }
+iced = { version = "=0.14.0", optional = true, default-features = false, features = ["tiny-skia", "x11", "wayland", "tokio", "image-without-codecs"] }
+image = { version = "=0.25.10", optional = true, default-features = false, features = ["bmp", "gif", "jpeg", "png", "tiff", "webp"] }
 chrono = "0.4"
 chrono-tz = "0.10"
 clap = { version = "4", features = ["derive"] }
