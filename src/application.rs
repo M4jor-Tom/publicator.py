@@ -125,6 +125,9 @@ impl Application {
                     .await;
                 match generated {
                     Ok(g) => {
+                        if preferred.is_none() {
+                            preferred = Some(g.model_used.clone());
+                        }
                         workflow::merge_generated_markers(
                             &self.store,
                             &uuid,
@@ -133,7 +136,6 @@ impl Application {
                                 description: g.metadata.description,
                             },
                         )?;
-                        preferred = Some(g.model_used.clone());
                         Ok(())
                     }
                     Err(provider_error) => Err(provider_error),
@@ -149,14 +151,7 @@ impl Application {
                         error: None,
                     });
                 }
-                Err(error) => {
-                    report.failed += 1;
-                    report.results.push(RecordResult {
-                        uuid,
-                        saved: false,
-                        error: Some(error.to_string()),
-                    });
-                }
+                Err(error) => record_batch_error(&mut report, uuid, error)?,
             }
         }
         Ok(report)
@@ -306,6 +301,19 @@ fn validate_request(request: &GenerationRequest) -> Result<()> {
     }
     Ok(())
 }
+fn record_batch_error(report: &mut BatchReport, uuid: String, error: Error) -> Result<()> {
+    if matches!(error, Error::DurabilityUncertain { .. }) {
+        return Err(error);
+    }
+    report.failed += 1;
+    report.results.push(RecordResult {
+        uuid,
+        saved: false,
+        error: Some(error.to_string()),
+    });
+    Ok(())
+}
+
 fn batch_ids(mut ids: Vec<String>, source: Source) -> Vec<String> {
     if source == Source::OpenRouter {
         ids.reverse();
@@ -315,7 +323,47 @@ fn batch_ids(mut ids: Vec<String>, source: Source) -> Vec<String> {
 
 #[cfg(test)]
 mod ordering_tests {
-    use super::{Source, batch_ids};
+    use super::{BatchReport, Lease, Source, batch_ids, record_batch_error};
+    use crate::error::{Error, Result};
+    use std::{collections::HashSet, io, path::PathBuf, sync::Mutex};
+    #[test]
+    fn uncertain_store_commit_is_propagated_without_recording_ordinary_failure() {
+        let mut report = BatchReport::default();
+        let error = Error::DurabilityUncertain {
+            path: PathBuf::from("publications.json"),
+            source: io::Error::other("directory sync failed"),
+        };
+        let result = record_batch_error(&mut report, "uuid".into(), error);
+        assert!(
+            matches!(result, Err(Error::DurabilityUncertain { path, .. }) if path == PathBuf::from("publications.json"))
+        );
+        assert_eq!(report, BatchReport::default());
+    }
+
+    #[test]
+    fn propagated_uncertainty_releases_batch_uuid_lease() {
+        let busy = Mutex::new(HashSet::from(["uuid".to_string()]));
+        let mut report = BatchReport::default();
+        let outcome = (|| -> Result<()> {
+            let _lease = Lease {
+                busy: &busy,
+                ids: vec!["uuid".into()],
+            };
+            record_batch_error(
+                &mut report,
+                "uuid".into(),
+                Error::DurabilityUncertain {
+                    path: PathBuf::from("publications.json"),
+                    source: io::Error::other("sync failed"),
+                },
+            )?;
+            Ok(())
+        })();
+        assert!(matches!(outcome, Err(Error::DurabilityUncertain { .. })));
+        assert!(busy.lock().unwrap().is_empty());
+        assert_eq!(report, BatchReport::default());
+    }
+
     #[test]
     fn batch_order_is_source_specific() {
         let ids = vec!["1".to_string(), "2".to_string(), "3".to_string()];

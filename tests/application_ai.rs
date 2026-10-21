@@ -263,3 +263,66 @@ async fn openrouter_batch_reverses_persisted_order_and_keeps_marker_on_failure()
             .all(|p| p["description"] == "[[PUBLICATOR:TODO_GENERATE]]")
     );
 }
+
+#[tokio::test]
+async fn batch_keeps_first_successful_safe_model_as_preference() {
+    let f = Fixture::new();
+    let mut rows = Vec::new();
+    for n in 1..=3 {
+        f.image(&format!("{n}.png"), 4, 4);
+        let mut p = row(n, "SCHEDULED");
+        p["title"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
+        p["description"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
+        rows.push(p);
+    }
+    f.write(json!(rows));
+    let catalog = json!({"data":[
+        {"id":"vendor/model-b:free","architecture":{"input_modalities":["text","image"]},"pricing":{"prompt":"0","completion":"0"}},
+        {"id":"google/model-c:free","architecture":{"input_modalities":["text","image"]},"pricing":{"prompt":"0","completion":"0"}}
+    ]});
+    let success = |title: &str| {
+        reply(
+            "/chat/completions",
+            json!({"choices":[{"message":{"content":content(title)}}]}),
+        )
+    };
+    let failed = || Reply {
+        path: "/chat/completions".into(),
+        status: 500,
+        body: json!({"error":{"message":"temporary"}}).to_string(),
+    };
+    let server = Server::start(vec![
+        failed(),
+        reply("/models", catalog.clone()),
+        success("one"),
+        failed(),
+        success("two"),
+        success("three"),
+    ]);
+    let app = Application::new(
+        Arc::new(f.store.clone()),
+        client(server.url().to_owned()),
+        || 1_700_000_000,
+    );
+    let report = app
+        .generate_marked(&request(Source::OpenRouter))
+        .await
+        .unwrap();
+    assert_eq!((report.succeeded, report.failed), (3, 0));
+    let models = server
+        .requests()
+        .iter()
+        .map(|r| r["body"]["model"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        models,
+        vec![
+            Some("google/gemma-4-26b-a4b-it:free".into()),
+            None,
+            Some("vendor/model-b:free".into()),
+            Some("vendor/model-b:free".into()),
+            Some("google/model-c:free".into()),
+            Some("vendor/model-b:free".into()),
+        ]
+    );
+}
