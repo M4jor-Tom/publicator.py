@@ -290,7 +290,6 @@ impl Publisher {
             match event {
                 WorkerEvent::Scheduled { attempt_id, .. } => {
                     journal.apply_scheduled(store, &attempt_id)?;
-                    journal.applied(&attempt_id)?;
                     report.published += 1;
                 }
                 WorkerEvent::Failed { error, .. } => {
