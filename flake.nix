@@ -74,6 +74,33 @@
       # login must happen in a genuine browser (no navigator.webdriver). It
       # writes the logged-in + cleared session to the repo-local profile that
       # the UI then copies. Reproducible: firefox is flake-pinned.
+      rustCli = pkgs.rustPlatform.buildRustPackage {
+        pname = "publicator-rust-cli";
+        version = "0.1.0";
+        src = ./.;
+        cargoLock.lockFile = ./Cargo.lock;
+        nativeBuildInputs = [ pkgs.pkg-config ];
+        buildInputs = [ pkgs.openssl ];
+        doCheck = false;
+      };
+      rustWorker = pkgs.writeShellScriptBin "publicator-da-worker" ''
+        export PYTHONPATH=${src}/python
+        export PLAYWRIGHT_BROWSERS_PATH=${browsers}
+        export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=true
+        exec ${python}/bin/python -m publicator_da.worker "$@"
+      '';
+      rustCommand = name: subcommand: extra: {
+        type = "app";
+        program = "${pkgs.writeShellApplication {
+          name = name;
+          runtimeInputs = [ rustCli python rustWorker ] ++ extra;
+          text = ''
+            export PUBLICATOR_WORKER=${rustWorker}/bin/publicator-da-worker
+            export PUBLICATOR_SKILL=${src}/.claude/skills/publish-deviantart/SKILL.md
+            exec ${rustCli}/bin/publicator ${subcommand} "$@"
+          '';
+        }}/bin/${name}";
+      };
       login = {
         type = "app";
         program = "${pkgs.writeShellApplication {
@@ -89,7 +116,19 @@
         }}/bin/login";
       };
     in {
+      packages.${system} = {
+        publicator-core = rustCli;
+        publicator-rust-cli = rustCli;
+      };
       apps.${system} = {
+        # Rust CLI wrappers are opt-in during the migration; existing app names remain Python.
+        rust-validate = rustCommand "rust-validate" "validate" [ ];
+        rust-echo-first = rustCommand "rust-echo-first" "echo-first" [ ];
+        rust-generate-meta = rustCommand "rust-generate-meta" "generate-meta" [ pkgs.ollama pkgs.llmfit pkgs.imagemagick ];
+        rust-vision-models = rustCommand "rust-vision-models" "vision-models" [ pkgs.llmfit ];
+        rust-prompt-audit = rustCommand "rust-prompt-audit" "prompt-audit" [ pkgs.git ];
+        rust-da-publish = rustCommand "rust-da-publish" "da-publish" [ pkgs.imagemagick browsers ];
+        rust-check-steps = rustCommand "rust-check-steps" "check-steps" [ ];
         # `claude` on PATH so llm-claude-cli can shell out for AI metadata
         # (uses the logged-in Claude subscription at $HOME/.claude — no API key).
         ui = app "ui" "ui" [ pkgs.git pkgs.imagemagick browsers claude pkgs.ollama pkgs.llmfit ] true;
