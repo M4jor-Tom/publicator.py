@@ -50,6 +50,15 @@ impl Application {
     pub(crate) fn store(&self) -> &Store {
         &self.store
     }
+    pub async fn local_status(
+        &self,
+        model: &crate::metadata::ModelOption,
+        timeout: std::time::Duration,
+    ) -> Result<crate::metadata::LocalStatus> {
+        self.metadata
+            .local_status(model, tokio::time::Instant::now() + timeout)
+            .await
+    }
     pub fn begin_publishing(&self) -> Result<PublishingLease<'_>> {
         let _op = self.operation.lock().unwrap();
         let mut publishing = self.publishing.lock().unwrap();

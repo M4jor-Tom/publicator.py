@@ -77,14 +77,85 @@ fn source_options_do_not_include_a_third_provider() {
     assert_eq!(available_sources(), &[Source::OpenRouter, Source::Local]);
 }
 
+#[tokio::test]
+async fn local_generation_checks_and_exposes_fit_before_install_consent() {
+    let f = Fixture::new();
+    let llmfit = f.path("llmfit");
+    let shell = std::process::Command::new("sh")
+        .args(["-c", "command -v sh"])
+        .output()
+        .unwrap();
+    let shell = String::from_utf8(shell.stdout).unwrap();
+    std::fs::write(
+        &llmfit,
+        format!(
+            "#!{}\ncat <<'EOF'\n{}\nEOF\n", shell.trim_end(),
+            json!({"models":[{"name":VISION_MODELS[0].llmfit_name,"fit_level":"Too Tight","notes":["Needs 40 GB RAM"]}]})
+        ),
+    ).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&llmfit, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        std::process::Command::new(&llmfit)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let store = Arc::new(f.store.clone());
+    let client = MetadataClient::new(reqwest::Client::new(), Endpoints::default(), llmfit);
+    let application = Arc::new(Application::new(store, client, || 1_700_000_000));
+    let (mut app, _) = App::from_application(
+        application,
+        UiOptions {
+            openrouter_model: None,
+            ai_timeout: Duration::from_secs(5),
+        },
+    );
+    let _ = app.update(Message::LoadFinished(Ok(f.store.read().unwrap())));
+    let _ = app.update(Message::SelectSource(Source::Local));
+    let task = app.update(Message::GenerateOne(id(1)));
+    let fit_result = run_task(task).await;
+    assert!(matches!(fit_result, Message::LocalFitFinished { .. }));
+    let _ = app.update(fit_result);
+    let status = app.local_fit_status().unwrap();
+    assert_eq!(status.fit.reason, "Needs 40 GB RAM");
+    assert!(!app.local_install_consent_pending());
+}
+
+#[test]
+fn fitting_missing_local_model_requires_explicit_install_confirmation() {
+    use publicator::metadata::{Fit, LocalStatus};
+    let f = Fixture::new();
+    let (mut app, _) = fixture_app(&f, "http://127.0.0.1:1".into());
+    let _ = app.update(Message::SelectSource(Source::Local));
+    let _ = app.update(Message::LocalFitFinished {
+        model: VISION_MODELS[0].clone(),
+        selection: Some(id(1)),
+        generate: true,
+        result: Ok(LocalStatus {
+            fit: Fit {
+                fit: true,
+                level: "Good".into(),
+                reason: "Fits available memory".into(),
+            },
+            installed: false,
+            available: true,
+        }),
+    });
+    assert!(app.local_install_consent_pending());
+}
+
 #[test]
 fn selecting_local_source_does_not_itself_confirm_install() {
     let f = Fixture::new();
     let (mut app, _) = fixture_app(&f, "http://127.0.0.1:1".into());
     let _ = app.update(Message::SelectSource(Source::Local));
     let task = app.update(Message::GenerateOne(id(1)));
-    assert!(iced_runtime::task::into_stream(task).is_none());
-    assert!(iced_runtime::task::into_stream(app.update(Message::CancelLocalInstall)).is_none());
+    assert!(iced_runtime::task::into_stream(task).is_some());
+    assert!(!app.local_install_consent_pending());
+    let _ = app.update(Message::CancelLocalInstall);
+    assert!(!app.local_install_consent_pending());
 }
 
 #[tokio::test]

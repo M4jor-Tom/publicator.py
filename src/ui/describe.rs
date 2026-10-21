@@ -105,9 +105,29 @@ pub fn view(state: &App) -> Element<'_, Message> {
     ]
     .spacing(12);
     if state.source == Source::Local {
-        content = content.push(text(
-            "Local model fit is checked before generation; installation requires confirmation.",
-        ));
+        let fit = state.local_fit_status();
+        if let Some(status) = fit {
+            content = content.push(text(format!(
+                "Local fit: {} — {}. {}",
+                status.fit.level,
+                if status.fit.reason.is_empty() {
+                    "No additional fit notes"
+                } else {
+                    &status.fit.reason
+                },
+                if !status.fit.fit {
+                    "This model does not fit this host."
+                } else if !status.available {
+                    "Ollama is unavailable; generation cannot continue."
+                } else if status.installed {
+                    "Model is installed."
+                } else {
+                    "Model is not installed; installation requires confirmation."
+                }
+            )));
+        } else {
+            content = content.push(text("Checking local model fit…"));
+        }
     }
     let mut cards = column![].spacing(12);
     for row in state.publications.as_deref().unwrap_or_default() {
@@ -196,10 +216,10 @@ pub fn view(state: &App) -> Element<'_, Message> {
                 height: viewport.bounds().height,
             }),
     );
-    if state.pending_local_consent.is_some() {
+    if state.local_install_consent_pending() {
         content = content.push(
             column![
-                text("Install the missing local model?"),
+                text(format!("Install {} and generate?", state.model.ollama_name)),
                 button("Confirm install and generate").on_press(Message::ConfirmLocalInstall),
                 button("Cancel").on_press(Message::CancelLocalInstall),
             ]

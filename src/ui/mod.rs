@@ -7,7 +7,7 @@ pub mod schedule;
 use crate::{
     application::Application as CoreApplication,
     images::Candidate,
-    metadata::{GenerationRequest, ModelOption, Source, VISION_MODELS},
+    metadata::{GenerationRequest, LocalStatus, ModelOption, Source, VISION_MODELS},
     model::{Phase, phase},
     workflow::{self, MetadataPatch},
 };
@@ -141,6 +141,12 @@ pub enum Message {
         uuid: Option<String>,
         result: Result<String, String>,
     },
+    LocalFitFinished {
+        model: ModelOption,
+        selection: Option<String>,
+        generate: bool,
+        result: Result<LocalStatus, String>,
+    },
 }
 
 pub struct App {
@@ -172,6 +178,7 @@ pub struct App {
     pending_approval: Option<String>,
     pending_return: Option<String>,
     pending_local_consent: Option<Option<String>>,
+    local_fit: Option<LocalStatus>,
 }
 
 impl App {
@@ -204,6 +211,7 @@ impl App {
             pending_approval: None,
             pending_return: None,
             pending_local_consent: None,
+            local_fit: None,
         };
         (app, Self::load_task(application))
     }
@@ -223,6 +231,12 @@ impl App {
     }
     pub fn current_tab(&self) -> Tab {
         self.active_tab
+    }
+    pub fn local_fit_status(&self) -> Option<&LocalStatus> {
+        self.local_fit.as_ref()
+    }
+    pub fn local_install_consent_pending(&self) -> bool {
+        self.pending_local_consent.is_some()
     }
 
     fn load_task(application: Arc<CoreApplication>) -> Task<Message> {
@@ -263,13 +277,21 @@ impl App {
                 return task;
             }
             Message::SelectSource(source) if self.pending_local_consent.is_none() => {
-                self.source = source
+                self.source = source;
+                self.local_fit = None;
+                if source == Source::Local {
+                    return self.local_fit_task(None, false);
+                }
             }
             Message::SelectSource(_) => {}
             Message::SelectModel(model)
                 if self.pending_local_consent.is_none() && VISION_MODELS.contains(&model) =>
             {
-                self.model = model
+                self.model = model;
+                self.local_fit = None;
+                if self.source == Source::Local {
+                    return self.local_fit_task(None, false);
+                }
             }
             Message::SelectModel(_) => {}
             Message::SaveDraft(uuid) => return self.save_uuid(&uuid),
@@ -283,6 +305,32 @@ impl App {
                 }
             }
             Message::CancelLocalInstall => self.pending_local_consent = None,
+            Message::LocalFitFinished {
+                model,
+                selection,
+                generate,
+                result,
+            } => {
+                if self.source != Source::Local || self.model != model {
+                    return Task::none();
+                }
+                match result {
+                    Ok(status) => {
+                        let needs_consent = crate::metadata::consent_required(&status);
+                        let can_generate = status.fit.fit && status.available;
+                        self.local_fit = Some(status);
+                        if generate && needs_consent {
+                            self.pending_local_consent = Some(selection);
+                        } else if generate && can_generate {
+                            return self.continue_local_generation(selection);
+                        }
+                    }
+                    Err(error) => {
+                        self.local_fit = None;
+                        self.result = Some(format!("Could not assess local model fit: {error}"));
+                    }
+                }
+            }
             Message::GenerationFinished { uuid, result } => {
                 if let Some(uuid) = uuid {
                     self.busy_uuids.remove(&uuid);
@@ -657,8 +705,7 @@ impl App {
             return Task::none();
         }
         if self.source == Source::Local {
-            self.pending_local_consent = Some(Some(uuid));
-            return Task::none();
+            return self.local_fit_task(Some(uuid), true);
         }
         if self.drafts.get(&uuid).is_some_and(Draft::is_dirty) {
             self.pending_generation_install = false;
@@ -690,11 +737,49 @@ impl App {
             self.pending_generation = Some(String::new());
             return self.save_next_dirty();
         }
-        if self.source == Source::Local {
-            self.pending_local_consent = Some(None);
+        if ids.is_empty() {
             return Task::none();
         }
+        if self.source == Source::Local {
+            return self.local_fit_task(None, true);
+        }
         self.start_generation(None, false)
+    }
+
+    fn local_fit_task(&self, selection: Option<String>, generate: bool) -> Task<Message> {
+        let application = self.application.clone();
+        let model = self.model.clone();
+        let message_model = model.clone();
+        let timeout = self._options.ai_timeout;
+        Task::perform(
+            async move {
+                application
+                    .local_status(&model, timeout)
+                    .await
+                    .map_err(|e| e.to_string())
+            },
+            move |result| Message::LocalFitFinished {
+                model: message_model,
+                selection,
+                generate,
+                result,
+            },
+        )
+    }
+
+    fn continue_local_generation(&mut self, selection: Option<String>) -> Task<Message> {
+        if let Some(uuid) = selection.as_deref() {
+            if self.drafts.get(uuid).is_some_and(Draft::is_dirty) {
+                self.pending_generation = Some(uuid.to_owned());
+                self.pending_generation_install = false;
+                return self.save_uuid(uuid);
+            }
+        } else if self.any_dirty() {
+            self.pending_generation = Some(String::new());
+            self.pending_generation_install = false;
+            return self.save_next_dirty();
+        }
+        self.start_generation(selection, false)
     }
 
     fn start_generation(
@@ -702,10 +787,6 @@ impl App {
         selection: Option<String>,
         install_missing: bool,
     ) -> Task<Message> {
-        if self.source == Source::Local && !install_missing {
-            self.pending_local_consent = Some(selection);
-            return Task::none();
-        }
         let request = GenerationRequest {
             source: self.source,
             model: self.model.clone(),
@@ -902,6 +983,7 @@ mod tests {
                 pending_approval: None,
                 pending_return: None,
                 pending_local_consent: None,
+                local_fit: None,
             },
             root,
         )
