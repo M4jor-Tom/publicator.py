@@ -5,8 +5,20 @@ pub(super) async fn prepare(
     sha512: String,
     cache: PathBuf,
 ) -> Result<PathBuf, String> {
+    prepare_lazy(source, Some(sha512), cache).await
+}
+
+pub(super) async fn prepare_lazy(
+    source: PathBuf,
+    sha512: Option<String>,
+    cache: PathBuf,
+) -> Result<PathBuf, String> {
     tokio::task::spawn_blocking(move || {
-        let name = crate::images::thumb_name(&source, &sha512)?;
+        let sha = sha512
+            .filter(|sha| sha.len() == 128 && sha.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .map(Ok)
+            .unwrap_or_else(|| crate::images::file_sha512(&source))?;
+        let name = crate::images::thumb_name(&source, &sha)?;
         crate::images::ensure_thumb(&source, &cache, &name)
     })
     .await

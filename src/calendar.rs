@@ -1,6 +1,6 @@
 use crate::{
     error::{Error, Result},
-    model::{Delivery, GENERATE_MARKER, Publications, effective_schedule},
+    model::{Delivery, GENERATE_MARKER, effective_schedule},
 };
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use chrono_tz::Tz;
@@ -15,11 +15,12 @@ pub struct Event {
     pub timestamp: i64,
     pub url: Option<String>,
     pub basename: Option<String>,
+    pub sha512: Option<String>,
     pub delivery: Delivery,
 }
 
 /// Project every publication apparition into a stable date-ordered event list.
-pub fn timeline(rows: &Publications) -> Result<Vec<Event>> {
+pub fn timeline(rows: &[Value]) -> Result<Vec<Event>> {
     let mut events = Vec::new();
     for row in rows {
         let uuid = row
@@ -44,6 +45,12 @@ pub fn timeline(rows: &Publications) -> Result<Vec<Event>> {
             .and_then(|file| file.get("basename"))
             .and_then(Value::as_str)
             .map(str::to_owned);
+        let sha512 = first.and_then(|file| {
+            ["sha512sum", "fileSha512sum", "sha512sumHex"]
+                .into_iter()
+                .find_map(|key| file.get(key).and_then(Value::as_str))
+                .map(str::to_owned)
+        });
         let apparitions = match row.get("apparitions") {
             None => &[][..],
             Some(Value::Array(items)) => items.as_slice(),
@@ -77,6 +84,7 @@ pub fn timeline(rows: &Publications) -> Result<Vec<Event>> {
                 timestamp,
                 url: app.get("url").and_then(Value::as_str).map(str::to_owned),
                 basename: basename.clone(),
+                sha512: sha512.clone(),
                 delivery,
             });
         }

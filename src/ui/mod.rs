@@ -1,7 +1,10 @@
+pub mod calendar;
 pub mod describe;
 pub mod drafts;
 pub mod pick;
 mod preview;
+pub mod prompt;
+pub mod publish;
 pub mod schedule;
 
 use crate::{
@@ -9,6 +12,9 @@ use crate::{
     images::Candidate,
     metadata::{GenerationRequest, LocalStatus, ModelOption, Source, VISION_MODELS},
     model::{Phase, phase},
+    prompts::{PromptArchive, PromptMatch},
+    publish_journal::{AttemptState, AttemptStatus, ReconcileOutcome},
+    publishing::{PublishCell, PublishCellOutcome, PublishCellState, PublishCompletion},
     workflow::{self, MetadataPatch},
 };
 use iced::{
@@ -18,6 +24,7 @@ use iced::{
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -149,6 +156,74 @@ pub enum Message {
         generate: bool,
         result: Result<LocalStatus, String>,
     },
+    SelectCell {
+        key: String,
+        selected: bool,
+    },
+    SelectAll(bool),
+    OptionPriceChanged {
+        uuid: String,
+        value: String,
+    },
+    OptionTierChanged {
+        uuid: String,
+        value: String,
+        selected: bool,
+    },
+    OptionGalleryChanged {
+        uuid: String,
+        value: String,
+        selected: bool,
+    },
+    SaveOptions(String),
+    OptionsSaved {
+        uuid: String,
+        result: Result<(), String>,
+    },
+    PublishLocksFinished(Result<HashSet<String>, String>),
+    PublishStatusesFinished(Result<Vec<AttemptStatus>, String>),
+    PublishSelected,
+    CancelAfterCurrent,
+    ReconcileUrlChanged {
+        attempt_id: String,
+        value: String,
+    },
+    ReconcileAttempt {
+        attempt_id: String,
+        outcome: ReconcileOutcome,
+    },
+    ReconcileFinished {
+        attempt_id: String,
+        result: Result<(), String>,
+    },
+    OpenActualUrl(String),
+    JumpToPublication(String),
+    PublishFinished(PublishCompletion),
+    PromptMatchesFinished(Vec<(PathBuf, PromptMatch)>),
+    CalendarPrepared(Result<calendar::Preparation, String>),
+    CalendarPreviewFinished {
+        basename: String,
+        result: Result<PathBuf, String>,
+    },
+    CalendarViewport {
+        offset: f32,
+        height: f32,
+    },
+    UrlOpened {
+        url: String,
+        result: Result<(), String>,
+    },
+    CloseWait,
+    CloseCancelPublish,
+}
+
+#[derive(Clone, Debug)]
+struct PublishOptionsDraft {
+    price: String,
+    tiers: Vec<String>,
+    galleries: Vec<String>,
+    dirty: bool,
+    error: Option<String>,
 }
 
 struct LocalInstallConsent {
@@ -170,6 +245,8 @@ pub struct App {
     result: Option<String>,
     pending_navigation: Option<Tab>,
     pending_close: bool,
+    pending_jump: Option<String>,
+    revealed_publication: Option<String>,
     started: Instant,
     search_limit: usize,
     search_paths: Vec<String>,
@@ -190,10 +267,49 @@ pub struct App {
     pending_local_consent: Option<LocalInstallConsent>,
     local_fit: Option<LocalStatus>,
     local_status_request: u64,
+    publish_result: Option<String>,
+    publish_diagnostic: Option<String>,
+    publish_cancel: Arc<std::sync::atomic::AtomicBool>,
+    publish_active: bool,
+    pending_publish: bool,
+    publish_options: HashMap<String, PublishOptionsDraft>,
+    publish_locks: Option<HashSet<String>>,
+    publish_lock_error: Option<String>,
+    publish_attempts: Vec<AttemptStatus>,
+    publish_outcomes: HashMap<PublishCell, PublishCellOutcome>,
+    last_publish_cells: HashSet<PublishCell>,
+    reconcile_urls: HashMap<String, String>,
+    prompt_archive: Option<Arc<PromptArchive>>,
+    prompt_archive_error: Option<String>,
+    prompt_matches: HashMap<PathBuf, PromptMatch>,
+    calendar_preparing: bool,
+    calendar_prepared: bool,
+    calendar_error: Option<String>,
+    calendar_artwork: HashMap<String, Option<PathBuf>>,
+    calendar_previews: HashMap<String, Option<Result<PathBuf, String>>>,
+    url_opener: fn(&str) -> Result<(), String>,
 }
 
 impl App {
     fn new(application: Arc<CoreApplication>, options: UiOptions) -> (Self, Task<Message>) {
+        Self::new_with_url_opener(application, options, calendar::system_open_url)
+    }
+
+    fn new_with_url_opener(
+        application: Arc<CoreApplication>,
+        options: UiOptions,
+        url_opener: fn(&str) -> Result<(), String>,
+    ) -> (Self, Task<Message>) {
+        let (prompt_archive, prompt_archive_error) =
+            match application.store().config().prompts.as_ref() {
+                Some(config) => {
+                    match PromptArchive::new(&application.store().paths().data_dir, config) {
+                        Ok(archive) => (Some(Arc::new(archive)), None),
+                        Err(error) => (None, Some(error.to_string())),
+                    }
+                }
+                None => (None, None),
+            };
         let app = Self {
             application: application.clone(),
             _options: options,
@@ -206,6 +322,8 @@ impl App {
             result: None,
             pending_navigation: None,
             pending_close: false,
+            pending_jump: None,
+            revealed_publication: None,
             started: Instant::now(),
             search_limit: 25,
             search_paths: application.store().config().publicable.clone(),
@@ -225,6 +343,27 @@ impl App {
             pending_local_consent: None,
             local_fit: None,
             local_status_request: 0,
+            publish_result: None,
+            publish_diagnostic: None,
+            publish_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            publish_active: false,
+            pending_publish: false,
+            publish_options: HashMap::new(),
+            publish_locks: None,
+            publish_lock_error: None,
+            publish_attempts: Vec::new(),
+            publish_outcomes: HashMap::new(),
+            last_publish_cells: HashSet::new(),
+            reconcile_urls: HashMap::new(),
+            prompt_archive,
+            prompt_archive_error,
+            prompt_matches: HashMap::new(),
+            calendar_preparing: false,
+            calendar_prepared: false,
+            calendar_error: None,
+            calendar_artwork: HashMap::new(),
+            calendar_previews: HashMap::new(),
+            url_opener,
         };
         (app, Self::load_task(application))
     }
@@ -234,6 +373,14 @@ impl App {
         options: UiOptions,
     ) -> (Self, Task<Message>) {
         Self::new(application, options)
+    }
+
+    pub fn from_application_with_url_opener(
+        application: Arc<CoreApplication>,
+        options: UiOptions,
+        opener: fn(&str) -> Result<(), String>,
+    ) -> (Self, Task<Message>) {
+        Self::new_with_url_opener(application, options, opener)
     }
 
     pub fn search_limit(&self) -> usize {
@@ -251,19 +398,140 @@ impl App {
     pub fn local_install_consent_pending(&self) -> bool {
         self.pending_local_consent.is_some()
     }
+    pub fn publish_attempts(&self) -> &[AttemptStatus] {
+        &self.publish_attempts
+    }
+    pub fn prompt_match(&self, path: &Path) -> Option<&PromptMatch> {
+        self.prompt_matches.get(path)
+    }
+    pub fn calendar_prepared(&self) -> bool {
+        self.calendar_prepared
+    }
+    pub fn calendar_art_path(&self, basename: &str) -> Option<&Path> {
+        self.calendar_artwork.get(basename)?.as_deref()
+    }
+    pub fn revealed_publication(&self) -> Option<&str> {
+        self.revealed_publication.as_deref()
+    }
+    pub fn unresolved_publish_attempts(&self) -> impl Iterator<Item = &AttemptStatus> {
+        self.publish_attempts
+            .iter()
+            .filter(|attempt| attempt.blocks_retry())
+    }
+    pub fn publish_cell_outcome(&self, uuid: &str) -> Option<PublishCellOutcome> {
+        let row = self.publication(uuid)?;
+        let apparition = row
+            .get("apparitions")
+            .and_then(Value::as_array)?
+            .iter()
+            .find(|app| app.get("platformName").and_then(Value::as_str) == Some("deviantart"))?;
+        let cell = PublishCell {
+            uuid: uuid.to_owned(),
+            platform: "deviantart".into(),
+        };
+        let outcome = if let Some(attempt) = self
+            .publish_attempts
+            .iter()
+            .find(|attempt| attempt.uuid == uuid && attempt.blocks_retry())
+        {
+            let detail = if !attempt.database_matches {
+                "receipt belongs to a different publication database".into()
+            } else if let Some(error) = &attempt.current_error {
+                format!("{}: {error}", attempt.reason())
+            } else if attempt.current_matches == Some(false) {
+                format!(
+                    "{}; approved snapshot differs from current publication",
+                    attempt.reason()
+                )
+            } else {
+                match &attempt.state {
+                    AttemptState::Unknown { error } => error.clone(),
+                    _ => attempt.reason().into(),
+                }
+            };
+            PublishCellOutcome {
+                cell,
+                state: PublishCellState::Unknown,
+                detail: Some(detail),
+            }
+        } else if apparition.get("state").and_then(Value::as_str) == Some("published_or_scheduled")
+        {
+            PublishCellOutcome {
+                cell,
+                state: PublishCellState::Success,
+                detail: None,
+            }
+        } else if let Some(attempt) = self.publish_attempts.iter().find(|attempt| {
+            attempt.uuid == uuid && matches!(&attempt.state, AttemptState::SafeFailed { .. })
+        }) {
+            let detail = match &attempt.state {
+                AttemptState::SafeFailed { error } => error.clone(),
+                _ => unreachable!(),
+            };
+            PublishCellOutcome {
+                cell,
+                state: PublishCellState::SafeFailed,
+                detail: Some(detail),
+            }
+        } else if self.publish_attempts.iter().any(|attempt| {
+            attempt.uuid == uuid && matches!(&attempt.state, AttemptState::NotSubmitted)
+        }) {
+            PublishCellOutcome {
+                cell,
+                state: PublishCellState::ConfirmedNotSubmitted,
+                detail: None,
+            }
+        } else if let Some(outcome) = self.publish_outcomes.get(&cell) {
+            outcome.clone()
+        } else if self.last_publish_cells.contains(&cell) {
+            PublishCellOutcome {
+                cell,
+                state: PublishCellState::Unattempted,
+                detail: None,
+            }
+        } else {
+            PublishCellOutcome {
+                cell,
+                state: PublishCellState::Unattempted,
+                detail: None,
+            }
+        };
+        Some(outcome)
+    }
 
     fn load_task(application: Arc<CoreApplication>) -> Task<Message> {
+        let lock_application = application.clone();
+        Task::batch([
+            Task::perform(
+                async move {
+                    tokio::task::spawn_blocking(move || {
+                        application
+                            .mutate(None, |store| store.read())
+                            .map_err(|error| error.to_string())
+                    })
+                    .await
+                    .unwrap_or_else(|error| Err(format!("Could not load publications: {error}")))
+                },
+                Message::LoadFinished,
+            ),
+            Self::publish_locks_task(lock_application),
+        ])
+    }
+
+    fn publish_locks_task(application: Arc<CoreApplication>) -> Task<Message> {
         Task::perform(
             async move {
                 tokio::task::spawn_blocking(move || {
-                    application
-                        .mutate(None, |store| store.read())
-                        .map_err(|error| error.to_string())
+                    let data_dir = application.store().paths().data_dir.clone();
+                    let _lock = crate::publish_journal::publisher_lock(&data_dir)?;
+                    crate::publish_journal::PublishJournal::new(&data_dir)?
+                        .attempt_statuses_locked(application.store())
                 })
                 .await
-                .unwrap_or_else(|error| Err(format!("Could not load publications: {error}")))
+                .unwrap_or_else(|error| Err(crate::error::Error::Config(error.to_string())))
+                .map_err(|error| error.to_string())
             },
-            Message::LoadFinished,
+            Message::PublishStatusesFinished,
         )
     }
 
@@ -273,8 +541,16 @@ impl App {
                 self.publications = Some(rows);
                 self.load_error = None;
                 self.search_authorized = true;
+                self.calendar_preparing = false;
+                self.calendar_prepared = false;
+                self.calendar_error = None;
+                self.calendar_artwork.clear();
+                self.calendar_previews.clear();
                 if self.active_tab == Tab::Describe {
                     return describe::preview_tasks(self, 0, 4);
+                }
+                if self.active_tab == Tab::Calendar {
+                    return calendar::prepare_task(self);
                 }
             }
             Message::LoadFinished(Err(error)) => {
@@ -282,12 +558,54 @@ impl App {
                 self.load_error = Some(error);
                 self.search_authorized = false;
             }
-            Message::Navigate(tab) => {
-                let task = self.navigate(tab);
-                if self.active_tab == Tab::Describe {
-                    return describe::preview_tasks(self, 0, 4);
+            Message::PublishLocksFinished(Ok(uuids)) => {
+                self.publish_locks = Some(uuids);
+                self.publish_lock_error = None;
+            }
+            Message::PublishLocksFinished(Err(error)) => {
+                self.publish_locks = None;
+                self.publish_lock_error = Some(error);
+            }
+            Message::PublishStatusesFinished(Ok(attempts)) => {
+                self.publish_locks = Some(
+                    attempts
+                        .iter()
+                        .filter(|attempt| attempt.blocks_retry())
+                        .map(|attempt| attempt.uuid.clone())
+                        .collect(),
+                );
+                self.publish_lock_error = None;
+                self.publish_attempts = attempts;
+                if self.pending_close {
+                    if self.any_dirty() {
+                        return self.save_next_dirty();
+                    }
+                    if self.publish_options.values().any(|options| options.dirty) {
+                        return self.save_next_options();
+                    }
+                    self.pending_close = false;
+                    return iced::exit();
                 }
-                return task;
+            }
+            Message::PublishStatusesFinished(Err(error)) => {
+                self.publish_locks = None;
+                self.publish_lock_error = Some(error);
+                self.publish_attempts.clear();
+                if self.pending_close {
+                    if self.any_dirty() {
+                        return self.save_next_dirty();
+                    }
+                    if self.publish_options.values().any(|options| options.dirty) {
+                        return self.save_next_options();
+                    }
+                    self.pending_close = false;
+                    return iced::exit();
+                }
+            }
+            Message::Navigate(tab) => {
+                self.revealed_publication = None;
+                self.pending_jump = None;
+                return self.navigate(tab);
             }
             Message::SelectSource(source)
                 if self.pending_local_consent.is_none() && self.pending_generation.is_none() =>
@@ -421,6 +739,8 @@ impl App {
                             draft.failed(&sent);
                             self.result = Some(format!("Save failed for {uuid}: {error}"));
                             self.pending_navigation = None;
+                            self.pending_jump = None;
+                            self.pending_publish = false;
                             self.pending_generation = None;
                             self.pending_generation_batch = None;
                             self.pending_approval = None;
@@ -453,12 +773,22 @@ impl App {
                 if let Some(uuid) = self.pending_return.take() {
                     return self.return_to_schedule(uuid);
                 }
+                if (self.pending_navigation.is_some() || self.pending_publish || self.pending_close)
+                    && self.publish_options.values().any(|options| options.dirty)
+                {
+                    return self.save_next_options();
+                }
                 if let Some(tab) = self.pending_navigation.take() {
                     if self.any_dirty() {
                         self.pending_navigation = Some(tab);
                         return self.save_next_dirty();
                     }
-                    self.active_tab = tab;
+                    let reveal = self.pending_jump.take();
+                    return self.activate_tab(tab, reveal);
+                }
+                if self.pending_publish && !self.any_dirty() {
+                    self.pending_publish = false;
+                    return self.publish_selected_task();
                 }
                 if self.pending_close && !self.any_dirty() {
                     return iced::exit();
@@ -467,23 +797,291 @@ impl App {
                     return self.save_next_dirty();
                 }
             }
+            Message::SelectCell { key, selected } => {
+                let Some((uuid, platform)) = key.rsplit_once(':') else {
+                    return Task::none();
+                };
+                if platform != "deviantart" {
+                    return Task::none();
+                }
+                if !selected && self.selection_locked(Some(uuid)) {
+                    self.publish_result = Some(
+                        "Reconcile the unresolved attempt before deselecting this delivery".into(),
+                    );
+                    return Task::none();
+                }
+                return Self::select_publish_task(
+                    self.application.clone(),
+                    Some(uuid.to_owned()),
+                    Some(platform.to_owned()),
+                    selected,
+                );
+            }
+            Message::SelectAll(selected) => {
+                if !selected && self.selection_locked(None) {
+                    self.publish_result = Some(
+                        "Reconcile unresolved attempts before changing platform selections".into(),
+                    );
+                    return Task::none();
+                }
+                return Self::select_publish_task(self.application.clone(), None, None, selected);
+            }
+            Message::PublishSelected => {
+                if self.publish_locks.is_none() || self.publish_lock_error.is_some() {
+                    self.publish_result = Some(
+                        self.publish_lock_error
+                            .clone()
+                            .unwrap_or_else(|| "Checking unresolved publish attempts".into()),
+                    );
+                    return Task::none();
+                }
+                if self
+                    .publish_locks
+                    .as_ref()
+                    .is_some_and(|locks| !locks.is_empty())
+                {
+                    self.publish_result =
+                        Some("Reconcile unresolved attempts before retrying".into());
+                    return Task::none();
+                }
+                if self.any_dirty() {
+                    self.pending_publish = true;
+                    return self.save_next_dirty();
+                }
+                if self.publish_options.values().any(|options| options.dirty) {
+                    self.pending_publish = true;
+                    return self.save_next_options();
+                }
+                return self.publish_selected_task();
+            }
+            Message::CancelAfterCurrent | Message::CloseCancelPublish => self
+                .publish_cancel
+                .store(true, std::sync::atomic::Ordering::SeqCst),
+            Message::CloseWait => {}
+            Message::PublishFinished(completion) => {
+                self.publish_active = false;
+                self.publish_diagnostic = completion.diagnostics;
+                match completion.result {
+                    Ok(report) => {
+                        self.publish_outcomes = report
+                            .outcomes
+                            .iter()
+                            .cloned()
+                            .map(|outcome| (outcome.cell.clone(), outcome))
+                            .collect();
+                        self.publish_result = Some(format!(
+                            "Published {}; failed {}; unknown {}; unattempted{}{}",
+                            report.published,
+                            report.failed,
+                            report.unknown,
+                            report.unattempted,
+                            report
+                                .error
+                                .map(|error| format!(" — {error}"))
+                                .unwrap_or_default()
+                        ));
+                    }
+                    Err(error) => {
+                        self.publish_result = Some(format!("Publishing stopped: {error}"));
+                    }
+                }
+                self.publish_locks = None;
+                self.publish_lock_error = Some("Refreshing publication and receipt state".into());
+                return Self::load_task(self.application.clone());
+            }
+            Message::OptionPriceChanged { uuid, value } => {
+                if self.options_locked(&uuid) {
+                    return Task::none();
+                }
+                self.ensure_publish_options(&uuid);
+                if let Some(options) = self.publish_options.get_mut(&uuid) {
+                    options.price = value;
+                    options.dirty = true;
+                    options.error = None;
+                }
+            }
+            Message::OptionTierChanged {
+                uuid,
+                value,
+                selected,
+            } => {
+                if self.options_locked(&uuid)
+                    || !self.application.store().config().tiers.contains(&value)
+                {
+                    return Task::none();
+                }
+                self.ensure_publish_options(&uuid);
+                if let Some(options) = self.publish_options.get_mut(&uuid) {
+                    set_option(&mut options.tiers, value, selected);
+                    options.dirty = true;
+                    options.error = None;
+                }
+            }
+            Message::OptionGalleryChanged {
+                uuid,
+                value,
+                selected,
+            } => {
+                if self.options_locked(&uuid)
+                    || !self.application.store().config().galleries.contains(&value)
+                {
+                    return Task::none();
+                }
+                self.ensure_publish_options(&uuid);
+                if let Some(options) = self.publish_options.get_mut(&uuid) {
+                    set_option(&mut options.galleries, value, selected);
+                    options.dirty = true;
+                    options.error = None;
+                }
+            }
+            Message::SaveOptions(uuid) => return self.save_options_task(uuid),
+            Message::OptionsSaved { uuid, result } => {
+                self.busy = false;
+                if let Some(options) = self.publish_options.get_mut(&uuid) {
+                    match result {
+                        Ok(()) => {
+                            self.publish_options.remove(&uuid);
+                            self.result = Some(format!("Saved publishing options for {uuid}"));
+                        }
+                        Err(error) => {
+                            options.error = Some(error.clone());
+                            self.result =
+                                Some(format!("Publishing options were not saved: {error}"));
+                            self.pending_publish = false;
+                            self.pending_navigation = None;
+                            self.pending_close = false;
+                            self.pending_jump = None;
+                            return Task::none();
+                        }
+                    }
+                }
+                if self.publish_options.values().any(|options| options.dirty) {
+                    return self.save_next_options();
+                }
+                if self.pending_publish {
+                    self.pending_publish = false;
+                    return self.publish_selected_task();
+                }
+                if let Some(tab) = self.pending_navigation.take() {
+                    let reveal = self.pending_jump.take();
+                    return self.activate_tab(tab, reveal);
+                }
+                if self.pending_close {
+                    self.pending_close = false;
+                    return iced::exit();
+                }
+                return Self::load_task(self.application.clone());
+            }
+            Message::ReconcileUrlChanged { attempt_id, value } => {
+                self.reconcile_urls.insert(attempt_id, value);
+            }
+            Message::ReconcileAttempt {
+                attempt_id,
+                outcome,
+            } => {
+                if self.publish_active || self.busy {
+                    return Task::done(Message::ReconcileFinished {
+                        attempt_id,
+                        result: Err("reconciliation is busy".into()),
+                    });
+                }
+                if !self
+                    .publish_attempts
+                    .iter()
+                    .any(|attempt| attempt.attempt_id == attempt_id && attempt.blocks_retry())
+                {
+                    return Task::done(Message::ReconcileFinished {
+                        attempt_id,
+                        result: Err("publish attempt is no longer unresolved".into()),
+                    });
+                }
+                self.busy = true;
+                self.publish_result = Some("Reconciling the verified publishing outcome…".into());
+                let application = self.application.clone();
+                let reconcile_id = attempt_id.clone();
+                return Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            let journal = crate::publish_journal::PublishJournal::new(
+                                &application.store().paths().data_dir,
+                            )?;
+                            journal.reconcile(application.store(), &reconcile_id, outcome)
+                        })
+                        .await
+                        .unwrap_or_else(|error| Err(crate::error::Error::Config(error.to_string())))
+                        .map_err(|error| error.to_string())
+                    },
+                    move |result| Message::ReconcileFinished { attempt_id, result },
+                );
+            }
+            Message::ReconcileFinished { attempt_id, result } => {
+                self.busy = false;
+                self.publish_locks = None;
+                self.publish_attempts.clear();
+                self.publish_result = Some(match result {
+                    Ok(()) => format!("Reconciled publish attempt {attempt_id}"),
+                    Err(error) => format!("Reconciliation refused; receipt retained: {error}"),
+                });
+                return Self::load_task(self.application.clone());
+            }
+            Message::OpenActualUrl(url) => {
+                let opener = self.url_opener;
+                let application = self.application.clone();
+                let result_url = url.clone();
+                return Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            let rows = application
+                                .store()
+                                .read()
+                                .map_err(|error| error.to_string())?;
+                            calendar::open_stored_actual_url_with(&rows, &url, opener)
+                        })
+                        .await
+                        .unwrap_or_else(|error| Err(format!("could not open actual URL: {error}")))
+                    },
+                    move |result| Message::UrlOpened {
+                        url: result_url,
+                        result,
+                    },
+                );
+            }
+            Message::UrlOpened { url, result } => {
+                self.result = Some(match result {
+                    Ok(()) => format!("Opened actual URL: {url}"),
+                    Err(error) => format!("Could not open actual URL: {error}"),
+                });
+            }
+            Message::JumpToPublication(uuid) => return self.jump_to_publication(uuid),
             Message::CloseRequested => {
+                if self.publish_active {
+                    self.pending_close = true;
+                    self.result = Some("Publishing is active. Wait or cancel after the current delivery before closing.".into());
+                    return Task::none();
+                }
                 if self.any_dirty() {
                     self.pending_close = true;
                     self.result = Some("Saving drafts before close…".into());
                     return self.save_next_dirty();
                 }
+                if self.publish_options.values().any(|options| options.dirty) {
+                    self.pending_close = true;
+                    return self.save_next_options();
+                }
                 return iced::exit();
             }
             Message::ConfirmDiscard => {
                 self.drafts.clear();
+                self.publish_options.clear();
+                self.pending_publish = false;
                 self.pending_navigation = None;
+                self.pending_jump = None;
                 self.pending_close = false;
                 return iced::exit();
             }
             Message::KeepEditing => self.pending_close = false,
             Message::Refresh => {
-                if self.any_dirty() {
+                if self.any_dirty() || self.publish_options.values().any(|options| options.dirty) {
                     self.result = Some("Save or explicitly discard drafts before refresh.".into());
                 } else {
                     return Self::load_task(self.application.clone());
@@ -521,7 +1119,29 @@ impl App {
                         format!("Found {} candidates", self.candidates.len())
                     },
                 );
-                return pick::preview_tasks(self, 0, 4);
+                return Task::batch([pick::preview_tasks(self, 0, 4), prompt_tasks(self)]);
+            }
+            Message::PromptMatchesFinished(matches) => {
+                self.prompt_matches.extend(matches);
+            }
+            Message::CalendarPrepared(Ok(prepared)) => {
+                self.calendar_preparing = false;
+                self.calendar_prepared = true;
+                self.calendar_error = None;
+                self.calendar_artwork = prepared.artwork;
+                self.prompt_matches.extend(prepared.prompts);
+                return calendar::preview_tasks(self, 0.0, 560.0);
+            }
+            Message::CalendarPrepared(Err(error)) => {
+                self.calendar_preparing = false;
+                self.calendar_prepared = true;
+                self.calendar_error = Some(error);
+            }
+            Message::CalendarPreviewFinished { basename, result } => {
+                self.calendar_previews.insert(basename, Some(result));
+            }
+            Message::CalendarViewport { offset, height } => {
+                return calendar::preview_tasks(self, offset, height);
             }
             Message::PreviewFinished { source, result } => {
                 self.previews.insert(source, Some(result));
@@ -611,8 +1231,331 @@ impl App {
             self.pending_navigation = Some(tab);
             return self.save_next_dirty();
         }
+        if self.publish_options.values().any(|options| options.dirty) {
+            self.pending_navigation = Some(tab);
+            return self.save_next_options();
+        }
+        self.activate_tab(tab, None)
+    }
+
+    fn activate_tab(&mut self, tab: Tab, reveal: Option<String>) -> Task<Message> {
         self.active_tab = tab;
-        Task::none()
+        self.revealed_publication = reveal.clone();
+        let mut tasks = vec![match tab {
+            Tab::Describe => describe::preview_tasks(self, 0, 4),
+            Tab::Calendar => calendar::prepare_task(self),
+            _ => Task::none(),
+        }];
+        if reveal.is_some() {
+            tasks.push(match tab {
+                Tab::Schedule => schedule::scroll_to_target(),
+                Tab::Publish => publish::scroll_to_target(),
+                _ => Task::none(),
+            });
+        }
+        Task::batch(tasks)
+    }
+
+    fn jump_to_publication(&mut self, uuid: String) -> Task<Message> {
+        let Some(row) = self.publication(&uuid) else {
+            self.result = Some(format!("Publication not found: {uuid}"));
+            return Task::none();
+        };
+        let target = match phase(row) {
+            Ok(Phase::Picked | Phase::Scheduled) => Tab::Schedule,
+            Ok(Phase::Described | Phase::Appeared) => Tab::Publish,
+            Err(error) => {
+                self.result = Some(format!("Publication cannot be opened: {error}"));
+                return Task::none();
+            }
+        };
+        self.pending_jump = Some(uuid.clone());
+        if self.any_dirty() {
+            self.pending_navigation = Some(target);
+            return self.save_next_dirty();
+        }
+        if self.publish_options.values().any(|options| options.dirty) {
+            self.pending_navigation = Some(target);
+            return self.save_next_options();
+        }
+        self.pending_jump = None;
+        self.activate_tab(target, Some(uuid))
+    }
+
+    fn select_publish_task(
+        application: Arc<CoreApplication>,
+        uuid: Option<String>,
+        platform: Option<String>,
+        selected: bool,
+    ) -> Task<Message> {
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let data_dir = application.store().paths().data_dir.clone();
+                    let _lock = crate::publish_journal::publisher_lock(&data_dir)?;
+                    let journal = crate::publish_journal::PublishJournal::new(&data_dir)?;
+                    if !selected
+                        && journal
+                            .blocked_attempts_locked(application.store())?
+                            .iter()
+                            .any(|attempt| uuid.as_deref().is_none_or(|id| id == attempt.uuid))
+                    {
+                        return Err(crate::error::Error::ReconciliationRequired(
+                            "unresolved publish attempt cannot be deselected".into(),
+                        ));
+                    }
+                    application.mutate(uuid.as_deref(), |store| {
+                        workflow::select(store, uuid.as_deref(), platform.as_deref(), selected)
+                    })
+                })
+                .await
+                .unwrap_or_else(|error| Err(crate::error::Error::Config(error.to_string())))
+                .map_err(|error| error.to_string())
+            },
+            |result| Message::WorkflowFinished {
+                message: "Saved platform selection".into(),
+                result,
+            },
+        )
+    }
+
+    fn selection_locked(&self, uuid: Option<&str>) -> bool {
+        self.publish_locks.is_none()
+            || self.publish_lock_error.is_some()
+            || self
+                .publish_locks
+                .as_ref()
+                .is_some_and(|locks| uuid.is_none_or(|id| locks.contains(id)))
+    }
+
+    fn options_locked(&self, uuid: &str) -> bool {
+        self.busy
+            || self.publish_active
+            || self.publish_locks.is_none()
+            || self.publish_lock_error.is_some()
+            || self
+                .publish_locks
+                .as_ref()
+                .is_some_and(|locks| locks.contains(uuid))
+    }
+
+    fn ensure_publish_options(&mut self, uuid: &str) {
+        if self.publish_options.contains_key(uuid) {
+            return;
+        }
+        let Some(row) = self.publication(uuid) else {
+            return;
+        };
+        let apparition = row
+            .get("apparitions")
+            .and_then(Value::as_array)
+            .and_then(|apps| {
+                apps.iter().find(|app| {
+                    app.get("platformName").and_then(Value::as_str) == Some("deviantart")
+                })
+            });
+        let draft = PublishOptionsDraft {
+            price: apparition
+                .and_then(|app| app.get("priceIfNotFree"))
+                .and_then(Value::as_f64)
+                .map(|price| price.to_string())
+                .unwrap_or_default(),
+            tiers: apparition
+                .and_then(|app| app.get("tiers"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect(),
+            galleries: apparition
+                .and_then(|app| app.get("galleries"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect(),
+            dirty: false,
+            error: None,
+        };
+        self.publish_options.insert(uuid.to_owned(), draft);
+    }
+
+    fn save_next_options(&mut self) -> Task<Message> {
+        let uuid = self
+            .publish_options
+            .iter()
+            .find(|(_, options)| options.dirty)
+            .map(|(uuid, _)| uuid.clone());
+        uuid.map(|uuid| self.save_options_task(uuid))
+            .unwrap_or_else(|| Task::none())
+    }
+
+    fn save_options_task(&mut self, uuid: String) -> Task<Message> {
+        if self.busy {
+            if let Some(options) = self.publish_options.get_mut(&uuid) {
+                options.error = Some("Another operation is in progress".into());
+            }
+            self.pending_publish = false;
+            self.pending_navigation = None;
+            return Task::none();
+        }
+        if self.publish_active {
+            if let Some(options) = self.publish_options.get_mut(&uuid) {
+                options.error = Some("Publishing options are busy".into());
+            }
+            self.pending_publish = false;
+            self.pending_navigation = None;
+            return Task::done(Message::OptionsSaved {
+                uuid,
+                result: Err("Publishing options are busy".into()),
+            });
+        }
+        self.ensure_publish_options(&uuid);
+        let Some(options) = self.publish_options.get(&uuid) else {
+            return Task::none();
+        };
+        if !options.dirty {
+            return Task::none();
+        }
+        let price = if options.price.trim().is_empty() {
+            Some(None)
+        } else {
+            match options.price.trim().parse::<f64>() {
+                Ok(price) if price.is_finite() && price >= 0.0 => Some(Some(price)),
+                _ => {
+                    if let Some(options) = self.publish_options.get_mut(&uuid) {
+                        options.error =
+                            Some("Price must be blank or a finite nonnegative number".into());
+                    }
+                    self.pending_publish = false;
+                    self.pending_navigation = None;
+                    return Task::done(Message::OptionsSaved {
+                        uuid,
+                        result: Err("Price must be blank or a finite nonnegative number".into()),
+                    });
+                }
+            }
+        };
+        let options = crate::workflow::PlatformOptions {
+            price,
+            tiers: Some(options.tiers.clone()),
+            galleries: Some(options.galleries.clone()),
+        };
+        if self.publish_locks.is_none() || self.publish_lock_error.is_some() {
+            if let Some(draft) = self.publish_options.get_mut(&uuid) {
+                draft.error = Some(
+                    self.publish_lock_error
+                        .clone()
+                        .unwrap_or_else(|| "Checking unresolved publish attempts".into()),
+                );
+            }
+            self.pending_publish = false;
+            self.pending_navigation = None;
+            return Task::done(Message::OptionsSaved {
+                uuid,
+                result: Err(self
+                    .publish_lock_error
+                    .clone()
+                    .unwrap_or_else(|| "Checking unresolved publish attempts".into())),
+            });
+        }
+        if self
+            .publish_locks
+            .as_ref()
+            .is_some_and(|locks| locks.contains(&uuid))
+        {
+            if let Some(draft) = self.publish_options.get_mut(&uuid) {
+                draft.error = Some(
+                    "Unresolved publish attempt must be reconciled before editing options".into(),
+                );
+            }
+            self.pending_publish = false;
+            self.pending_navigation = None;
+            return Task::done(Message::OptionsSaved {
+                uuid,
+                result: Err(
+                    "Unresolved publish attempt must be reconciled before editing options".into(),
+                ),
+            });
+        }
+        self.busy = true;
+        let application = self.application.clone();
+        let save_uuid = uuid.clone();
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let data_dir = application.store().paths().data_dir.clone();
+                    let _lock = crate::publish_journal::publisher_lock(&data_dir)?;
+                    let journal = crate::publish_journal::PublishJournal::new(&data_dir)?;
+                    if journal
+                        .blocked_attempts_locked(application.store())?
+                        .iter()
+                        .any(|attempt| attempt.uuid == save_uuid)
+                    {
+                        return Err(crate::error::Error::ReconciliationRequired(
+                            "unresolved publish attempt blocks option edits".into(),
+                        ));
+                    }
+                    application.mutate(Some(&save_uuid), |store| {
+                        crate::workflow::save_options(store, &save_uuid, options)
+                    })
+                })
+                .await
+                .unwrap_or_else(|error| Err(crate::error::Error::Config(error.to_string())))
+                .map_err(|error| error.to_string())
+            },
+            move |result| Message::OptionsSaved { uuid, result },
+        )
+    }
+
+    fn publish_selected_task(&mut self) -> Task<Message> {
+        let cells = self
+            .publications
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|row| {
+                if !matches!(phase(row), Ok(Phase::Described | Phase::Appeared)) {
+                    return None;
+                }
+                let uuid = row.get("uuid").and_then(Value::as_str)?;
+                let pending = row
+                    .get("apparitions")
+                    .and_then(Value::as_array)?
+                    .iter()
+                    .any(|apparition| {
+                        apparition.get("platformName").and_then(Value::as_str) == Some("deviantart")
+                            && apparition.get("state").and_then(Value::as_str)
+                                == Some("unpublished")
+                    });
+                pending.then(|| crate::publishing::PublishCell {
+                    uuid: uuid.to_owned(),
+                    platform: "deviantart".into(),
+                })
+            })
+            .collect::<Vec<_>>();
+        if cells.is_empty() {
+            self.publish_result = Some("No pending registered deliveries selected".into());
+            return Task::none();
+        }
+        self.publish_cancel
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        self.publish_active = true;
+        self.last_publish_cells = cells.iter().cloned().collect();
+        self.publish_outcomes.clear();
+        self.publish_diagnostic = None;
+        let application = self.application.clone();
+        let cancel = self.publish_cancel.clone();
+        Task::perform(
+            async move {
+                application
+                    .publish_selected_with_diagnostics(cells, cancel)
+                    .await
+            },
+            Message::PublishFinished,
+        )
     }
 
     fn autosave_due(&mut self) -> Task<Message> {
@@ -928,6 +1871,10 @@ impl App {
         self.drafts.values().any(Draft::is_dirty)
     }
 
+    fn publication_exists(&self, uuid: &str) -> bool {
+        self.publication(uuid).is_some()
+    }
+
     fn publication(&self, uuid: &str) -> Option<&Value> {
         self.publications
             .as_ref()?
@@ -980,8 +1927,24 @@ impl App {
         if self.active_tab == Tab::Describe {
             content = content.push(describe::view(self));
         }
+        if self.active_tab == Tab::Publish {
+            content = content.push(publish::view(self));
+        }
+        if self.active_tab == Tab::Calendar {
+            content = content.push(calendar::view(self));
+        }
         if let Some(result) = &self.result {
             content = content.push(text(result));
+        }
+        if self.pending_close && self.publish_active {
+            content = content.push(text("Publishing remains active until its durable outcome and process cleanup are handled."));
+            content = content.push(
+                row![
+                    button("Wait for publishing").on_press(Message::CloseWait),
+                    button("Cancel after current delivery").on_press(Message::CloseCancelPublish),
+                ]
+                .spacing(8),
+            );
         }
         content = content.push(
             row![
@@ -994,6 +1957,69 @@ impl App {
         );
         container(content).padding(24).into()
     }
+}
+
+pub(super) fn prompt_tasks(state: &App) -> Task<Message> {
+    let paths = state
+        .candidates
+        .iter()
+        .map(|candidate| candidate.path.clone())
+        .filter(|path| !state.prompt_matches.contains_key(path))
+        .collect::<Vec<_>>();
+    if paths.is_empty() {
+        return Task::none();
+    }
+    let failed_paths = paths.clone();
+    let archive = state.prompt_archive.clone();
+    let archive_error = state.prompt_archive_error.clone();
+    Task::perform(
+        async move {
+            tokio::task::spawn_blocking(move || {
+                resolve_prompt_matches(archive.as_deref(), archive_error.as_deref(), paths)
+            })
+            .await
+            .unwrap_or_else(|error| {
+                failed_paths
+                    .into_iter()
+                    .map(|path| {
+                        (
+                            path,
+                            PromptMatch::Unknown(format!("prompt resolution failed: {error}")),
+                        )
+                    })
+                    .collect()
+            })
+        },
+        Message::PromptMatchesFinished,
+    )
+}
+
+pub(super) fn resolve_prompt_matches(
+    archive: Option<&PromptArchive>,
+    archive_error: Option<&str>,
+    paths: Vec<PathBuf>,
+) -> Vec<(PathBuf, PromptMatch)> {
+    let mut seen = HashSet::new();
+    paths
+        .into_iter()
+        .filter(|path| seen.insert(path.clone()))
+        .map(|path| {
+            let result = match (archive, archive_error) {
+                (Some(archive), _) => archive.resolve_path(&path),
+                (None, Some(error)) => return (path, PromptMatch::Unknown(error.to_owned())),
+                (None, None) => {
+                    return (
+                        path,
+                        PromptMatch::Unknown("prompt archive is not configured".into()),
+                    );
+                }
+            };
+            let prompt = result.unwrap_or_else(|error| {
+                PromptMatch::Unknown(format!("prompt resolution failed: {error}"))
+            });
+            (path, prompt)
+        })
+        .collect()
 }
 
 fn app_theme(_: &App) -> Theme {
@@ -1011,6 +2037,14 @@ fn row_metadata(row: &Value) -> (String, String) {
             .unwrap_or_default()
             .into(),
     )
+}
+
+fn set_option(options: &mut Vec<String>, value: String, selected: bool) {
+    if selected && !options.contains(&value) {
+        options.push(value);
+    } else if !selected {
+        options.retain(|option| option != &value);
+    }
 }
 
 fn tab_name(tab: Tab) -> &'static str {
@@ -1056,6 +2090,8 @@ mod tests {
                 result: None,
                 pending_navigation: None,
                 pending_close: false,
+                pending_jump: None,
+                revealed_publication: None,
                 started: Instant::now(),
                 search_limit: 25,
                 search_paths: Vec::new(),
@@ -1075,6 +2111,27 @@ mod tests {
                 pending_local_consent: None,
                 local_fit: None,
                 local_status_request: 0,
+                publish_result: None,
+                publish_diagnostic: None,
+                publish_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                publish_active: false,
+                pending_publish: false,
+                publish_options: HashMap::new(),
+                publish_locks: Some(HashSet::new()),
+                publish_lock_error: None,
+                publish_attempts: Vec::new(),
+                publish_outcomes: HashMap::new(),
+                last_publish_cells: HashSet::new(),
+                reconcile_urls: HashMap::new(),
+                prompt_archive: None,
+                prompt_archive_error: None,
+                prompt_matches: HashMap::new(),
+                calendar_preparing: false,
+                calendar_prepared: false,
+                calendar_error: None,
+                calendar_artwork: HashMap::new(),
+                calendar_previews: HashMap::new(),
+                url_opener: calendar::system_open_url,
             },
             root,
         )
@@ -1162,5 +2219,181 @@ mod tests {
         assert!(app.publications.is_none());
         assert_eq!(app.load_error.as_deref(), Some("malformed JSON"));
         assert!(!app.search_authorized);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn typed_uncertainty_with_worker_stderr_refreshes_receipt_and_store_through_ui() {
+        use iced_runtime::{Action, futures::futures::StreamExt};
+        use serde_json::json;
+        use std::os::unix::fs::PermissionsExt;
+
+        async fn run_task(task: Task<Message>) -> Vec<Message> {
+            let Some(mut actions) = iced_runtime::task::into_stream(task) else {
+                return Vec::new();
+            };
+            let mut messages = Vec::new();
+            while let Some(action) = actions.next().await {
+                if let Action::Output(message) = action {
+                    messages.push(message);
+                }
+            }
+            messages
+        }
+
+        async fn dispatch(app: &mut App, task: Task<Message>) -> Vec<Message> {
+            let mut pending = run_task(task).await;
+            let mut messages = Vec::new();
+            while !pending.is_empty() {
+                let mut next = Vec::new();
+                for message in pending {
+                    next.extend(run_task(app.update(message.clone())).await);
+                    messages.push(message);
+                }
+                pending = next;
+            }
+            messages
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let data_dir = root.path();
+        let tags = data_dir.join("tags.txt");
+        std::fs::write(&tags, "fake tag\n").unwrap();
+        let mut rows = Vec::new();
+        for n in 1..=2 {
+            let image = data_dir.join(format!("{n}.png"));
+            assert!(
+                std::process::Command::new("magick")
+                    .args(["-size", "4x3", "xc:white"])
+                    .arg(&image)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            rows.push(json!({
+                "uuid": format!("00000000-0000-4000-8000-{n:012}"),
+                "state":"DESCRIBED", "title":"Title", "description":"Description",
+                "submissionTimestamp":1_700_002_800,
+                "apparitionTimestampIfDifferentThanSubmission":1_700_002_800,
+                "files":[{"basename":format!("{n}.png"),"sha512sum":crate::images::file_sha512(&image).unwrap()}],
+                "apparitions":[{"platformName":"deviantart","state":"unpublished","tiers":[],"galleries":[]}]
+            }));
+        }
+        let paths = Paths::resolve(Some(data_dir), None).unwrap();
+        let store = Arc::new(
+            Store::new(
+                paths,
+                Config {
+                    tags: Some("tags.txt".into()),
+                    ..Config::default()
+                },
+            )
+            .unwrap(),
+        );
+        std::fs::write(&store.paths().json, serde_json::to_vec(&rows).unwrap()).unwrap();
+        let calls = data_dir.join("calls.log");
+        let worker = data_dir.join("worker.sh");
+        std::fs::write(&worker, format!(r#"#!/bin/sh
+[ "$1" = "--check-steps" ] && exit 0
+while IFS= read -r line; do
+  kind=$(printf '%s' "$line" | jq -r .type)
+  case "$kind" in
+    open) echo '{{"protocol":1,"type":"ready"}}' ;;
+    submit)
+      uuid=$(printf '%s' "$line" | jq -r .uuid)
+      attempt=$(printf '%s' "$line" | jq -r .attempt_id)
+      echo "$uuid" >> '{}'
+      printf 'simulated worker stderr\n' >&2
+      printf '{{"protocol":1,"type":"scheduled","attempt_id":"%s","uuid":"%s","url":"https://example.test/%s"}}\n' "$attempt" "$uuid" "$uuid"
+      ;;
+    close) exit 0 ;;
+  esac
+done
+"#, calls.display())).unwrap();
+        let mut permissions = std::fs::metadata(&worker).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&worker, permissions).unwrap();
+        let application = Arc::new(
+            CoreApplication::new(
+                store.clone(),
+                MetadataClient::new(
+                    reqwest::Client::new(),
+                    Endpoints::default(),
+                    "llmfit".into(),
+                ),
+                || 0,
+            )
+            .with_publisher(crate::publishing::Publisher::new(
+                worker,
+                data_dir.join("skill.md"),
+            )),
+        );
+        let (mut app, init) = App::from_application(
+            application,
+            UiOptions {
+                openrouter_model: None,
+                ai_timeout: Duration::from_secs(1),
+            },
+        );
+        dispatch(&mut app, init).await;
+        crate::store::fail_next_commit_for_test(crate::store::CommitFailureForTest::AfterRename);
+        let task = app.update(Message::PublishSelected);
+        let messages = dispatch(&mut app, task).await;
+        let completion = messages
+            .iter()
+            .find_map(|message| match message {
+                Message::PublishFinished(completion) => Some(completion),
+                _ => None,
+            })
+            .expect("Publisher result reaches native App consumer");
+        assert!(
+            completion
+                .result
+                .as_ref()
+                .unwrap_err()
+                .contains("may be visible but is not confirmed durable")
+        );
+        assert_eq!(
+            completion.diagnostics.as_deref(),
+            Some("simulated worker stderr")
+        );
+        assert_eq!(std::fs::read_to_string(calls).unwrap().lines().count(), 1);
+        assert_eq!(
+            store.read().unwrap()[0]["apparitions"][0]["state"],
+            "published_or_scheduled"
+        );
+        assert_eq!(
+            store.read().unwrap()[1]["apparitions"][0]["state"],
+            "unpublished"
+        );
+        assert!(matches!(
+            app.publish_attempts()[0].state,
+            AttemptState::ScheduledUnapplied { .. }
+        ));
+        assert_eq!(
+            app.publish_cell_outcome("00000000-0000-4000-8000-000000000001")
+                .unwrap()
+                .state,
+            PublishCellState::Unknown
+        );
+        let receipt: Value = serde_json::from_slice(
+            &std::fs::read(data_dir.join(format!(
+                ".publicator/publish/{}/receipt.json",
+                app.publish_attempts()[0].attempt_id
+            )))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(receipt["terminal"]["type"], "scheduled");
+        assert_eq!(receipt["applied"], false);
+        assert!(
+            app.publish_result
+                .as_deref()
+                .unwrap()
+                .contains("may be visible but is not confirmed durable")
+        );
+        assert_eq!(
+            app.publish_diagnostic.as_deref(),
+            Some("simulated worker stderr")
+        );
     }
 }

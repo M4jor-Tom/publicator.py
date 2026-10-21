@@ -43,6 +43,45 @@ impl Default for Timeouts {
     }
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct PublishCell {
+    pub uuid: String,
+    pub platform: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PublishCellState {
+    Success,
+    SafeFailed,
+    Unknown,
+    Unattempted,
+    ConfirmedNotSubmitted,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PublishCellOutcome {
+    pub cell: PublishCell,
+    pub state: PublishCellState,
+    pub detail: Option<String>,
+}
+
+impl PublishCellOutcome {
+    pub fn retryable(&self) -> bool {
+        matches!(
+            &self.state,
+            PublishCellState::SafeFailed
+                | PublishCellState::Unattempted
+                | PublishCellState::ConfirmedNotSubmitted
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PublishCompletion {
+    pub result: std::result::Result<PublishReport, String>,
+    pub diagnostics: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct PublishRequest {
     pub uuids: Option<Vec<String>>,
@@ -55,6 +94,7 @@ pub struct PublishReport {
     pub unknown: usize,
     pub unattempted: usize,
     pub error: Option<String>,
+    pub outcomes: Vec<PublishCellOutcome>,
 }
 pub struct Publisher {
     worker: PathBuf,
@@ -95,90 +135,144 @@ impl Publisher {
         request: PublishRequest,
         cancel: Arc<AtomicBool>,
     ) -> Result<PublishReport> {
-        let _lease = app.begin_publishing()?;
-        let store = app.store();
-        let journal = PublishJournal::new(&store.paths().data_dir)?;
-        let _lock = publish_journal::publisher_lock(&store.paths().data_dir)?;
-        let recovery = journal.recover(store)?;
-        if !recovery.blocked.is_empty() {
-            return Err(Error::ReconciliationRequired(
-                "unresolved publishing attempts require reconciliation".into(),
-            ));
-        }
-        let rows = store.read()?;
-        let targets = pending_targets(&rows, request.uuids.as_deref())?;
-        if targets.is_empty() {
-            return Ok(PublishReport::default());
-        }
-        // Validate every selected record and file before opening a browser process.
-        let zone = scheduling::timezone(store.config())?;
-        let mut batch = Vec::new();
-        let mut staged_uploads: Vec<TempDir> = Vec::new();
-        for row in targets {
-            let uuid = row
-                .get("uuid")
-                .and_then(Value::as_str)
-                .ok_or_else(|| Error::Validation("publication UUID missing".into()))?;
-            let approved = publish_journal::snapshot(store, uuid)?;
-            let basename = row
-                .get("files")
-                .and_then(Value::as_array)
-                .and_then(|f| f.first())
-                .and_then(|f| f.get("basename"))
-                .and_then(Value::as_str)
-                .ok_or_else(|| Error::Validation("artwork basename missing".into()))?;
-            let image = index_by_basename(&store.paths().data_dir)?
-                .remove(basename)
-                .ok_or_else(|| Error::NotFound(format!("artwork {basename}")))?;
-            let staging = tempfile::tempdir_in(store.paths().data_dir.join(".publicator"))?;
-            let upload = prepare_upload(&image, staging.path())?;
-            validate_upload(&upload)?;
-            let attempt_id = uuid::Uuid::new_v4().to_string();
-            let job = make_job(&approved, attempt_id, upload, zone)?;
-            staged_uploads.push(staging);
-            job_command_valid(&job)?;
-            batch.push((approved, job));
-        }
-        self.check_steps().await?;
-        let mut child = start_worker(&self.worker)?;
-        let process_group = child.id();
-        let diagnostics = child.stderr.take().map(|mut stderr| {
-            tokio::spawn(async move {
-                let mut retained = Vec::new();
-                let mut chunk = [0u8; 4096];
-                loop {
-                    let count = match stderr.read(&mut chunk).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(count) => count,
-                    };
-                    let remaining = 8192usize.saturating_sub(retained.len());
-                    retained.extend_from_slice(&chunk[..count.min(remaining)]);
-                }
-                retained
-            })
-        });
-        let result = self
-            .run_batch(
-                &mut child,
-                &journal,
-                store,
-                &batch,
-                request.headless,
-                zone,
-                self.timeouts,
-                &cancel,
-            )
+        self.publish_inner(app, request, cancel, None).await
+    }
+
+    async fn publish_inner(
+        &self,
+        app: &Application,
+        request: PublishRequest,
+        cancel: Arc<AtomicBool>,
+        expected_cells: Option<&[PublishCell]>,
+    ) -> Result<PublishReport> {
+        let execution = self
+            .publish_inner_with_diagnostics(app, request, cancel, expected_cells)
             .await;
-        shutdown(&mut child, self.timeouts.cleanup, process_group).await;
-        let diagnostics = match diagnostics {
-            Some(task) => task.await.unwrap_or_default(),
-            None => Vec::new(),
-        };
-        if diagnostics.is_empty() {
-            return result;
+        if let (Err(_), Some(detail)) = (&execution.result, &execution.diagnostics) {
+            eprintln!("publisher worker stderr (original error preserved): {detail}");
         }
-        let detail = String::from_utf8_lossy(&diagnostics);
-        with_worker_diagnostics(result, &detail)
+        execution.result
+    }
+
+    async fn publish_inner_with_diagnostics(
+        &self,
+        app: &Application,
+        request: PublishRequest,
+        cancel: Arc<AtomicBool>,
+        expected_cells: Option<&[PublishCell]>,
+    ) -> PublishExecution {
+        let mut worker_diagnostics = None;
+        let result = async {
+            let _lease = app.begin_publishing()?;
+            let store = app.store();
+            let journal = PublishJournal::new(&store.paths().data_dir)?;
+            let _lock = publish_journal::publisher_lock(&store.paths().data_dir)?;
+            let recovery = journal.recover(store)?;
+            if !recovery.blocked.is_empty() {
+                return Err(Error::ReconciliationRequired(
+                    "unresolved publishing attempts require reconciliation".into(),
+                ));
+            }
+            let rows = store.read()?;
+            let targets = pending_targets(&rows, request.uuids.as_deref())?;
+            if let Some(expected) = expected_cells {
+                let actual = targets
+                    .iter()
+                    .filter_map(|row| row.get("uuid").and_then(Value::as_str))
+                    .map(|uuid| PublishCell {
+                        uuid: uuid.to_owned(),
+                        platform: "deviantart".into(),
+                    })
+                    .collect::<std::collections::HashSet<_>>();
+                let expected_set = expected
+                    .iter()
+                    .cloned()
+                    .collect::<std::collections::HashSet<_>>();
+                if actual != expected_set || expected_set.len() != expected.len() {
+                    return Err(Error::InvalidState(
+                        "selected publishing cells changed before publisher admission".into(),
+                    ));
+                }
+            }
+            if targets.is_empty() {
+                return Ok(PublishReport::default());
+            }
+            let zone = scheduling::timezone(store.config())?;
+            let mut batch = Vec::new();
+            let mut staged_uploads: Vec<TempDir> = Vec::new();
+            for row in targets {
+                let uuid = row
+                    .get("uuid")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| Error::Validation("publication UUID missing".into()))?;
+                let approved = publish_journal::snapshot(store, uuid)?;
+                let basename = row
+                    .get("files")
+                    .and_then(Value::as_array)
+                    .and_then(|f| f.first())
+                    .and_then(|f| f.get("basename"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| Error::Validation("artwork basename missing".into()))?;
+                let image = index_by_basename(&store.paths().data_dir)?
+                    .remove(basename)
+                    .ok_or_else(|| Error::NotFound(format!("artwork {basename}")))?;
+                let staging = tempfile::tempdir_in(store.paths().data_dir.join(".publicator"))?;
+                let upload = prepare_upload(&image, staging.path())?;
+                validate_upload(&upload)?;
+                let attempt_id = uuid::Uuid::new_v4().to_string();
+                let job = make_job(&approved, attempt_id, upload, zone)?;
+                staged_uploads.push(staging);
+                job_command_valid(&job)?;
+                batch.push((approved, job));
+            }
+            self.check_steps().await?;
+            let mut child = start_worker(&self.worker)?;
+            let process_group = child.id();
+            let diagnostics = child.stderr.take().map(|mut stderr| {
+                tokio::spawn(async move {
+                    let mut retained = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    loop {
+                        let count = match stderr.read(&mut chunk).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(count) => count,
+                        };
+                        let remaining = 8192usize.saturating_sub(retained.len());
+                        retained.extend_from_slice(&chunk[..count.min(remaining)]);
+                    }
+                    retained
+                })
+            });
+            let result = self
+                .run_batch(
+                    &mut child,
+                    &journal,
+                    store,
+                    &batch,
+                    request.headless,
+                    zone,
+                    self.timeouts,
+                    &cancel,
+                )
+                .await;
+            shutdown(&mut child, self.timeouts.cleanup, process_group).await;
+            let diagnostics = match diagnostics {
+                Some(task) => task.await.unwrap_or_default(),
+                None => Vec::new(),
+            };
+            if diagnostics.is_empty() {
+                return result;
+            }
+            let detail = String::from_utf8_lossy(&diagnostics);
+            let (result, diagnostics) = with_worker_diagnostics(result, &detail);
+            worker_diagnostics = diagnostics;
+            result
+        }
+        .await;
+        PublishExecution {
+            result,
+            diagnostics: worker_diagnostics,
+        }
     }
     async fn run_batch(
         &self,
@@ -221,16 +315,18 @@ impl Publisher {
             _ => return Err(Error::Protocol("worker did not become ready".into())),
         }
         let mut report = PublishReport::default();
-        for (approved, job) in batch {
+        for (index, (approved, job)) in batch.iter().enumerate() {
+            let cell = PublishCell {
+                uuid: job.uuid.clone(),
+                platform: "deviantart".into(),
+            };
             if cancel.load(Ordering::SeqCst) {
-                report.unattempted +=
-                    batch.len() - report.published - report.failed - report.unknown;
+                record_unattempted(&mut report, batch, index);
                 break;
             }
             let fresh = publish_journal::snapshot(store, &job.uuid)?;
             if fresh != *approved {
-                report.unattempted +=
-                    batch.len() - report.published - report.failed - report.unknown;
+                record_unattempted(&mut report, batch, index);
                 break;
             }
             journal.begin(job, approved)?;
@@ -247,10 +343,10 @@ impl Publisher {
                 ))),
             };
             if let Err(error) = send_result {
-                report.unknown += 1;
-                report.error = Some(error.to_string());
-                report.unattempted +=
-                    batch.len() - report.published - report.failed - report.unknown;
+                let detail = error.to_string();
+                report.error = Some(detail.clone());
+                record_outcome(&mut report, cell, PublishCellState::Unknown, Some(detail));
+                record_unattempted(&mut report, batch, index + 1);
                 break;
             }
             let event = match tokio::time::timeout_at(
@@ -260,18 +356,18 @@ impl Publisher {
             .await
             {
                 Ok(Ok(event)) => event,
-                Ok(Err(e)) => {
-                    report.unknown += 1;
-                    report.error = Some(e.to_string());
-                    report.unattempted +=
-                        batch.len() - report.published - report.failed - report.unknown;
+                Ok(Err(error)) => {
+                    let detail = error.to_string();
+                    report.error = Some(detail.clone());
+                    record_outcome(&mut report, cell, PublishCellState::Unknown, Some(detail));
+                    record_unattempted(&mut report, batch, index + 1);
                     break;
                 }
                 Err(_) => {
-                    report.unknown += 1;
-                    report.error = Some("worker artwork timeout; result is unknown".into());
-                    report.unattempted +=
-                        batch.len() - report.published - report.failed - report.unknown;
+                    let detail = "worker artwork timeout; result is unknown".to_owned();
+                    report.error = Some(detail.clone());
+                    record_outcome(&mut report, cell, PublishCellState::Unknown, Some(detail));
+                    record_unattempted(&mut report, batch, index + 1);
                     break;
                 }
             };
@@ -279,20 +375,18 @@ impl Publisher {
             match event {
                 WorkerEvent::Scheduled { attempt_id, .. } => {
                     journal.apply_scheduled(store, &attempt_id)?;
-                    report.published += 1;
+                    record_outcome(&mut report, cell, PublishCellState::Success, None);
                 }
                 WorkerEvent::Failed { error, .. } => {
-                    report.failed += 1;
-                    report.error = Some(error);
-                    report.unattempted +=
-                        batch.len() - report.published - report.failed - report.unknown;
+                    report.error = Some(error.clone());
+                    record_outcome(&mut report, cell, PublishCellState::SafeFailed, Some(error));
+                    record_unattempted(&mut report, batch, index + 1);
                     break;
                 }
                 WorkerEvent::Unknown { error, .. } => {
-                    report.unknown += 1;
-                    report.error = Some(error);
-                    report.unattempted +=
-                        batch.len() - report.published - report.failed - report.unknown;
+                    report.error = Some(error.clone());
+                    record_outcome(&mut report, cell, PublishCellState::Unknown, Some(error));
+                    record_unattempted(&mut report, batch, index + 1);
                     break;
                 }
                 _ => return Err(Error::Protocol("unexpected worker terminal".into())),
@@ -306,25 +400,68 @@ impl Publisher {
         Ok(report)
     }
 }
-fn with_worker_diagnostics(result: Result<PublishReport>, detail: &str) -> Result<PublishReport> {
-    if detail.trim().is_empty() {
-        return result;
+struct PublishExecution {
+    result: Result<PublishReport>,
+    diagnostics: Option<String>,
+}
+
+fn record_outcome(
+    report: &mut PublishReport,
+    cell: PublishCell,
+    state: PublishCellState,
+    detail: Option<String>,
+) {
+    match state {
+        PublishCellState::Success => report.published += 1,
+        PublishCellState::SafeFailed => report.failed += 1,
+        PublishCellState::Unknown => report.unknown += 1,
+        PublishCellState::Unattempted | PublishCellState::ConfirmedNotSubmitted => {
+            report.unattempted += 1
+        }
     }
-    match result {
+    report.outcomes.push(PublishCellOutcome {
+        cell,
+        state,
+        detail,
+    });
+}
+
+fn record_unattempted(
+    report: &mut PublishReport,
+    batch: &[(publish_journal::ApprovedSnapshot, PublishJob)],
+    start: usize,
+) {
+    for (_, job) in batch.iter().skip(start) {
+        record_outcome(
+            report,
+            PublishCell {
+                uuid: job.uuid.clone(),
+                platform: "deviantart".into(),
+            },
+            PublishCellState::Unattempted,
+            None,
+        );
+    }
+}
+
+fn with_worker_diagnostics(
+    result: Result<PublishReport>,
+    detail: &str,
+) -> (Result<PublishReport>, Option<String>) {
+    let detail = detail.trim();
+    if detail.is_empty() {
+        return (result, None);
+    }
+    let result = match result {
         Ok(mut report) => {
             if let Some(error) = &mut report.error {
-                error.push_str(&format!("; worker stderr: {}", detail.trim()));
+                error.push_str(&format!("; worker stderr: {detail}"));
             }
             Ok(report)
         }
-        Err(error) => {
-            eprintln!(
-                "publisher worker stderr (original error preserved): {}",
-                detail.trim()
-            );
-            Err(error)
-        }
-    }
+        Err(error) => Err(error),
+    };
+    (result, Some(detail.to_owned()))
 }
 impl Application {
     pub fn with_publisher(mut self, publisher: Publisher) -> Self {
@@ -341,6 +478,61 @@ impl Application {
             .as_ref()
             .ok_or_else(|| Error::InvalidState("publisher is not configured".into()))?;
         publisher.publish(self, request, cancel).await
+    }
+
+    pub async fn publish_selected(
+        &self,
+        cells: Vec<PublishCell>,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<PublishReport> {
+        let publisher = self
+            .publisher
+            .as_ref()
+            .ok_or_else(|| Error::InvalidState("publisher is not configured".into()))?;
+        let uuids = cells
+            .iter()
+            .map(|cell| cell.uuid.clone())
+            .collect::<Vec<_>>();
+        publisher
+            .publish_inner(
+                self,
+                PublishRequest {
+                    uuids: Some(uuids),
+                    headless: false,
+                },
+                cancel,
+                Some(&cells),
+            )
+            .await
+    }
+
+    pub async fn publish_selected_with_diagnostics(
+        &self,
+        cells: Vec<PublishCell>,
+        cancel: Arc<AtomicBool>,
+    ) -> PublishCompletion {
+        let Some(publisher) = self.publisher.as_ref() else {
+            return PublishCompletion {
+                result: Err("invalid state: publisher is not configured".into()),
+                diagnostics: None,
+            };
+        };
+        let uuids = cells.iter().map(|cell| cell.uuid.clone()).collect();
+        let execution = publisher
+            .publish_inner_with_diagnostics(
+                self,
+                PublishRequest {
+                    uuids: Some(uuids),
+                    headless: false,
+                },
+                cancel,
+                Some(&cells),
+            )
+            .await;
+        PublishCompletion {
+            result: execution.result.map_err(|error| error.to_string()),
+            diagnostics: execution.diagnostics,
+        }
     }
 }
 pub fn first_pending_uuid(rows: &[Value]) -> Result<Option<String>> {

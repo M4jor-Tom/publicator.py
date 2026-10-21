@@ -87,6 +87,102 @@ fn success_receipt_replay_does_not_need_a_browser() {
 }
 
 #[test]
+fn locked_attempt_snapshot_is_read_only_and_only_unresolved_attempts_block() {
+    use publicator::publish_journal::publisher_lock;
+    let f = publish_fixture();
+    let journal = PublishJournal::new(f.root.path()).unwrap();
+    let _lock = publisher_lock(f.root.path()).unwrap();
+    assert!(
+        journal
+            .blocked_attempts_locked(&f.store)
+            .unwrap()
+            .is_empty()
+    );
+
+    let (job, snap) = job_for(&f);
+    journal.begin(&job, &snap).unwrap();
+    let publication_before = std::fs::read(&f.store.paths().json).unwrap();
+    let receipt_path = f.path(&format!(
+        ".publicator/publish/{}/receipt.json",
+        job.attempt_id
+    ));
+    let receipt_before = std::fs::read(&receipt_path).unwrap();
+    assert_eq!(journal.blocked_attempts_locked(&f.store).unwrap().len(), 1);
+    assert_eq!(std::fs::read(&receipt_path).unwrap(), receipt_before);
+    assert_eq!(
+        std::fs::read(&f.store.paths().json).unwrap(),
+        publication_before
+    );
+
+    journal.terminal(&scheduled(&job)).unwrap();
+    assert_eq!(journal.blocked_attempts_locked(&f.store).unwrap().len(), 1);
+    journal.applied(&job.attempt_id).unwrap();
+    assert!(
+        journal
+            .blocked_attempts_locked(&f.store)
+            .unwrap()
+            .is_empty()
+    );
+
+    let mut failed_job = job.clone();
+    failed_job.attempt_id = uuid::Uuid::new_v4().to_string();
+    journal.begin(&failed_job, &snap).unwrap();
+    journal
+        .terminal(&WorkerEvent::Failed {
+            protocol: 1,
+            attempt_id: failed_job.attempt_id.clone(),
+            uuid: failed_job.uuid.clone(),
+            error: "safe failure".into(),
+        })
+        .unwrap();
+    assert!(
+        journal
+            .blocked_attempts_locked(&f.store)
+            .unwrap()
+            .is_empty()
+    );
+
+    let mut not_submitted_job = job.clone();
+    not_submitted_job.attempt_id = uuid::Uuid::new_v4().to_string();
+    journal.begin(&not_submitted_job, &snap).unwrap();
+    drop(_lock);
+    journal
+        .reconcile(
+            &f.store,
+            &not_submitted_job.attempt_id,
+            publicator::publish_journal::ReconcileOutcome::NotSubmitted,
+        )
+        .unwrap();
+    let _lock = publisher_lock(f.root.path()).unwrap();
+    assert!(
+        journal
+            .blocked_attempts_locked(&f.store)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn locked_attempt_snapshot_surfaces_busy_and_malformed_receipt() {
+    use publicator::publish_journal::publisher_lock;
+    let f = publish_fixture();
+    let journal = PublishJournal::new(f.root.path()).unwrap();
+    let _lock = publisher_lock(f.root.path()).unwrap();
+    assert!(matches!(
+        publisher_lock(f.root.path()),
+        Err(publicator::error::Error::Busy(_))
+    ));
+    let (job, snap) = job_for(&f);
+    journal.begin(&job, &snap).unwrap();
+    let receipt = f.path(&format!(
+        ".publicator/publish/{}/receipt.json",
+        job.attempt_id
+    ));
+    std::fs::write(&receipt, b"{").unwrap();
+    assert!(journal.blocked_attempts_locked(&f.store).is_err());
+}
+
+#[test]
 fn pending_attempt_blocks_automatic_retry_and_explicit_not_submitted_releases_it() {
     use publicator::publish_journal::ReconcileOutcome;
     let f = publish_fixture();

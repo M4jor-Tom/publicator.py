@@ -203,6 +203,10 @@ pub fn view(state: &App) -> Element<'_, Message> {
             ]
             .spacing(10),
         );
+        cards = cards.push(match state.prompt_match(&candidate.path) {
+            Some(match_) => super::prompt::view(match_),
+            None => text("Resolving prompt…").into(),
+        });
     }
     if let Some(candidate) = &state.pending_delete {
         cards = cards.push(

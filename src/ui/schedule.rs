@@ -14,6 +14,8 @@ use iced::{
 use serde_json::Value;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+const SCROLL_ID: &str = "schedule-publications";
+
 pub fn edit_date(application: &Application, uuid: &str, edit: DateEdit, now: i64) -> Result<()> {
     application.mutate(Some(uuid), |store| {
         workflow::edit_date(store, uuid, edit, now)
@@ -114,14 +116,14 @@ pub(super) fn date_parts(state: &App, row: &Value) -> (String, String) {
 pub fn view(state: &App) -> Element<'_, Message> {
     let config = state.application.store().config();
     let configured_profiles = profiles(config).unwrap_or_default();
-    let rows = state.publications.as_deref().unwrap_or_default();
+    let rows = ordered_rows(
+        state.publications.as_deref().unwrap_or_default(),
+        state.revealed_publication(),
+    );
     let mut cards =
         column![text("Schedule dates are shown in the configured timezone.")].spacing(12);
     for row in rows {
         let current = phase(row).ok();
-        if !matches!(current, Some(Phase::Picked | Phase::Scheduled)) {
-            continue;
-        }
         let Some(uuid) = row.get("uuid").and_then(Value::as_str) else {
             continue;
         };
@@ -140,20 +142,22 @@ pub fn view(state: &App) -> Element<'_, Message> {
                         .to_string()
                 })
                 .unwrap_or_else(|| "Date unavailable".into());
-            cards = cards.push(
-                column![
-                    text(format!("{title} — {date}")),
-                    button("Return to Pick").on_press(Message::ReturnToPick(uuid))
-                ]
-                .spacing(4),
-            );
+            let mut card = column![text(format!("{title} — {date}"))].spacing(4);
+            if state.revealed_publication() == Some(uuid.as_str()) {
+                card = card.push(text("Opened from Calendar"));
+            }
+            cards = cards
+                .push(card.push(button("Return to Pick").on_press(Message::ReturnToPick(uuid))));
             continue;
         }
         let (date, time) = date_parts(state, row);
-        let date_uuid = uuid.clone();
-        let time_uuid = uuid.clone();
         let mut card =
             column![text(format!("{title} — {uuid}")), text("Read-only presets")].spacing(5);
+        if state.revealed_publication() == Some(uuid.as_str()) {
+            card = card.push(text("Opened from Calendar"));
+        }
+        let date_uuid = uuid.clone();
+        let time_uuid = uuid.clone();
         for profile in &configured_profiles {
             let name = profile.name.clone();
             let action_uuid = uuid.clone();
@@ -198,7 +202,47 @@ pub fn view(state: &App) -> Element<'_, Message> {
         }));
         cards = cards.push(card);
     }
-    column![scrollable(cards).height(Length::Fill)]
+    column![scrollable(cards).id(SCROLL_ID).height(Length::Fill)]
         .spacing(8)
         .into()
+}
+
+fn ordered_rows<'a>(rows: &'a [Value], target: Option<&str>) -> Vec<&'a Value> {
+    let mut rows = rows
+        .iter()
+        .filter(|row| matches!(phase(row), Ok(Phase::Picked | Phase::Scheduled)))
+        .collect::<Vec<_>>();
+    if let Some(target) = target
+        && let Some(index) = rows
+            .iter()
+            .position(|row| row.get("uuid").and_then(Value::as_str) == Some(target))
+    {
+        rows.swap(0, index);
+    }
+    rows
+}
+
+pub(super) fn scroll_to_target() -> Task<Message> {
+    iced::widget::operation::scroll_to(
+        SCROLL_ID,
+        iced::widget::operation::AbsoluteOffset {
+            x: None,
+            y: Some(0.0),
+        },
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn revealed_schedule_publication_is_first_in_the_scroll_list() {
+        let rows = vec![
+            serde_json::json!({"uuid":"first", "state":"PICKED"}),
+            serde_json::json!({"uuid":"target", "state":"SCHEDULED"}),
+        ];
+        let ordered = ordered_rows(&rows, Some("target"));
+        assert_eq!(ordered[0]["uuid"], "target");
+    }
 }

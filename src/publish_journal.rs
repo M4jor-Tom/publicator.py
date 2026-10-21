@@ -59,6 +59,50 @@ pub struct UnresolvedAttempt {
     pub approved: ApprovedSnapshot,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum AttemptState {
+    Pending,
+    ScheduledUnapplied { actual_url: Option<String> },
+    SafeFailed { error: String },
+    Unknown { error: String },
+    Applied { actual_url: Option<String> },
+    NotSubmitted,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AttemptStatus {
+    pub attempt_id: String,
+    pub uuid: String,
+    pub approved: ApprovedSnapshot,
+    pub state: AttemptState,
+    pub database_matches: bool,
+    pub current_matches: Option<bool>,
+    pub current_error: Option<String>,
+}
+
+impl AttemptStatus {
+    pub fn blocks_retry(&self) -> bool {
+        !self.database_matches
+            || matches!(
+                &self.state,
+                AttemptState::Pending
+                    | AttemptState::ScheduledUnapplied { .. }
+                    | AttemptState::Unknown { .. }
+            )
+    }
+
+    pub fn reason(&self) -> &'static str {
+        match &self.state {
+            AttemptState::Pending => "publish intent has no terminal receipt",
+            AttemptState::ScheduledUnapplied { .. } => "scheduled receipt awaits application",
+            AttemptState::SafeFailed { .. } => "worker confirmed a safe failure",
+            AttemptState::Unknown { .. } => "submission outcome is unknown",
+            AttemptState::Applied { .. } => "scheduled delivery is applied",
+            AttemptState::NotSubmitted => "human confirmed not submitted",
+        }
+    }
+}
+
 pub struct PublishJournal {
     data_dir: PathBuf,
     root: PathBuf,
@@ -358,6 +402,123 @@ impl PublishJournal {
         self.applied(attempt_id)
     }
 
+    /// Read attempt outcomes without replaying or mutating receipts. Caller holds `publisher_lock`.
+    pub fn attempt_statuses_locked(&self, store: &Store) -> Result<Vec<AttemptStatus>> {
+        let rows = store.read()?;
+        let entries = match fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut paths = entries.collect::<std::io::Result<Vec<_>>>()?;
+        paths.sort_by_key(|entry| entry.file_name());
+        let mut attempts = Vec::new();
+        for entry in paths {
+            let attempt_id = entry.file_name().to_string_lossy().into_owned();
+            validate_attempt(&attempt_id)?;
+            if !entry.file_type()?.is_dir() {
+                return Err(Error::Protocol(
+                    "publish journal entry is not a directory".into(),
+                ));
+            }
+            let receipt = self.read_receipt(&attempt_id)?;
+            let state = if receipt.not_submitted {
+                AttemptState::NotSubmitted
+            } else if receipt.applied {
+                match &receipt.terminal {
+                    Some(WorkerEvent::Scheduled { url, .. }) => AttemptState::Applied {
+                        actual_url: url.clone(),
+                    },
+                    _ => return Err(Error::Protocol("applied receipt is not scheduled".into())),
+                }
+            } else {
+                match &receipt.terminal {
+                    Some(WorkerEvent::Scheduled { url, .. }) => AttemptState::ScheduledUnapplied {
+                        actual_url: url.clone(),
+                    },
+                    Some(WorkerEvent::Failed { error, .. }) => AttemptState::SafeFailed {
+                        error: error.clone(),
+                    },
+                    Some(WorkerEvent::Unknown { error, .. }) => AttemptState::Unknown {
+                        error: error.clone(),
+                    },
+                    None => AttemptState::Pending,
+                    _ => return Err(Error::Protocol("invalid publish terminal receipt".into())),
+                }
+            };
+            let database_matches = receipt.approved.database_path == store.paths().json;
+            let needs_comparison = database_matches
+                && matches!(
+                    &state,
+                    AttemptState::Pending
+                        | AttemptState::ScheduledUnapplied { .. }
+                        | AttemptState::Unknown { .. }
+                );
+            let (current_matches, current_error) = if needs_comparison {
+                match rows
+                    .iter()
+                    .find(|row| row.get("uuid").and_then(Value::as_str) == Some(&receipt.job.uuid))
+                    .ok_or_else(|| Error::NotFound(receipt.job.uuid.clone()))
+                    .and_then(|row| snapshot_row(store, row))
+                {
+                    Ok(current) => (Some(current == receipt.approved), None),
+                    Err(error) => (Some(false), Some(error.to_string())),
+                }
+            } else {
+                (None, None)
+            };
+            attempts.push(AttemptStatus {
+                attempt_id,
+                uuid: receipt.job.uuid,
+                approved: receipt.approved,
+                state,
+                database_matches,
+                current_matches,
+                current_error,
+            });
+        }
+        Ok(attempts)
+    }
+
+    /// Read unresolved option locks without replaying or mutating any receipt.
+    /// Caller holds `publisher_lock` so the result stays stable through the guarded edit.
+    pub fn blocked_attempts_locked(&self, store: &Store) -> Result<Vec<UnresolvedAttempt>> {
+        let entries = match fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut paths = entries.collect::<std::io::Result<Vec<_>>>()?;
+        paths.sort_by_key(|entry| entry.file_name());
+        let mut blocked = Vec::new();
+        for entry in paths {
+            let attempt_id = entry.file_name().to_string_lossy().into_owned();
+            validate_attempt(&attempt_id)?;
+            if !entry.file_type()?.is_dir() {
+                return Err(Error::Protocol(
+                    "publish journal entry is not a directory".into(),
+                ));
+            }
+            let receipt = self.read_receipt(&attempt_id)?;
+            if receipt.approved.database_path != store.paths().json {
+                blocked.push(unresolved(&receipt, "different publication database"));
+            } else if receipt.applied
+                || receipt.not_submitted
+                || matches!(receipt.terminal, Some(WorkerEvent::Failed { .. }))
+            {
+                continue;
+            } else {
+                let reason = match &receipt.terminal {
+                    Some(WorkerEvent::Scheduled { .. }) => "scheduled receipt awaits application",
+                    Some(WorkerEvent::Unknown { .. }) => "submission outcome is unknown",
+                    _ => "publish intent has no terminal receipt",
+                };
+                blocked.push(unresolved(&receipt, reason));
+            }
+        }
+        Ok(blocked)
+    }
+
     pub fn recover(&self, store: &Store) -> Result<RecoveryReport> {
         let mut report = RecoveryReport::default();
         let entries = match fs::read_dir(&self.root) {
@@ -412,6 +573,12 @@ impl PublishJournal {
         outcome: ReconcileOutcome,
     ) -> Result<()> {
         validate_attempt(attempt_id)?;
+        if let ReconcileOutcome::Scheduled {
+            actual_url: Some(url),
+        } = &outcome
+        {
+            validate_actual_url(url)?;
+        }
         let _publisher_lock = publisher_lock(&self.data_dir)?;
         let mut receipt = self.read_receipt(attempt_id)?;
         if receipt.approved.database_path != store.paths().json {
@@ -556,6 +723,20 @@ fn unresolved(receipt: &Receipt, reason: &str) -> UnresolvedAttempt {
 fn validate_attempt(attempt_id: &str) -> Result<()> {
     if uuid::Uuid::parse_str(attempt_id).is_err() || attempt_id.contains(['/', '\\']) {
         return Err(Error::Validation("unsafe publish attempt ID".into()));
+    }
+    Ok(())
+}
+fn validate_actual_url(value: &str) -> Result<()> {
+    let url = url::Url::parse(value)
+        .map_err(|_| Error::Validation("actual URL must be a valid HTTP(S) URL".into()))?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err(Error::Validation(
+            "actual URL must be a valid HTTP(S) URL".into(),
+        ));
     }
     Ok(())
 }
