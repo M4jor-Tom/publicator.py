@@ -6,6 +6,9 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::LazyLock, time::Duration};
 
+mod openrouter;
+pub use openrouter::CatalogModel;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Source {
@@ -73,16 +76,20 @@ impl Default for Endpoints {
 }
 
 pub struct MetadataClient {
-    _http: reqwest::Client,
-    _endpoints: Endpoints,
+    pub(crate) http: reqwest::Client,
+    pub(crate) endpoints: Endpoints,
     _llmfit_program: PathBuf,
+    pub(crate) rejected_schemas: std::sync::Mutex<std::collections::HashSet<String>>,
+    pub(crate) catalogue: std::sync::Mutex<Option<(std::time::Instant, Vec<CatalogModel>)>>,
 }
 impl MetadataClient {
     pub fn new(http: reqwest::Client, endpoints: Endpoints, llmfit_program: PathBuf) -> Self {
         Self {
-            _http: http,
-            _endpoints: endpoints,
+            http,
+            endpoints,
             _llmfit_program: llmfit_program,
+            rejected_schemas: std::sync::Mutex::new(std::collections::HashSet::new()),
+            catalogue: std::sync::Mutex::new(None),
         }
     }
 }
