@@ -75,15 +75,7 @@ pub(super) fn preview_tasks(app: &mut App, start: usize, end: usize) -> Task<Mes
         let sha = candidate.sha512.clone();
         let cache = cache.clone();
         tasks.push(Task::perform(
-            async move {
-                tokio::task::spawn_blocking(move || {
-                    let name = images::thumb_name(&source, &sha)?;
-                    images::ensure_thumb(&source, &cache, &name)
-                })
-                .await
-                .unwrap_or_else(|error| Err(crate::error::Error::Config(error.to_string())))
-                .map_err(|error| error.to_string())
-            },
+            crate::ui::preview::prepare(source, sha, cache),
             move |result| Message::PreviewFinished {
                 source: preview_source,
                 result,

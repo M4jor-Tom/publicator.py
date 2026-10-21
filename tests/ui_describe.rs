@@ -242,7 +242,17 @@ async fn describe_previews_share_lazy_scroll_boundary() {
     for message in messages {
         let _ = app.update(message);
     }
-    assert!(std::fs::read_dir(&cache).unwrap().count() > initial);
+    let after_scroll = std::fs::read_dir(&cache).unwrap().count();
+    assert!(after_scroll > initial);
+    assert!(
+        run_tasks(app.update(Message::DescribeViewport {
+            offset: 2400.0,
+            height: 600.0,
+        }))
+        .await
+        .is_empty()
+    );
+    assert_eq!(std::fs::read_dir(cache).unwrap().count(), after_scroll);
 }
 
 #[tokio::test]

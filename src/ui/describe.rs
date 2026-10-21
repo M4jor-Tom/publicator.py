@@ -59,18 +59,15 @@ pub(super) fn preview_tasks(state: &mut App, start: usize, end: usize) -> Task<M
         let cache = cache.clone();
         tasks.push(Task::perform(
             async move {
-                tokio::task::spawn_blocking(move || {
-                    let source = crate::images::index_by_basename(&root)?
+                let source = tokio::task::spawn_blocking(move || {
+                    crate::images::index_by_basename(&root)?
                         .remove(&basename)
-                        .ok_or_else(|| {
-                            crate::error::Error::NotFound(format!("artwork {basename}"))
-                        })?;
-                    let name = crate::images::thumb_name(&source, &sha)?;
-                    crate::images::ensure_thumb(&source, &cache, &name)
+                        .ok_or_else(|| crate::error::Error::NotFound(format!("artwork {basename}")))
                 })
                 .await
                 .unwrap_or_else(|error| Err(crate::error::Error::Config(error.to_string())))
-                .map_err(|error| error.to_string())
+                .map_err(|error| error.to_string())?;
+                crate::ui::preview::prepare(source, sha, cache).await
             },
             move |result| Message::DescribePreviewFinished {
                 uuid: task_uuid,
