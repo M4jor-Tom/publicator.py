@@ -1,3 +1,4 @@
+pub mod describe;
 pub mod drafts;
 pub mod pick;
 pub mod schedule;
@@ -5,16 +6,17 @@ pub mod schedule;
 use crate::{
     application::Application as CoreApplication,
     images::Candidate,
+    metadata::{GenerationRequest, ModelOption, Source, VISION_MODELS},
     model::{Phase, phase},
     workflow::{self, MetadataPatch},
 };
 use iced::{
-    Element, Length, Subscription, Task, Theme,
-    widget::{button, column, container, row, scrollable, text, text_input},
+    Element, Subscription, Task, Theme,
+    widget::{button, column, container, row, text},
 };
 use serde_json::Value;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -113,6 +115,19 @@ pub enum Message {
     SuggestedDate(String),
     ApproveDate(String),
     ReturnToPick(String),
+    SaveDraft(String),
+    ApproveMetadata(String),
+    ReturnToSchedule(String),
+    GenerateOne(String),
+    GenerateMarked,
+    ConfirmLocalInstall,
+    CancelLocalInstall,
+    SelectSource(Source),
+    SelectModel(ModelOption),
+    GenerationFinished {
+        uuid: Option<String>,
+        result: Result<String, String>,
+    },
 }
 
 pub struct App {
@@ -134,6 +149,14 @@ pub struct App {
     previews: HashMap<std::path::PathBuf, Option<Result<std::path::PathBuf, String>>>,
     pending_delete: Option<Candidate>,
     custom_dates: HashMap<String, (String, String)>,
+    source: Source,
+    model: ModelOption,
+    busy_uuids: HashSet<String>,
+    pending_generation: Option<String>,
+    pending_generation_install: bool,
+    pending_approval: Option<String>,
+    pending_return: Option<String>,
+    pending_local_consent: Option<Option<String>>,
 }
 
 impl App {
@@ -157,6 +180,14 @@ impl App {
             previews: HashMap::new(),
             pending_delete: None,
             custom_dates: HashMap::new(),
+            source: Source::OpenRouter,
+            model: VISION_MODELS[0].clone(),
+            busy_uuids: HashSet::new(),
+            pending_generation: None,
+            pending_generation_install: false,
+            pending_approval: None,
+            pending_return: None,
+            pending_local_consent: None,
         };
         (app, Self::load_task(application))
     }
@@ -206,7 +237,44 @@ impl App {
                 self.search_authorized = false;
             }
             Message::Navigate(tab) => return self.navigate(tab),
+            Message::SelectSource(source) if self.pending_local_consent.is_none() => {
+                self.source = source
+            }
+            Message::SelectSource(_) => {}
+            Message::SelectModel(model)
+                if self.pending_local_consent.is_none() && VISION_MODELS.contains(&model) =>
+            {
+                self.model = model
+            }
+            Message::SelectModel(_) => {}
+            Message::SaveDraft(uuid) => return self.save_uuid(&uuid),
+            Message::ApproveMetadata(uuid) => return self.approve_metadata(uuid),
+            Message::ReturnToSchedule(uuid) => return self.return_to_schedule(uuid),
+            Message::GenerateOne(uuid) => return self.request_generation(uuid),
+            Message::GenerateMarked => return self.request_batch_generation(),
+            Message::ConfirmLocalInstall => {
+                if let Some(selection) = self.pending_local_consent.take() {
+                    return self.confirm_generation(selection);
+                }
+            }
+            Message::CancelLocalInstall => self.pending_local_consent = None,
+            Message::GenerationFinished { uuid, result } => {
+                if let Some(uuid) = uuid {
+                    self.busy_uuids.remove(&uuid);
+                } else {
+                    self.busy_uuids.clear();
+                }
+                self.busy = false;
+                self.result = Some(match result {
+                    Ok(message) => message,
+                    Err(error) => format!("Generation failed: {error}"),
+                });
+                return Self::load_task(self.application.clone());
+            }
             Message::Edited { uuid, field, text } => {
+                if self.busy_uuids.contains(&uuid) {
+                    return Task::none();
+                }
                 let current = self
                     .drafts
                     .get(&uuid)
@@ -232,6 +300,9 @@ impl App {
                             draft.failed(&sent);
                             self.result = Some(format!("Save failed for {uuid}: {error}"));
                             self.pending_navigation = None;
+                            self.pending_generation = None;
+                            self.pending_approval = None;
+                            self.pending_return = None;
                             self.pending_close = false;
                             self.busy = false;
                             return Task::none();
@@ -241,6 +312,19 @@ impl App {
                 self.busy = false;
                 if self.drafts.values().any(Draft::is_saving) {
                     return Task::none();
+                }
+                if self.any_dirty() {
+                    return self.save_next_dirty();
+                }
+                if let Some(uuid) = self.pending_generation.take() {
+                    let install = std::mem::take(&mut self.pending_generation_install);
+                    return self.start_generation((!uuid.is_empty()).then_some(uuid), install);
+                }
+                if let Some(uuid) = self.pending_approval.take() {
+                    return self.approve_metadata(uuid);
+                }
+                if let Some(uuid) = self.pending_return.take() {
+                    return self.return_to_schedule(uuid);
                 }
                 if let Some(tab) = self.pending_navigation.take() {
                     if self.any_dirty() {
@@ -445,6 +529,193 @@ impl App {
         )
     }
 
+    fn save_uuid(&mut self, uuid: &str) -> Task<Message> {
+        if self.busy_uuids.contains(uuid) {
+            return Task::none();
+        }
+        let Some(draft) = self.drafts.get_mut(uuid) else {
+            return Task::none();
+        };
+        if !draft.is_dirty() {
+            return Task::none();
+        }
+        let sent = draft.begin_save();
+        self.save_task(uuid.to_owned(), sent)
+    }
+
+    fn approve_metadata(&mut self, uuid: String) -> Task<Message> {
+        if self.busy_uuids.contains(&uuid) {
+            return Task::none();
+        }
+        if self.drafts.get(&uuid).is_some_and(Draft::is_dirty) {
+            self.pending_approval = Some(uuid.clone());
+            return self.save_uuid(&uuid);
+        }
+        let application = self.application.clone();
+        self.busy = true;
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    application.mutate(Some(&uuid), |store| {
+                        workflow::approve_metadata(store, &uuid)
+                    })
+                })
+                .await
+                .unwrap_or_else(|error| Err(crate::error::Error::Config(error.to_string())))
+                .map_err(|error| error.to_string())
+            },
+            |result| Message::WorkflowFinished {
+                message: "Approved metadata".into(),
+                result,
+            },
+        )
+    }
+
+    fn return_to_schedule(&mut self, uuid: String) -> Task<Message> {
+        if self.busy_uuids.contains(&uuid) {
+            return Task::none();
+        }
+        if self.drafts.get(&uuid).is_some_and(Draft::is_dirty) {
+            self.pending_return = Some(uuid.clone());
+            return self.save_uuid(&uuid);
+        }
+        let application = self.application.clone();
+        self.busy = true;
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    application.mutate(Some(&uuid), |store| {
+                        workflow::return_to_scheduling(store, &uuid)
+                    })
+                })
+                .await
+                .unwrap_or_else(|error| Err(crate::error::Error::Config(error.to_string())))
+                .map_err(|error| error.to_string())
+            },
+            |result| Message::WorkflowFinished {
+                message: "Returned to scheduling".into(),
+                result,
+            },
+        )
+    }
+
+    fn confirm_generation(&mut self, selection: Option<String>) -> Task<Message> {
+        if let Some(uuid) = selection.as_deref() {
+            if self.drafts.get(uuid).is_some_and(Draft::is_dirty) {
+                self.pending_generation = Some(uuid.to_owned());
+                self.pending_generation_install = true;
+                return self.save_uuid(uuid);
+            }
+        } else if self.any_dirty() {
+            self.pending_generation = Some(String::new());
+            self.pending_generation_install = true;
+            return self.save_next_dirty();
+        }
+        self.start_generation(selection, true)
+    }
+
+    fn request_generation(&mut self, uuid: String) -> Task<Message> {
+        if self.busy_uuids.contains(&uuid) {
+            return Task::none();
+        }
+        if self.source == Source::Local {
+            self.pending_local_consent = Some(Some(uuid));
+            return Task::none();
+        }
+        if self.drafts.get(&uuid).is_some_and(Draft::is_dirty) {
+            self.pending_generation_install = false;
+            self.pending_generation = Some(uuid.clone());
+            return self.save_uuid(&uuid);
+        }
+        self.start_generation(Some(uuid), false)
+    }
+
+    fn request_batch_generation(&mut self) -> Task<Message> {
+        let ids: Vec<_> = self
+            .publications
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter(|row| {
+                phase(row).ok() == Some(Phase::Scheduled)
+                    && ["title", "description"].iter().any(|key| {
+                        row.get(*key).and_then(Value::as_str) == Some(crate::model::GENERATE_MARKER)
+                    })
+            })
+            .filter_map(|row| row.get("uuid").and_then(Value::as_str).map(str::to_owned))
+            .collect();
+        if ids
+            .iter()
+            .any(|id| self.drafts.get(id).is_some_and(Draft::is_dirty))
+        {
+            self.pending_generation_install = false;
+            self.pending_generation = Some(String::new());
+            return self.save_next_dirty();
+        }
+        if self.source == Source::Local {
+            self.pending_local_consent = Some(None);
+            return Task::none();
+        }
+        self.start_generation(None, false)
+    }
+
+    fn start_generation(
+        &mut self,
+        selection: Option<String>,
+        install_missing: bool,
+    ) -> Task<Message> {
+        if self.source == Source::Local && !install_missing {
+            self.pending_local_consent = Some(selection);
+            return Task::none();
+        }
+        let request = GenerationRequest {
+            source: self.source,
+            model: self.model.clone(),
+            timeout: self._options.ai_timeout,
+            install_missing,
+        };
+        let application = self.application.clone();
+        if let Some(uuid) = &selection {
+            self.busy_uuids.insert(uuid.clone());
+        } else {
+            self.busy_uuids.extend(
+                self.publications
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .filter(|row| {
+                        phase(row).ok() == Some(Phase::Scheduled)
+                            && ["title", "description"].iter().any(|key| {
+                                row.get(*key).and_then(Value::as_str)
+                                    == Some(crate::model::GENERATE_MARKER)
+                            })
+                    })
+                    .filter_map(|row| row.get("uuid").and_then(Value::as_str).map(str::to_owned)),
+            );
+        }
+        self.busy = true;
+        let completion_uuid = selection.clone();
+        Task::perform(
+            async move {
+                if let Some(uuid) = selection {
+                    application
+                        .generate_one(&uuid, request)
+                        .await
+                        .map(|_| format!("Generated metadata for {uuid}"))
+                } else {
+                    application.generate_marked(&request).await.map(|report| {
+                        format!("Generated {}; {} failed", report.succeeded, report.failed)
+                    })
+                }
+                .map_err(|error| error.to_string())
+            },
+            move |result| Message::GenerationFinished {
+                uuid: completion_uuid,
+                result,
+            },
+        )
+    }
+
     fn any_dirty(&self) -> bool {
         self.drafts.values().any(Draft::is_dirty)
     }
@@ -499,39 +770,7 @@ impl App {
             content = content.push(schedule::view(self));
         }
         if self.active_tab == Tab::Describe {
-            let cards = rows.iter().filter_map(|row| {
-                if phase(row).ok() != Some(Phase::Scheduled) {
-                    return None;
-                }
-                let uuid = row.get("uuid")?.as_str()?.to_owned();
-                let (title, description) = self
-                    .drafts
-                    .get(&uuid)
-                    .map(|draft| (draft.title().to_owned(), draft.description().to_owned()))
-                    .unwrap_or_else(|| row_metadata(row));
-                let title_uuid = uuid.clone();
-                let description_uuid = uuid.clone();
-                Some(
-                    column![
-                        text_input("Title", &title).on_input(move |value| Message::Edited {
-                            uuid: title_uuid.clone(),
-                            field: Field::Title,
-                            text: value,
-                        }),
-                        text_input("Description", &description).on_input(move |value| {
-                            Message::Edited {
-                                uuid: description_uuid.clone(),
-                                field: Field::Description,
-                                text: value,
-                            }
-                        }),
-                        text(format!("{uuid}")),
-                    ]
-                    .spacing(4)
-                    .into(),
-                )
-            });
-            content = content.push(scrollable(column(cards).spacing(16)).height(Length::Fill));
+            content = content.push(describe::view(self));
         }
         if let Some(result) = &self.result {
             content = content.push(text(result));
@@ -616,6 +855,14 @@ mod tests {
                 previews: HashMap::new(),
                 pending_delete: None,
                 custom_dates: HashMap::new(),
+                source: Source::OpenRouter,
+                model: VISION_MODELS[0].clone(),
+                busy_uuids: HashSet::new(),
+                pending_generation: None,
+                pending_generation_install: false,
+                pending_approval: None,
+                pending_return: None,
+                pending_local_consent: None,
             },
             root,
         )
