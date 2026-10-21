@@ -173,6 +173,31 @@ async fn response_model_alias_never_becomes_paid_preference() {
 }
 
 #[tokio::test]
+async fn upstream_error_diagnostics_redact_credentials_and_image_data_and_are_bounded() {
+    let (_dir, img) = image();
+    let server = common::http::Server::start(vec![common::http::Reply {
+        path: "/chat/completions".into(),
+        status: 400,
+        body: json!({"error":{"message":format!("response_format unsupported; echoed DUMMY-test-credential and data:image/png;base64,cG5nIGJ5dGVz {}", "x".repeat(2000))}}).to_string(),
+    }]);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let error = client(server.url())
+        .openrouter_attempt(&img, "vendor/model", false, deadline)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("HTTP 400"));
+    assert!(error.contains("response_format unsupported"));
+    assert!(!error.contains("DUMMY-test-credential"));
+    assert!(!error.contains("data:image/png;base64"));
+    assert!(
+        error.len() < 600,
+        "diagnostic exceeded bound: {}",
+        error.len()
+    );
+}
+
+#[tokio::test]
 async fn unrelated_bad_request_does_not_trigger_schema_retry() {
     let (_dir, img) = image();
     let server = common::http::Server::start(vec![common::http::Reply {
@@ -233,12 +258,18 @@ async fn body_reads_are_inside_total_deadline() {
     use std::{
         io::{Read, Write},
         net::TcpListener,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
         thread,
         time::Instant,
     };
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let addr = listener.local_addr().unwrap();
+    let accepted = Arc::new(AtomicBool::new(false));
+    let server_accepted = Arc::clone(&accepted);
     let worker = thread::spawn(move || {
         let until = Instant::now() + Duration::from_secs(3);
         let (mut s, _) = loop {
@@ -252,6 +283,7 @@ async fn body_reads_are_inside_total_deadline() {
                 Err(_) => return,
             }
         };
+        server_accepted.store(true, Ordering::SeqCst);
         s.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
         let mut b = [0; 2048];
         let _ = s.read(&mut b);
@@ -267,10 +299,15 @@ async fn body_reads_are_inside_total_deadline() {
     let (_dir, img) = image();
     let c = client(&format!("http://{addr}"));
     let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+    let error = c
+        .openrouter_attempt(&img, "vendor/model", false, deadline)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("deadline exceeded"), "{error}");
     assert!(
-        c.openrouter_attempt(&img, "vendor/model", false, deadline)
-            .await
-            .is_err()
+        accepted.load(Ordering::SeqCst),
+        "server accepted no request"
     );
     worker.join().unwrap();
 }

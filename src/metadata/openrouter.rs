@@ -58,6 +58,7 @@ impl MetadataClient {
         &self,
         request: reqwest::RequestBuilder,
         deadline: tokio::time::Instant,
+        secrets: &[&str],
     ) -> Result<Vec<u8>> {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
@@ -65,15 +66,21 @@ impl MetadataClient {
         }
         let request = request.timeout(remaining);
         let response = tokio::time::timeout(remaining, async {
-            let response = request
-                .send()
-                .await
-                .map_err(|e| Error::Provider(e.to_string()))?;
+            let response = request.send().await.map_err(|e| {
+                if e.is_timeout() {
+                    Error::Provider("OpenRouter deadline exceeded".into())
+                } else {
+                    Error::Provider(e.to_string())
+                }
+            })?;
             let status = response.status();
-            let bytes = response
-                .bytes()
-                .await
-                .map_err(|e| Error::Provider(e.to_string()))?;
+            let bytes = response.bytes().await.map_err(|e| {
+                if e.is_timeout() {
+                    Error::Provider("OpenRouter deadline exceeded".into())
+                } else {
+                    Error::Provider(e.to_string())
+                }
+            })?;
             Ok::<_, Error>((status, bytes))
         })
         .await
@@ -82,7 +89,7 @@ impl MetadataClient {
             return Err(Error::Provider(format!(
                 "OpenRouter HTTP {}: {}",
                 response.0.as_u16(),
-                String::from_utf8_lossy(&response.1)
+                safe_error_detail(&response.1, secrets)
             )));
         }
         Ok(response.1.to_vec())
@@ -94,16 +101,17 @@ impl MetadataClient {
             }
         }
         let url = format!("{}/models", self.endpoints.openrouter.trim_end_matches('/'));
-        let mut req = self.http.get(url);
-        if let Some(key) = self
+        let key = self
             .openrouter_key
             .as_ref()
             .cloned()
-            .or_else(|| std::env::var("OPENROUTER_KEY").ok())
-        {
+            .or_else(|| std::env::var("OPENROUTER_KEY").ok());
+        let mut req = self.http.get(url);
+        if let Some(key) = &key {
             req = req.bearer_auth(key);
         }
-        let bytes = self.bounded(req, deadline).await?;
+        let secrets = key.as_deref().into_iter().collect::<Vec<_>>();
+        let bytes = self.bounded(req, deadline, &secrets).await?;
         let v: Value = serde_json::from_slice(&bytes)?;
         let rows = v
             .get("data")
@@ -137,7 +145,8 @@ impl MetadataClient {
             prompt.push_str(" Return JSON matching this shape: ");
             prompt.push_str(&title_description_schema().to_string());
         }
-        let content = json!([{"type":"text","text":prompt},{"type":"image_url","image_url":{"url":super::image_data_url(image)?}}]);
+        let data_url = super::image_data_url(image)?;
+        let content = json!([{"type":"text","text":prompt},{"type":"image_url","image_url":{"url":data_url}}]);
         let mut body = json!({"model":model,"messages":[{"role":"user","content":content}]});
         if use_schema {
             body["response_format"] = json!({"type":"json_schema","json_schema":{"name":"title_description","strict":true,"schema":title_description_schema()}});
@@ -147,16 +156,20 @@ impl MetadataClient {
             self.endpoints.openrouter.trim_end_matches('/')
         );
         let send = |body: Value| self.http.post(&url).bearer_auth(&key).json(&body);
-        let bytes = match self.bounded(send(body), deadline).await {
+        let bytes = match self
+            .bounded(send(body), deadline, &[key.as_str(), data_url.as_str()])
+            .await
+        {
             Err(error) if use_schema && unsupported_schema(&error.to_string()) => {
                 self.rejected_schemas
                     .lock()
                     .unwrap()
                     .insert(model.to_owned());
-                let mut retry = json!({"model":model,"messages":[{"role":"user","content":[{"type":"text","text":format!("{} Return JSON matching this shape: {}",metadata_prompt(),title_description_schema())},{"type":"image_url","image_url":{"url":super::image_data_url(image)?}}]}]});
+                let mut retry = json!({"model":model,"messages":[{"role":"user","content":[{"type":"text","text":format!("{} Return JSON matching this shape: {}",metadata_prompt(),title_description_schema())},{"type":"image_url","image_url":{"url":data_url}}]}]});
                 // Deliberately no response_format for the one schema recovery attempt.
                 retry.as_object_mut().unwrap().remove("response_format");
-                self.bounded(send(retry), deadline).await?
+                self.bounded(send(retry), deadline, &[key.as_str(), data_url.as_str()])
+                    .await?
             }
             result => result?,
         };
@@ -238,6 +251,27 @@ impl MetadataClient {
         }
     }
 }
+fn safe_error_detail(body: &[u8], secrets: &[&str]) -> String {
+    let value: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+    let detail = value
+        .pointer("/error/message")
+        .or_else(|| value.get("message"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| String::from_utf8_lossy(body).into_owned());
+    let mut detail = detail;
+    for secret in secrets.iter().filter(|secret| !secret.is_empty()) {
+        detail = detail.replace(secret, "[REDACTED]");
+    }
+    let mut chars = detail.chars();
+    let bounded: String = chars.by_ref().take(512).collect();
+    if chars.next().is_some() {
+        format!("{bounded}…")
+    } else {
+        bounded
+    }
+}
+
 fn unsupported_schema(message: &str) -> bool {
     let m = message.to_ascii_lowercase();
     m.contains("response_format")
