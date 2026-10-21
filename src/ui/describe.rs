@@ -4,10 +4,82 @@ use crate::{
     model::{GENERATE_MARKER, Phase, phase},
 };
 use iced::{
-    Element, Length,
+    Element, Length, Task,
     widget::{button, column, row, scrollable, text, text_input},
 };
 use serde_json::Value;
+
+pub(super) fn preview_tasks(state: &mut App, start: usize, end: usize) -> Task<Message> {
+    let Some(rows) = state.publications.as_ref() else {
+        return Task::none();
+    };
+    let capacity = 4usize.saturating_sub(
+        state
+            .describe_previews
+            .values()
+            .filter(|result| result.is_none())
+            .count(),
+    );
+    let records: Vec<_> = rows
+        .iter()
+        .filter(|row| phase(row).ok() == Some(Phase::Scheduled))
+        .skip(start)
+        .take(end.saturating_sub(start))
+        .filter_map(|row| {
+            let uuid = row.get("uuid")?.as_str()?.to_owned();
+            if state.describe_previews.contains_key(&uuid) {
+                return None;
+            }
+            let basename = row
+                .get("files")?
+                .as_array()?
+                .first()?
+                .get("basename")?
+                .as_str()?
+                .to_owned();
+            let sha = row
+                .get("files")?
+                .as_array()?
+                .first()?
+                .get("sha512sum")
+                .or_else(|| row.get("files")?.as_array()?.first()?.get("sha512sumHex"))?
+                .as_str()?
+                .to_owned();
+            Some((uuid, basename, sha))
+        })
+        .take(capacity)
+        .collect();
+    let root = state.application.store().paths().data_dir.clone();
+    let cache = root.join(".thumbs");
+    let mut tasks = Vec::new();
+    for (uuid, basename, sha) in records {
+        state.describe_previews.insert(uuid.clone(), None);
+        let task_uuid = uuid.clone();
+        let root = root.clone();
+        let cache = cache.clone();
+        tasks.push(Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let source = crate::images::index_by_basename(&root)?
+                        .remove(&basename)
+                        .ok_or_else(|| {
+                            crate::error::Error::NotFound(format!("artwork {basename}"))
+                        })?;
+                    let name = crate::images::thumb_name(&source, &sha)?;
+                    crate::images::ensure_thumb(&source, &cache, &name)
+                })
+                .await
+                .unwrap_or_else(|error| Err(crate::error::Error::Config(error.to_string())))
+                .map_err(|error| error.to_string())
+            },
+            move |result| Message::DescribePreviewFinished {
+                uuid: task_uuid,
+                result,
+            },
+        ));
+    }
+    Task::batch(tasks)
+}
 
 pub fn view(state: &App) -> Element<'_, Message> {
     let mut source_controls = row![text("Provider")].spacing(8);
@@ -83,6 +155,17 @@ pub fn view(state: &App) -> Element<'_, Message> {
             .drafts
             .get(&uuid)
             .is_some_and(|d| d.is_field_dirty(super::drafts::Field::Description));
+        let preview: Element<'_, Message> = match state.describe_previews.get(&uuid) {
+            Some(Some(Ok(path))) => {
+                iced::widget::image(iced::widget::image::Handle::from_path(path))
+                    .width(Length::Fixed(160.0))
+                    .height(Length::Fixed(160.0))
+                    .into()
+            }
+            Some(Some(Err(error))) => text(format!("Preview unavailable: {error}")).into(),
+            _ => text("Preview loads when this card is visible").into(),
+        };
+        card = card.push(preview);
         card = card.push(text(format!(
             "Title: {}; description: {}",
             if dirty_title { "unsaved" } else { "saved" },
@@ -108,7 +191,14 @@ pub fn view(state: &App) -> Element<'_, Message> {
         }
         cards = cards.push(card);
     }
-    content = content.push(scrollable(cards).height(Length::Fill));
+    content = content.push(
+        scrollable(cards)
+            .height(Length::Fill)
+            .on_scroll(|viewport| Message::DescribeViewport {
+                offset: viewport.absolute_offset().y,
+                height: viewport.bounds().height,
+            }),
+    );
     if state.pending_local_consent.is_some() {
         content = content.push(
             column![

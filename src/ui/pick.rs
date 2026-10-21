@@ -50,10 +50,25 @@ pub fn pick_candidate(
     application.mutate(None, |store| crate::workflow::pick(store, candidate, now))
 }
 
-pub(super) fn preview_tasks(app: &mut App) -> Task<Message> {
+pub(super) fn preview_tasks(app: &mut App, start: usize, end: usize) -> Task<Message> {
     let cache = app.application.store().paths().data_dir.join(".thumbs");
+    let capacity = 4usize.saturating_sub(
+        app.previews
+            .values()
+            .filter(|result| result.is_none())
+            .count(),
+    );
+    let candidates: Vec<_> = app
+        .candidates
+        .iter()
+        .skip(start)
+        .take(end.saturating_sub(start))
+        .filter(|candidate| !app.previews.contains_key(&candidate.path))
+        .take(capacity)
+        .cloned()
+        .collect();
     let mut tasks = Vec::new();
-    for candidate in &app.candidates {
+    for candidate in candidates {
         app.previews.insert(candidate.path.clone(), None);
         let source = candidate.path.clone();
         let preview_source = source.clone();
@@ -210,7 +225,12 @@ pub fn view(state: &App) -> Element<'_, Message> {
     column![
         controls,
         button("Search").on_press(Message::Search),
-        scrollable(cards).height(Length::Fill)
+        scrollable(cards)
+            .height(Length::Fill)
+            .on_scroll(|viewport| Message::PreviewViewport {
+                offset: viewport.absolute_offset().y,
+                height: viewport.bounds().height,
+            })
     ]
     .spacing(12)
     .into()

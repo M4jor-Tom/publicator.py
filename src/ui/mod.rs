@@ -90,6 +90,18 @@ pub enum Message {
         source: std::path::PathBuf,
         result: Result<std::path::PathBuf, String>,
     },
+    PreviewViewport {
+        offset: f32,
+        height: f32,
+    },
+    DescribeViewport {
+        offset: f32,
+        height: f32,
+    },
+    DescribePreviewFinished {
+        uuid: String,
+        result: Result<std::path::PathBuf, String>,
+    },
     Pick(Candidate),
     PickFinished(Result<(), String>),
     AskDelete(Candidate),
@@ -147,6 +159,8 @@ pub struct App {
     search_paths: Vec<String>,
     candidates: Vec<Candidate>,
     previews: HashMap<std::path::PathBuf, Option<Result<std::path::PathBuf, String>>>,
+    describe_previews: HashMap<String, Option<Result<std::path::PathBuf, String>>>,
+
     pending_delete: Option<Candidate>,
     custom_dates: HashMap<String, (String, String)>,
     source: Source,
@@ -178,6 +192,7 @@ impl App {
             search_paths: application.store().config().publicable.clone(),
             candidates: Vec::new(),
             previews: HashMap::new(),
+            describe_previews: HashMap::new(),
             pending_delete: None,
             custom_dates: HashMap::new(),
             source: Source::OpenRouter,
@@ -230,13 +245,22 @@ impl App {
                 self.publications = Some(rows);
                 self.load_error = None;
                 self.search_authorized = true;
+                if self.active_tab == Tab::Describe {
+                    return describe::preview_tasks(self, 0, 4);
+                }
             }
             Message::LoadFinished(Err(error)) => {
                 self.publications = None;
                 self.load_error = Some(error);
                 self.search_authorized = false;
             }
-            Message::Navigate(tab) => return self.navigate(tab),
+            Message::Navigate(tab) => {
+                let task = self.navigate(tab);
+                if self.active_tab == Tab::Describe {
+                    return describe::preview_tasks(self, 0, 4);
+                }
+                return task;
+            }
             Message::SelectSource(source) if self.pending_local_consent.is_none() => {
                 self.source = source
             }
@@ -394,10 +418,23 @@ impl App {
                         format!("Found {} candidates", self.candidates.len())
                     },
                 );
-                return pick::preview_tasks(self);
+                return pick::preview_tasks(self, 0, 4);
             }
             Message::PreviewFinished { source, result } => {
                 self.previews.insert(source, Some(result));
+            }
+            Message::PreviewViewport { offset, height } => {
+                let start = (offset.max(0.0) / 250.0) as usize;
+                let end = ((offset.max(0.0) + height.max(0.0)) / 250.0).ceil() as usize + 2;
+                return pick::preview_tasks(self, start, end);
+            }
+            Message::DescribeViewport { offset, height } => {
+                let start = (offset.max(0.0) / 300.0) as usize;
+                let end = ((offset.max(0.0) + height.max(0.0)) / 300.0).ceil() as usize + 2;
+                return describe::preview_tasks(self, start, end);
+            }
+            Message::DescribePreviewFinished { uuid, result } => {
+                self.describe_previews.insert(uuid, Some(result));
             }
             Message::SearchFinished(Err(error)) => {
                 self.result = Some(format!("Search failed: {error}"))
@@ -853,6 +890,7 @@ mod tests {
                 search_paths: Vec::new(),
                 candidates: Vec::new(),
                 previews: HashMap::new(),
+                describe_previews: HashMap::new(),
                 pending_delete: None,
                 custom_dates: HashMap::new(),
                 source: Source::OpenRouter,

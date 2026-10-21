@@ -6,7 +6,7 @@ use iced::Element;
 use publicator::{
     application::Application,
     metadata::{Endpoints, MetadataClient, Source, VISION_MODELS, available_sources},
-    ui::{App, Message, Tab, UiOptions, describe},
+    ui::{App, Message, UiOptions, describe},
 };
 use serde_json::json;
 use std::{
@@ -16,6 +16,19 @@ use std::{
     thread,
     time::Duration,
 };
+
+async fn run_tasks(task: iced::Task<Message>) -> Vec<Message> {
+    use iced::futures::StreamExt;
+    use iced_runtime::Action;
+    let mut actions = iced_runtime::task::into_stream(task).expect("dispatched task stream");
+    let mut messages = Vec::new();
+    while let Some(action) = actions.next().await {
+        if let Action::Output(message) = action {
+            messages.push(message);
+        }
+    }
+    messages
+}
 
 async fn run_task(task: iced::Task<Message>) -> Message {
     use iced::futures::StreamExt;
@@ -49,7 +62,6 @@ fn fixture_app(f: &Fixture, endpoint: String) -> (App, Arc<Application>) {
         },
     );
     let _ = app.update(Message::LoadFinished(Ok(f.store.read().unwrap())));
-    let _ = app.update(Message::Navigate(Tab::Describe));
     (app, application)
 }
 
@@ -134,6 +146,103 @@ async fn describe_dispatch_holds_only_target_until_provider_result_is_persisted(
     assert_eq!(saved[0]["state"], "DESCRIBED");
     assert_eq!(saved[1]["title"], "unrelated");
     assert_eq!(saved[1]["state"], "SCHEDULED");
+}
+
+#[tokio::test]
+async fn previews_are_requested_for_initial_visible_cards_then_later_scrolled_cards() {
+    let mut config = publicator::config::Config::default();
+    config.publicable = vec!["images".into()];
+    let f = Fixture::with_config(config);
+    let dir = f.path("images");
+    std::fs::create_dir_all(&dir).unwrap();
+    for n in 0..10 {
+        let image = f.image(&format!("source-{n}.png"), 3 + n, 3);
+        std::fs::copy(image, dir.join(format!("{n}.png"))).unwrap();
+    }
+    let store = Arc::new(f.store.clone());
+    let client = MetadataClient::new(
+        reqwest::Client::new(),
+        Endpoints::default(),
+        "llmfit".into(),
+    );
+    let application = Arc::new(Application::new(store, client, || 0));
+    let (mut app, _) = App::from_application(
+        application,
+        UiOptions {
+            openrouter_model: None,
+            ai_timeout: Duration::from_secs(1),
+        },
+    );
+    let candidates =
+        publicator::ui::pick::search_candidates(&f.store, 25, &["images".into()]).unwrap();
+    assert_eq!(candidates.len(), 10);
+    let task = app.update(Message::SearchFinished(Ok(candidates)));
+    let messages = run_tasks(task).await;
+    for message in messages {
+        let _ = app.update(message);
+    }
+    let cache = f.path(".thumbs");
+    let initial = std::fs::read_dir(&cache).unwrap().count();
+    assert!(initial < 10);
+    let task = app.update(Message::PreviewViewport {
+        offset: 2300.0,
+        height: 700.0,
+    });
+    let messages = run_tasks(task).await;
+    for message in messages {
+        let _ = app.update(message);
+    }
+    let after_scroll = std::fs::read_dir(&cache).unwrap().count();
+    assert!(after_scroll > initial);
+    assert!(
+        run_tasks(app.update(Message::PreviewViewport {
+            offset: 2300.0,
+            height: 700.0
+        }))
+        .await
+        .is_empty()
+    );
+    assert_eq!(std::fs::read_dir(&cache).unwrap().count(), after_scroll);
+}
+
+#[tokio::test]
+async fn describe_previews_share_lazy_scroll_boundary() {
+    let f = Fixture::new();
+    let mut rows = Vec::new();
+    for n in 1..=10 {
+        let image = f.image(&format!("{n}.png"), 3 + n as u32, 3);
+        assert!(image.exists());
+        let mut publication = row(n, "SCHEDULED");
+        let digest = openssl::sha::sha512(&std::fs::read(image).unwrap())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        publication["files"][0]["sha512sum"] = json!(digest);
+        rows.push(publication);
+    }
+    f.write(json!(rows));
+    assert_eq!(f.store.read().unwrap().len(), 10);
+    let (mut app, _) = fixture_app(&f, "http://127.0.0.1:1".into());
+    let messages = run_tasks(app.update(Message::DescribeViewport {
+        offset: 0.0,
+        height: 600.0,
+    }))
+    .await;
+    for message in messages {
+        let _ = app.update(message);
+    }
+    let cache = f.path(".thumbs");
+    let initial = std::fs::read_dir(&cache).unwrap().count();
+    assert!(initial < 10);
+    let messages = run_tasks(app.update(Message::DescribeViewport {
+        offset: 2400.0,
+        height: 600.0,
+    }))
+    .await;
+    for message in messages {
+        let _ = app.update(message);
+    }
+    assert!(std::fs::read_dir(&cache).unwrap().count() > initial);
 }
 
 #[tokio::test]
