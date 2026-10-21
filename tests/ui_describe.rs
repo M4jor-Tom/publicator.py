@@ -72,6 +72,84 @@ fn marker_row(n: u64) -> serde_json::Value {
     row
 }
 
+fn fake_llmfit(f: &Fixture, level: &str, notes: &[&str]) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let shell = std::process::Command::new("sh")
+        .args(["-c", "command -v sh"])
+        .output()
+        .unwrap();
+    let shell = String::from_utf8(shell.stdout).unwrap();
+    let models = VISION_MODELS
+        .iter()
+        .map(|model| json!({"name":model.llmfit_name,"fit_level":level,"notes":notes}))
+        .collect::<Vec<_>>();
+    let path = f.path("llmfit");
+    std::fs::write(
+        &path,
+        format!(
+            "#!{}\ncat <<'EOF'\n{}\nEOF\n",
+            shell.trim_end(),
+            json!({"models":models})
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+fn failed_llmfit(f: &Fixture) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let shell = std::process::Command::new("sh")
+        .args(["-c", "command -v sh"])
+        .output()
+        .unwrap();
+    let path = f.path("llmfit-failed");
+    std::fs::write(
+        &path,
+        format!(
+            "#!{}\nprintf 'fit unavailable' >&2\nexit 1\n",
+            String::from_utf8(shell.stdout).unwrap().trim_end()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+fn local_fixture_app(
+    f: &Fixture,
+    llmfit: std::path::PathBuf,
+    ollama: String,
+) -> (App, Arc<Application>) {
+    let store = Arc::new(f.store.clone());
+    let client = MetadataClient::new(
+        reqwest::Client::new(),
+        Endpoints {
+            openrouter: "http://127.0.0.1:1".into(),
+            ollama,
+        },
+        llmfit,
+    );
+    let application = Arc::new(Application::new(store, client, || 1_700_000_000));
+    let (mut app, _) = App::from_application(
+        application.clone(),
+        UiOptions {
+            openrouter_model: None,
+            ai_timeout: Duration::from_secs(5),
+        },
+    );
+    let _ = app.update(Message::LoadFinished(Ok(f.store.read().unwrap())));
+    (app, application)
+}
+
+fn ollama_reply(path: &str, body: serde_json::Value) -> common::http::Reply {
+    common::http::Reply {
+        path: path.into(),
+        status: 200,
+        body: body.to_string(),
+    }
+}
+
 #[test]
 fn source_options_do_not_include_a_third_provider() {
     assert_eq!(available_sources(), &[Source::OpenRouter, Source::Local]);
@@ -123,27 +201,328 @@ async fn local_generation_checks_and_exposes_fit_before_install_consent() {
     assert!(!app.local_install_consent_pending());
 }
 
-#[test]
-fn fitting_missing_local_model_requires_explicit_install_confirmation() {
-    use publicator::metadata::{Fit, LocalStatus};
+#[tokio::test]
+async fn installed_good_local_model_generates_without_pull_or_install_modal() {
     let f = Fixture::new();
-    let (mut app, _) = fixture_app(&f, "http://127.0.0.1:1".into());
-    let _ = app.update(Message::SelectSource(Source::Local));
-    let _ = app.update(Message::LocalFitFinished {
-        model: VISION_MODELS[0].clone(),
-        selection: Some(id(1)),
-        generate: true,
-        result: Ok(LocalStatus {
-            fit: Fit {
-                fit: true,
-                level: "Good".into(),
-                reason: "Fits available memory".into(),
-            },
-            installed: false,
-            available: true,
-        }),
-    });
+    f.image("1.png", 4, 4);
+    f.write(json!([marker_row(1)]));
+    let model_name = VISION_MODELS[0].ollama_name.clone();
+    let tags = json!({"models":[{"name":model_name}]});
+    let server = common::http::Server::start(vec![
+        ollama_reply("/api/tags", tags.clone()),
+        ollama_reply("/api/tags", tags.clone()),
+        ollama_reply("/api/tags", tags.clone()),
+        ollama_reply("/api/tags", tags),
+        ollama_reply(
+            "/api/chat",
+            json!({"message":{"content":json!({"title":"Installed model","description":"Generated locally."}).to_string()}}),
+        ),
+    ]);
+    let (mut app, _) = local_fixture_app(
+        &f,
+        fake_llmfit(&f, "Good", &["Fits in memory"]),
+        server.url().into(),
+    );
+    let selected = run_task(app.update(Message::SelectSource(Source::Local))).await;
+    let _ = app.update(selected);
+    let status = app.local_fit_status().unwrap();
+    assert_eq!(status.fit.reason, "Fits in memory");
+    assert!(status.available && status.installed);
+    let checked = run_task(app.update(Message::GenerateOne(id(1)))).await;
+    assert!(matches!(checked, Message::LocalFitFinished { .. }));
+    assert!(!app.local_install_consent_pending());
+    let generation = app.update(checked);
+    let completed = run_task(generation).await;
+    let _ = app.update(completed);
+    let calls = server.requests();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call["path"] == "/api/tags")
+            .count(),
+        4
+    );
+    assert!(!calls.iter().any(|call| call["path"] == "/api/pull"));
+    assert_eq!(calls.last().unwrap()["path"], "/api/chat");
+    assert_eq!(f.read()[0]["title"], "Installed model");
+    assert_eq!(f.read()[0]["state"], "DESCRIBED");
+}
+
+#[tokio::test]
+async fn missing_good_model_requires_confirmation_and_only_then_pulls() {
+    let f = Fixture::new();
+    f.image("1.png", 4, 4);
+    f.write(json!([marker_row(1)]));
+    let before = std::fs::read(&f.store.paths().json).unwrap();
+    let tags = json!({"models":[]});
+    let server = common::http::Server::start(vec![
+        ollama_reply("/api/tags", tags.clone()),
+        ollama_reply("/api/tags", tags.clone()),
+        ollama_reply("/api/tags", tags.clone()),
+        ollama_reply("/api/tags", tags),
+        ollama_reply("/api/pull", json!({"status":"success"})),
+        ollama_reply(
+            "/api/chat",
+            json!({"message":{"content":json!({"title":"Installed after consent","description":"Generated locally."}).to_string()}}),
+        ),
+    ]);
+    let (mut app, _) = local_fixture_app(
+        &f,
+        fake_llmfit(&f, "Good", &["Fits host"]),
+        server.url().into(),
+    );
+    let selected = run_task(app.update(Message::SelectSource(Source::Local))).await;
+    let _ = app.update(selected);
+    let checked = run_task(app.update(Message::GenerateOne(id(1)))).await;
+    let _ = app.update(checked);
     assert!(app.local_install_consent_pending());
+    assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), before);
+    assert!(
+        !server
+            .requests()
+            .iter()
+            .any(|call| call["path"] == "/api/pull")
+    );
+    let generation = app.update(Message::ConfirmLocalInstall);
+    let _ = app.update(run_task(generation).await);
+    let calls = server.requests();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call["path"] == "/api/tags")
+            .count(),
+        4
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call["path"] == "/api/pull")
+            .count(),
+        1
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call["path"] == "/api/chat")
+            .count(),
+        1
+    );
+    assert_eq!(f.read()[0]["title"], "Installed after consent");
+    assert_eq!(f.read()[0]["state"], "DESCRIBED");
+}
+
+#[tokio::test]
+async fn cancel_missing_model_consent_keeps_saved_bytes_and_never_pulls_or_chats() {
+    let f = Fixture::new();
+    f.write(json!([marker_row(1)]));
+    let before = std::fs::read(&f.store.paths().json).unwrap();
+    let server = common::http::Server::start(vec![
+        ollama_reply("/api/tags", json!({"models":[]})),
+        ollama_reply("/api/tags", json!({"models":[]})),
+    ]);
+    let (mut app, _) = local_fixture_app(
+        &f,
+        fake_llmfit(&f, "Good", &["Fits host"]),
+        server.url().into(),
+    );
+    let selected = run_task(app.update(Message::SelectSource(Source::Local))).await;
+    let _ = app.update(selected);
+    let checked = run_task(app.update(Message::GenerateOne(id(1)))).await;
+    let _ = app.update(checked);
+    assert!(app.local_install_consent_pending());
+    let _ = app.update(Message::CancelLocalInstall);
+    assert!(!app.local_install_consent_pending());
+    assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), before);
+    let calls = server.requests();
+    assert_eq!(calls.len(), 2);
+    assert!(calls.iter().all(|call| call["path"] == "/api/tags"));
+}
+
+#[tokio::test]
+async fn older_target_fit_result_cannot_authorize_newer_target_consent() {
+    let f = Fixture::new();
+    f.image("1.png", 4, 4);
+    f.image("2.png", 4, 4);
+    f.write(json!([marker_row(1), marker_row(2)]));
+    let empty = json!({"models":[]});
+    let mut replies = (0..5)
+        .map(|_| ollama_reply("/api/tags", empty.clone()))
+        .collect::<Vec<_>>();
+    replies.push(ollama_reply("/api/pull", json!({"status":"success"})));
+    replies.push(ollama_reply("/api/chat", json!({"message":{"content":json!({"title":"Only second","description":"Consent bound to target."}).to_string()}})));
+    let server = common::http::Server::start(replies);
+    let (mut app, _) = local_fixture_app(
+        &f,
+        fake_llmfit(&f, "Good", &["Fits host"]),
+        server.url().into(),
+    );
+    let selected = run_task(app.update(Message::SelectSource(Source::Local))).await;
+    let _ = app.update(selected);
+    let first = run_task(app.update(Message::GenerateOne(id(1)))).await;
+    let second = run_task(app.update(Message::GenerateOne(id(2)))).await;
+    let _ = app.update(first);
+    assert!(!app.local_install_consent_pending());
+    let _ = app.update(second);
+    assert!(app.local_install_consent_pending());
+    let generation = app.update(Message::ConfirmLocalInstall);
+    let _ = app.update(run_task(generation).await);
+    assert_eq!(f.read()[0]["title"], "[[PUBLICATOR:TODO_GENERATE]]");
+    assert_eq!(f.read()[1]["title"], "Only second");
+    assert_eq!(f.read()[1]["state"], "DESCRIBED");
+}
+
+#[tokio::test]
+async fn poor_unknown_and_failed_fit_results_never_prompt_or_mutate() {
+    for (level, expected_reason) in [
+        ("Too Tight", "Too tight for host"),
+        ("Mystery", "llmfit fit_level: Mystery"),
+    ] {
+        let f = Fixture::new();
+        f.write(json!([marker_row(1)]));
+        let before = std::fs::read(&f.store.paths().json).unwrap();
+        let server = common::http::Server::start(vec![]);
+        let (mut app, _) = local_fixture_app(
+            &f,
+            fake_llmfit(
+                &f,
+                level,
+                if level == "Mystery" {
+                    &[]
+                } else {
+                    &["Too tight for host"]
+                },
+            ),
+            server.url().into(),
+        );
+        let selected = run_task(app.update(Message::SelectSource(Source::Local))).await;
+        let _ = app.update(selected);
+        let checked = run_task(app.update(Message::GenerateOne(id(1)))).await;
+        let _ = app.update(checked);
+        assert_eq!(app.local_fit_status().unwrap().fit.reason, expected_reason);
+        assert!(!app.local_install_consent_pending());
+        assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), before);
+        assert!(server.requests().is_empty());
+    }
+
+    let f = Fixture::new();
+    f.write(json!([marker_row(1)]));
+    let before = std::fs::read(&f.store.paths().json).unwrap();
+    let server = common::http::Server::start(vec![]);
+    let (mut app, _) = local_fixture_app(&f, failed_llmfit(&f), server.url().into());
+    let selected = run_task(app.update(Message::SelectSource(Source::Local))).await;
+    let _ = app.update(selected);
+    let checked = run_task(app.update(Message::GenerateOne(id(1)))).await;
+    let _ = app.update(checked);
+    assert!(
+        app.local_fit_status()
+            .unwrap()
+            .fit
+            .reason
+            .contains("fit unavailable")
+    );
+    assert!(!app.local_install_consent_pending());
+    assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), before);
+    assert!(server.requests().is_empty());
+}
+
+#[tokio::test]
+async fn good_fit_with_unavailable_ollama_never_prompts_or_mutates() {
+    let f = Fixture::new();
+    f.write(json!([marker_row(1)]));
+    let before = std::fs::read(&f.store.paths().json).unwrap();
+    let (mut app, _) = local_fixture_app(
+        &f,
+        fake_llmfit(&f, "Good", &["Fits host"]),
+        "http://127.0.0.1:1".into(),
+    );
+    let selected = run_task(app.update(Message::SelectSource(Source::Local))).await;
+    let _ = app.update(selected);
+    let checked = run_task(app.update(Message::GenerateOne(id(1)))).await;
+    let _ = app.update(checked);
+    let status = app.local_fit_status().unwrap();
+    assert!(status.fit.fit);
+    assert!(!status.available);
+    assert!(!app.local_install_consent_pending());
+    assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), before);
+}
+
+#[tokio::test]
+async fn cancelled_or_source_stale_fit_result_cannot_reopen_install_consent() {
+    let f = Fixture::new();
+    f.write(json!([marker_row(1)]));
+    let before = std::fs::read(&f.store.paths().json).unwrap();
+    let empty = json!({"models":[]});
+    let server = common::http::Server::start(vec![
+        ollama_reply("/api/tags", empty.clone()),
+        ollama_reply("/api/tags", empty),
+    ]);
+    let (mut app, _) = local_fixture_app(
+        &f,
+        fake_llmfit(&f, "Good", &["Fits host"]),
+        server.url().into(),
+    );
+    let selected = run_task(app.update(Message::SelectSource(Source::Local))).await;
+    let _ = app.update(selected);
+    let consent_result = run_task(app.update(Message::GenerateOne(id(1)))).await;
+    let stale_copy = consent_result.clone();
+    let _ = app.update(consent_result);
+    assert!(app.local_install_consent_pending());
+    let _ = app.update(Message::CancelLocalInstall);
+    let _ = app.update(stale_copy);
+    assert!(!app.local_install_consent_pending());
+    assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), before);
+    assert!(
+        server
+            .requests()
+            .iter()
+            .all(|call| call["path"] == "/api/tags")
+    );
+}
+
+#[tokio::test]
+async fn model_change_invalidates_in_flight_local_fit_before_consent() {
+    let f = Fixture::new();
+    f.write(json!([marker_row(1)]));
+    let server = common::http::Server::start(vec![
+        ollama_reply("/api/tags", json!({"models":[]})),
+        ollama_reply("/api/tags", json!({"models":[]})),
+    ]);
+    let (mut app, _) = local_fixture_app(
+        &f,
+        fake_llmfit(&f, "Good", &["Fits host"]),
+        server.url().into(),
+    );
+    let selected = run_task(app.update(Message::SelectSource(Source::Local))).await;
+    let _ = app.update(selected);
+    let stale = run_task(app.update(Message::GenerateOne(id(1)))).await;
+    let current = run_task(app.update(Message::SelectModel(VISION_MODELS[1].clone()))).await;
+    let _ = app.update(stale);
+    assert!(!app.local_install_consent_pending());
+    let _ = app.update(current);
+    assert!(!app.local_install_consent_pending());
+}
+
+#[tokio::test]
+async fn source_change_invalidates_in_flight_local_fit_before_consent() {
+    let f = Fixture::new();
+    f.write(json!([marker_row(1)]));
+    let before = std::fs::read(&f.store.paths().json).unwrap();
+    let server = common::http::Server::start(vec![
+        ollama_reply("/api/tags", json!({"models":[]})),
+        ollama_reply("/api/tags", json!({"models":[]})),
+    ]);
+    let (mut app, _) = local_fixture_app(
+        &f,
+        fake_llmfit(&f, "Good", &["Fits host"]),
+        server.url().into(),
+    );
+    let selected = run_task(app.update(Message::SelectSource(Source::Local))).await;
+    let _ = app.update(selected);
+    let stale = run_task(app.update(Message::GenerateOne(id(1)))).await;
+    let _ = app.update(Message::SelectSource(Source::OpenRouter));
+    let _ = app.update(stale);
+    assert!(!app.local_install_consent_pending());
+    assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), before);
 }
 
 #[test]

@@ -142,11 +142,18 @@ pub enum Message {
         result: Result<String, String>,
     },
     LocalFitFinished {
+        request_id: u64,
         model: ModelOption,
         selection: Option<String>,
         generate: bool,
         result: Result<LocalStatus, String>,
     },
+}
+
+struct LocalInstallConsent {
+    request_id: u64,
+    model: ModelOption,
+    selection: Option<String>,
 }
 
 pub struct App {
@@ -177,8 +184,9 @@ pub struct App {
     pending_generation_install: bool,
     pending_approval: Option<String>,
     pending_return: Option<String>,
-    pending_local_consent: Option<Option<String>>,
+    pending_local_consent: Option<LocalInstallConsent>,
     local_fit: Option<LocalStatus>,
+    local_status_request: u64,
 }
 
 impl App {
@@ -212,6 +220,7 @@ impl App {
             pending_return: None,
             pending_local_consent: None,
             local_fit: None,
+            local_status_request: 0,
         };
         (app, Self::load_task(application))
     }
@@ -276,7 +285,10 @@ impl App {
                 }
                 return task;
             }
-            Message::SelectSource(source) if self.pending_local_consent.is_none() => {
+            Message::SelectSource(source)
+                if self.pending_local_consent.is_none() && self.pending_generation.is_none() =>
+            {
+                self.local_status_request = self.local_status_request.wrapping_add(1);
                 self.source = source;
                 self.local_fit = None;
                 if source == Source::Local {
@@ -285,8 +297,11 @@ impl App {
             }
             Message::SelectSource(_) => {}
             Message::SelectModel(model)
-                if self.pending_local_consent.is_none() && VISION_MODELS.contains(&model) =>
+                if self.pending_local_consent.is_none()
+                    && self.pending_generation.is_none()
+                    && VISION_MODELS.contains(&model) =>
             {
+                self.local_status_request = self.local_status_request.wrapping_add(1);
                 self.model = model;
                 self.local_fit = None;
                 if self.source == Source::Local {
@@ -300,18 +315,29 @@ impl App {
             Message::GenerateOne(uuid) => return self.request_generation(uuid),
             Message::GenerateMarked => return self.request_batch_generation(),
             Message::ConfirmLocalInstall => {
-                if let Some(selection) = self.pending_local_consent.take() {
-                    return self.confirm_generation(selection);
+                if let Some(consent) = self.pending_local_consent.take()
+                    && consent.request_id == self.local_status_request
+                    && self.source == Source::Local
+                    && self.model == consent.model
+                {
+                    return self.confirm_generation(consent.selection);
                 }
             }
-            Message::CancelLocalInstall => self.pending_local_consent = None,
+            Message::CancelLocalInstall => {
+                self.pending_local_consent = None;
+                self.local_status_request = self.local_status_request.wrapping_add(1);
+            }
             Message::LocalFitFinished {
+                request_id,
                 model,
                 selection,
                 generate,
                 result,
             } => {
-                if self.source != Source::Local || self.model != model {
+                if request_id != self.local_status_request
+                    || self.source != Source::Local
+                    || self.model != model
+                {
                     return Task::none();
                 }
                 match result {
@@ -320,7 +346,11 @@ impl App {
                         let can_generate = status.fit.fit && status.available;
                         self.local_fit = Some(status);
                         if generate && needs_consent {
-                            self.pending_local_consent = Some(selection);
+                            self.pending_local_consent = Some(LocalInstallConsent {
+                                request_id,
+                                model,
+                                selection,
+                            });
                         } else if generate && can_generate {
                             return self.continue_local_generation(selection);
                         }
@@ -701,7 +731,7 @@ impl App {
     }
 
     fn request_generation(&mut self, uuid: String) -> Task<Message> {
-        if self.busy_uuids.contains(&uuid) {
+        if self.pending_local_consent.is_some() || self.busy_uuids.contains(&uuid) {
             return Task::none();
         }
         if self.source == Source::Local {
@@ -716,6 +746,9 @@ impl App {
     }
 
     fn request_batch_generation(&mut self) -> Task<Message> {
+        if self.pending_local_consent.is_some() {
+            return Task::none();
+        }
         let ids: Vec<_> = self
             .publications
             .as_deref()
@@ -746,7 +779,9 @@ impl App {
         self.start_generation(None, false)
     }
 
-    fn local_fit_task(&self, selection: Option<String>, generate: bool) -> Task<Message> {
+    fn local_fit_task(&mut self, selection: Option<String>, generate: bool) -> Task<Message> {
+        self.local_status_request = self.local_status_request.wrapping_add(1);
+        let request_id = self.local_status_request;
         let application = self.application.clone();
         let model = self.model.clone();
         let message_model = model.clone();
@@ -759,6 +794,7 @@ impl App {
                     .map_err(|e| e.to_string())
             },
             move |result| Message::LocalFitFinished {
+                request_id,
                 model: message_model,
                 selection,
                 generate,
@@ -984,6 +1020,7 @@ mod tests {
                 pending_return: None,
                 pending_local_consent: None,
                 local_fit: None,
+                local_status_request: 0,
             },
             root,
         )
