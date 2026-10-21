@@ -263,6 +263,7 @@ fn safe_error_detail(body: &[u8], secrets: &[&str]) -> String {
     for secret in secrets.iter().filter(|secret| !secret.is_empty()) {
         detail = detail.replace(secret, "[REDACTED]");
     }
+    detail = redact_image_data_uris(&detail);
     let mut chars = detail.chars();
     let bounded: String = chars.by_ref().take(512).collect();
     if chars.next().is_some() {
@@ -270,6 +271,22 @@ fn safe_error_detail(body: &[u8], secrets: &[&str]) -> String {
     } else {
         bounded
     }
+}
+
+fn redact_image_data_uris(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(start) = rest.find("data:image/") {
+        output.push_str(&rest[..start]);
+        let uri = &rest[start..];
+        let end = uri
+            .find([' ', '\t', '\r', '\n', '"', '\'', '<', '>'])
+            .unwrap_or(uri.len());
+        output.push_str("[REDACTED]");
+        rest = &uri[end..];
+    }
+    output.push_str(rest);
+    output
 }
 
 fn unsupported_schema(message: &str) -> bool {

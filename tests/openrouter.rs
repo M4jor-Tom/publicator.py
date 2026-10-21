@@ -198,6 +198,31 @@ async fn upstream_error_diagnostics_redact_credentials_and_image_data_and_are_bo
 }
 
 #[tokio::test]
+async fn clipped_data_uri_in_upstream_error_is_redacted_without_losing_classification() {
+    let (_dir, img) = image();
+    let server = common::http::Server::start(vec![common::http::Reply {
+        path: "/chat/completions".into(), status: 400,
+        body: json!({"error":{"message":"DUMMY-test-credential echoed data:image/png;base64,cG5nIGJ5 response_format unsupported"}}).to_string(),
+    }]);
+    let error = client(server.url())
+        .openrouter_attempt(
+            &img,
+            "vendor/model",
+            false,
+            tokio::time::Instant::now() + Duration::from_secs(2),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("HTTP 400"));
+    assert!(error.contains("response_format unsupported"));
+    assert!(!error.contains("DUMMY-test-credential"));
+    assert!(!error.contains("data:image/"));
+    assert!(!error.contains("cG5nIGJ5"));
+    assert!(error.len() < 600);
+}
+
+#[tokio::test]
 async fn unrelated_bad_request_does_not_trigger_schema_retry() {
     let (_dir, img) = image();
     let server = common::http::Server::start(vec![common::http::Reply {
