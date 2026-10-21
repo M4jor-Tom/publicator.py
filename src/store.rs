@@ -104,11 +104,48 @@ fn commit(
     parent: &std::path::Path,
     sync_parent: impl FnOnce(&std::path::Path) -> std::io::Result<()>,
 ) -> Result<()> {
+    #[cfg(test)]
+    let injected_failure = take_commit_failure_for_test();
+    #[cfg(test)]
+    if injected_failure == Some(CommitFailureForTest::BeforeRename) {
+        return Err(Error::Io(std::io::Error::other(
+            "injected pre-rename failure",
+        )));
+    }
     temp.persist(target).map_err(|e| Error::Io(e.error))?;
+    #[cfg(test)]
+    if injected_failure == Some(CommitFailureForTest::AfterRename) {
+        return Err(Error::DurabilityUncertain {
+            path: target.to_owned(),
+            source: std::io::Error::other("injected post-rename directory sync failure"),
+        });
+    }
     sync_parent(parent).map_err(|source| Error::DurabilityUncertain {
         path: target.to_owned(),
         source,
     })
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CommitFailureForTest {
+    BeforeRename,
+    AfterRename,
+}
+
+#[cfg(test)]
+thread_local! {
+    static COMMIT_FAILURE_FOR_TEST: std::cell::Cell<Option<CommitFailureForTest>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn fail_next_commit_for_test(failure: CommitFailureForTest) {
+    COMMIT_FAILURE_FOR_TEST.with(|slot| slot.set(Some(failure)));
+}
+
+#[cfg(test)]
+fn take_commit_failure_for_test() -> Option<CommitFailureForTest> {
+    COMMIT_FAILURE_FOR_TEST.with(|slot| slot.take())
 }
 
 #[cfg(test)]

@@ -730,6 +730,131 @@ mod durability_tests {
         assert!(attempt.exists());
     }
 
+    fn scheduled_fixture() -> (tempfile::TempDir, Store, PublishJournal, PublishJob) {
+        use crate::{
+            config::{Config, Paths},
+            publish_protocol::ScheduleParts,
+        };
+        use serde_json::json;
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path();
+        let image = data.join("art.png");
+        assert!(
+            std::process::Command::new("magick")
+                .args(["-size", "3x2", "xc:white"])
+                .arg(&image)
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::fs::write(data.join("tags.txt"), "tag\\n").unwrap();
+        let publication = json!({"uuid":"00000000-0000-4000-8000-000000000001", "state":"DESCRIBED", "title":"Title", "description":"Description", "submissionTimestamp":1700002800, "apparitionTimestampIfDifferentThanSubmission":1700002800, "files":[{"basename":"art.png","sha512sum":crate::images::file_sha512(&image).unwrap()}], "apparitions":[{"platformName":"deviantart","state":"unpublished"}]});
+        std::fs::write(
+            data.join("publications.json"),
+            serde_json::to_vec(&json!([publication])).unwrap(),
+        )
+        .unwrap();
+        let paths = Paths::resolve(Some(data), None).unwrap();
+        let store = Store::new(
+            paths,
+            Config {
+                tags: Some("tags.txt".into()),
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        let approved = snapshot(&store, "00000000-0000-4000-8000-000000000001").unwrap();
+        let job = PublishJob {
+            protocol: 1,
+            attempt_id: "00000000-0000-4000-8000-000000000002".into(),
+            uuid: approved.uuid.clone(),
+            image_path: image,
+            title: approved.title.clone(),
+            description: approved.description.clone(),
+            tags: approved.tags.clone(),
+            schedule: ScheduleParts {
+                epoch: 1700002800,
+                timezone: "UTC".into(),
+                year: 2023,
+                month: 11,
+                day: 14,
+                hour: 23,
+                minute: 0,
+            },
+            price: None,
+            tiers: vec![],
+            galleries: vec![],
+        };
+        let journal = PublishJournal::new(data).unwrap();
+        journal.begin(&job, &approved).unwrap();
+        journal
+            .terminal(&WorkerEvent::Scheduled {
+                protocol: 1,
+                attempt_id: job.attempt_id.clone(),
+                uuid: job.uuid.clone(),
+                url: Some("https://example.invalid/work".into()),
+            })
+            .unwrap();
+        (root, store, journal, job)
+    }
+
+    #[test]
+    fn store_pre_rename_failure_keeps_scheduled_receipt_for_recovery() {
+        let (_root, store, journal, job) = scheduled_fixture();
+        crate::store::fail_next_commit_for_test(crate::store::CommitFailureForTest::BeforeRename);
+        assert!(matches!(
+            journal.apply_scheduled(&store, &job.attempt_id),
+            Err(Error::Io(_))
+        ));
+        assert_eq!(
+            store.read().unwrap()[0]["apparitions"][0]["state"],
+            "unpublished"
+        );
+        let receipt = journal.read_receipt(&job.attempt_id).unwrap();
+        assert!(matches!(
+            receipt.terminal,
+            Some(WorkerEvent::Scheduled { .. })
+        ));
+        assert!(!receipt.applied);
+        assert_eq!(
+            journal.recover(&store).unwrap().replayed,
+            vec![job.attempt_id]
+        );
+        assert_eq!(
+            store.read().unwrap()[0]["apparitions"][0]["state"],
+            "published_or_scheduled"
+        );
+    }
+
+    #[test]
+    fn store_post_rename_durability_failure_keeps_receipt_and_recovers_idempotently() {
+        let (_root, store, journal, job) = scheduled_fixture();
+        crate::store::fail_next_commit_for_test(crate::store::CommitFailureForTest::AfterRename);
+        assert!(matches!(
+            journal.apply_scheduled(&store, &job.attempt_id),
+            Err(Error::DurabilityUncertain { .. })
+        ));
+        assert_eq!(
+            store.read().unwrap()[0]["apparitions"][0]["state"],
+            "published_or_scheduled"
+        );
+        let receipt = journal.read_receipt(&job.attempt_id).unwrap();
+        assert!(matches!(
+            receipt.terminal,
+            Some(WorkerEvent::Scheduled { .. })
+        ));
+        assert!(!receipt.applied);
+        assert_eq!(
+            journal.recover(&store).unwrap().replayed,
+            vec![job.attempt_id.clone()]
+        );
+        assert_eq!(
+            store.read().unwrap()[0]["apparitions"][0]["url"],
+            "https://example.invalid/work"
+        );
+        assert_eq!(journal.read_receipt(&job.attempt_id).unwrap().applied, true);
+    }
+
     #[test]
     fn approved_edit_after_hash_check_is_rejected_inside_the_fresh_store_mutation() {
         use crate::{
