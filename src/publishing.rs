@@ -1,10 +1,11 @@
 use crate::{
     application::Application,
     error::{Error, Result},
-    images::index_by_basename,
+    images::{index_by_basename, prepare_upload, validate_upload},
     model::{Phase, phase},
     publish_journal::{self, PublishJournal},
     publish_protocol::{PublishJob, ScheduleParts, SessionOpen, WorkerCommand, WorkerEvent},
+    scheduling,
     store::Store,
 };
 use serde_json::Value;
@@ -17,17 +18,30 @@ use std::{
     },
     time::Duration,
 };
+use tempfile::TempDir;
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
     process::{Child, Command},
     time::Instant,
 };
 
-const READY_TIMEOUT: Duration = Duration::from_secs(90);
-const ART_TIMEOUT: Duration = Duration::from_secs(600);
-const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_LINE: usize = 1024 * 1024;
 // ponytail: fixed per-worker timeouts and a 1 MiB frame cap; tune only when real browser behavior requires it.
+#[derive(Clone, Copy)]
+struct Timeouts {
+    ready: Duration,
+    artwork: Duration,
+    cleanup: Duration,
+}
+impl Default for Timeouts {
+    fn default() -> Self {
+        Self {
+            ready: Duration::from_secs(90),
+            artwork: Duration::from_secs(600),
+            cleanup: Duration::from_secs(5),
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct PublishRequest {
@@ -45,10 +59,20 @@ pub struct PublishReport {
 pub struct Publisher {
     worker: PathBuf,
     skill: PathBuf,
+    timeouts: Timeouts,
 }
 impl Publisher {
     pub fn new(worker: PathBuf, skill: PathBuf) -> Self {
-        Self { worker, skill }
+        Self {
+            worker,
+            skill,
+            timeouts: Timeouts::default(),
+        }
+    }
+    #[cfg(test)]
+    fn with_timeouts(mut self, timeouts: Timeouts) -> Self {
+        self.timeouts = timeouts;
+        self
     }
     pub async fn check_steps(&self) -> Result<()> {
         let status = Command::new(&self.worker)
@@ -87,7 +111,9 @@ impl Publisher {
             return Ok(PublishReport::default());
         }
         // Validate every selected record and file before opening a browser process.
+        let zone = scheduling::timezone(store.config())?;
         let mut batch = Vec::new();
+        let mut staged_uploads: Vec<TempDir> = Vec::new();
         for row in targets {
             let uuid = row
                 .get("uuid")
@@ -104,19 +130,18 @@ impl Publisher {
             let image = index_by_basename(&store.paths().data_dir)?
                 .remove(basename)
                 .ok_or_else(|| Error::NotFound(format!("artwork {basename}")))?;
-            if image
-                .extension()
-                .is_some_and(|ext| ext.to_string_lossy().eq_ignore_ascii_case("webp"))
-            {
-                return Err(Error::Validation(
-                    "WebP is not accepted by DeviantArt".into(),
-                ));
-            }
-            let job = make_job(&approved, image)?;
+            let staging = tempfile::tempdir_in(store.paths().data_dir.join(".publicator"))?;
+            let upload = prepare_upload(&image, staging.path())?;
+            validate_upload(&upload)?;
+            let attempt_id = uuid::Uuid::new_v4().to_string();
+            let job = make_job(&approved, attempt_id, upload, zone)?;
+            staged_uploads.push(staging);
             job_command_valid(&job)?;
             batch.push((approved, job));
         }
+        self.check_steps().await?;
         let mut child = start_worker(&self.worker)?;
+        let process_group = child.id();
         let diagnostics = child.stderr.take().map(|mut stderr| {
             tokio::spawn(async move {
                 let mut retained = Vec::new();
@@ -139,10 +164,12 @@ impl Publisher {
                 store,
                 &batch,
                 request.headless,
+                zone,
+                self.timeouts,
                 &cancel,
             )
             .await;
-        shutdown(&mut child).await;
+        shutdown(&mut child, self.timeouts.cleanup, process_group).await;
         let diagnostics = match diagnostics {
             Some(task) => task.await.unwrap_or_default(),
             None => Vec::new(),
@@ -153,12 +180,9 @@ impl Publisher {
         let detail = String::from_utf8_lossy(&diagnostics);
         match result {
             Ok(mut report) => {
-                let diagnostic = format!("worker stderr: {}", detail.trim());
-                report.error = Some(
-                    report
-                        .error
-                        .map_or(diagnostic.clone(), |error| format!("{error}; {diagnostic}")),
-                );
+                if let Some(error) = &mut report.error {
+                    error.push_str(&format!("; worker stderr: {}", detail.trim()));
+                }
                 Ok(report)
             }
             Err(error) => Err(Error::Protocol(format!(
@@ -174,6 +198,8 @@ impl Publisher {
         store: &Store,
         batch: &[(publish_journal::ApprovedSnapshot, PublishJob)],
         headless: bool,
+        zone: chrono_tz::Tz,
+        timeouts: Timeouts,
         cancel: &AtomicBool,
     ) -> Result<PublishReport> {
         let mut input = child
@@ -191,10 +217,13 @@ impl Publisher {
             login_profile: data.join(".deviantart-login"),
             work_profile: data.join(".deviantart-session"),
             headless,
-            timezone: "Europe/Paris".into(),
+            timezone: zone.to_string(),
         });
-        send_line(&mut input, &open).await?;
-        match tokio::time::timeout(READY_TIMEOUT, read_event(&mut output))
+        let ready_deadline = Instant::now() + timeouts.ready;
+        tokio::time::timeout_at(ready_deadline, send_line(&mut input, &open))
+            .await
+            .map_err(|_| Error::Protocol("worker open timeout".into()))??;
+        match tokio::time::timeout_at(ready_deadline, read_event(&mut output))
             .await
             .map_err(|_| Error::Protocol("worker ready timeout".into()))??
         {
@@ -216,10 +245,28 @@ impl Publisher {
                 break;
             }
             journal.begin(job, approved)?;
-            send_line(&mut input, &WorkerCommand::Submit(job.clone())).await?;
-            let event = match tokio::time::timeout(
-                ART_TIMEOUT,
-                read_matching_terminal(&mut output, job, Instant::now() + ART_TIMEOUT),
+            let deadline = Instant::now() + timeouts.artwork;
+            let send_result = match tokio::time::timeout_at(
+                deadline,
+                send_line(&mut input, &WorkerCommand::Submit(job.clone())),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => Err(Error::Protocol(format!(
+                    "worker submit write timeout; result is unknown: {error}"
+                ))),
+            };
+            if let Err(error) = send_result {
+                report.unknown += 1;
+                report.error = Some(error.to_string());
+                report.unattempted +=
+                    batch.len() - report.published - report.failed - report.unknown;
+                break;
+            }
+            let event = match tokio::time::timeout_at(
+                deadline,
+                read_matching_terminal(&mut output, job, deadline),
             )
             .await
             {
@@ -227,11 +274,15 @@ impl Publisher {
                 Ok(Err(e)) => {
                     report.unknown += 1;
                     report.error = Some(e.to_string());
+                    report.unattempted +=
+                        batch.len() - report.published - report.failed - report.unknown;
                     break;
                 }
                 Err(_) => {
                     report.unknown += 1;
                     report.error = Some("worker artwork timeout; result is unknown".into());
+                    report.unattempted +=
+                        batch.len() - report.published - report.failed - report.unknown;
                     break;
                 }
             };
@@ -259,7 +310,11 @@ impl Publisher {
                 _ => return Err(Error::Protocol("unexpected worker terminal".into())),
             }
         }
-        let _ = send_line(&mut input, &WorkerCommand::Close { protocol: 1 }).await;
+        let _ = tokio::time::timeout(
+            timeouts.cleanup,
+            send_line(&mut input, &WorkerCommand::Close { protocol: 1 }),
+        )
+        .await;
         Ok(report)
     }
 }
@@ -316,14 +371,18 @@ fn pending_targets<'a>(rows: &'a [Value], uuids: Option<&[String]>) -> Result<Ve
     }
     Ok(selected)
 }
-fn make_job(a: &publish_journal::ApprovedSnapshot, image_path: PathBuf) -> Result<PublishJob> {
-    let zone: chrono_tz::Tz = "Europe/Paris".parse().unwrap();
+fn make_job(
+    a: &publish_journal::ApprovedSnapshot,
+    attempt_id: String,
+    image_path: PathBuf,
+    zone: chrono_tz::Tz,
+) -> Result<PublishJob> {
     let dt = chrono::DateTime::from_timestamp(a.schedule_epoch, 0)
         .ok_or_else(|| Error::Validation("invalid schedule epoch".into()))?
         .with_timezone(&zone);
     let job = PublishJob {
         protocol: 1,
-        attempt_id: uuid::Uuid::new_v4().to_string(),
+        attempt_id,
         uuid: a.uuid.clone(),
         image_path,
         title: a.title.clone(),
@@ -345,9 +404,9 @@ fn make_job(a: &publish_journal::ApprovedSnapshot, image_path: PathBuf) -> Resul
     Ok(job)
 }
 fn job_command_valid(job: &PublishJob) -> Result<()> {
-    WorkerCommand::Submit(job.clone())
-        .validate()
-        .map_err(Error::Validation)
+    let command = WorkerCommand::Submit(job.clone());
+    command.validate().map_err(Error::Validation)?;
+    encode_line(&command).map(|_| ())
 }
 fn start_worker(path: &Path) -> Result<Child> {
     let mut c = Command::new(path);
@@ -358,12 +417,16 @@ fn start_worker(path: &Path) -> Result<Child> {
     c.process_group(0);
     Ok(c.spawn()?)
 }
-async fn send_line(w: &mut (impl AsyncWrite + Unpin), command: &WorkerCommand) -> Result<()> {
+fn encode_line(command: &WorkerCommand) -> Result<Vec<u8>> {
     let mut line = serde_json::to_vec(command)?;
     if line.len() + 1 > MAX_LINE {
         return Err(Error::Protocol("worker command exceeds 1 MiB".into()));
     }
     line.push(b'\n');
+    Ok(line)
+}
+async fn send_line(w: &mut (impl AsyncWrite + Unpin), command: &WorkerCommand) -> Result<()> {
+    let line = encode_line(command)?;
     w.write_all(&line).await?;
     w.flush().await?;
     Ok(())
@@ -417,21 +480,250 @@ async fn read_matching_terminal(
         }
     }
 }
-async fn shutdown(child: &mut Child) {
+async fn shutdown(child: &mut Child, cleanup_timeout: Duration, process_group: Option<u32>) {
     #[cfg(unix)]
-    if let Some(pid) = child.id() {
+    if let Some(pid) = process_group {
         // The child is the process-group leader; signal the group so browser descendants
         // receive the same bounded graceful-then-forced cleanup.
         unsafe { libc::kill(-(pid as i32), libc::SIGTERM) };
-        let _ = tokio::time::timeout(CLEANUP_TIMEOUT, child.wait()).await;
+        let _ = tokio::time::timeout(cleanup_timeout, child.wait()).await;
         unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
         let _ = child.wait().await;
         return;
     }
-    let _ = tokio::time::timeout(CLEANUP_TIMEOUT, child.wait()).await;
+    let _ = tokio::time::timeout(cleanup_timeout, child.wait()).await;
     if child.try_wait().ok().flatten().is_none() {
         let _ = child.start_kill();
-        let _ = tokio::time::timeout(CLEANUP_TIMEOUT, child.wait()).await;
+        let _ = tokio::time::timeout(cleanup_timeout, child.wait()).await;
     }
 }
 use chrono::{Datelike, Timelike};
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+    use crate::{
+        config::{Config, Paths},
+        metadata::{Endpoints, MetadataClient},
+    };
+    use serde_json::json;
+    use std::{os::unix::fs::PermissionsExt, sync::Arc};
+
+    #[tokio::test]
+    async fn cleanup_force_kills_worker_that_ignores_termination() {
+        let root = tempfile::tempdir().unwrap();
+        let image = root.path().join("art.png");
+        assert!(
+            std::process::Command::new("magick")
+                .args(["-size", "4x3", "xc:white"])
+                .arg(&image)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let sha = crate::images::file_sha512(&image).unwrap();
+        let id = "00000000-0000-4000-8000-000000000001";
+        std::fs::write(root.path().join("publications.json"), serde_json::to_vec(&json!([{
+            "uuid":id,"state":"DESCRIBED","title":"Title","description":"Description",
+            "submissionTimestamp":1_700_002_800,"apparitionTimestampIfDifferentThanSubmission":1_700_002_800,
+            "files":[{"basename":"art.png","sha512sum":sha}],
+            "apparitions":[{"platformName":"deviantart","state":"unpublished","tiers":[],"galleries":[]}]
+        }])).unwrap()).unwrap();
+        std::fs::write(root.path().join("tags.txt"), "tag\n").unwrap();
+        let store = Arc::new(
+            crate::store::Store::new(
+                Paths::resolve(Some(root.path()), None).unwrap(),
+                Config {
+                    tags: Some("tags.txt".into()),
+                    ..Config::default()
+                },
+            )
+            .unwrap(),
+        );
+        let application = Application::new(
+            store,
+            MetadataClient::new(
+                reqwest::Client::new(),
+                Endpoints {
+                    openrouter: "http://127.0.0.1:1".into(),
+                    ollama: "http://127.0.0.1:1".into(),
+                },
+                "llmfit".into(),
+            ),
+            || 0,
+        );
+        let worker = root.path().join("worker.sh");
+        let pid_file = root.path().join("pid");
+        std::fs::write(&worker, format!(r#"#!/bin/sh
+[ "$1" = "--check-steps" ] && exit 0
+echo $$ > '{}'
+while IFS= read -r line; do
+case "$line" in
+*'"type":"open"'*) echo '{{"protocol":1,"type":"ready"}}' ;;
+*'"type":"submit"'*) printf '%s' "$line" | jq -c '{{protocol:1,type:"failed",attempt_id,uuid,error:"safe"}}'; trap '' TERM; while :; do :; done ;;
+esac
+done"#, pid_file.display())).unwrap();
+        let mut permissions = std::fs::metadata(&worker).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&worker, permissions).unwrap();
+        let publisher =
+            Publisher::new(worker, root.path().join("skill.md")).with_timeouts(Timeouts {
+                ready: Duration::from_millis(250),
+                artwork: Duration::from_millis(250),
+                cleanup: Duration::from_millis(30),
+            });
+        let report = publisher
+            .publish(
+                &application,
+                PublishRequest {
+                    uuids: None,
+                    headless: true,
+                },
+                Arc::new(AtomicBool::new(false)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(report.failed, 1);
+        let pid = std::fs::read_to_string(pid_file).unwrap();
+        assert!(std::fs::read_to_string(format!("/proc/{}/stat", pid.trim())).is_err());
+    }
+
+    #[tokio::test]
+    async fn worker_that_never_becomes_ready_obeys_ready_deadline() {
+        let root = tempfile::tempdir().unwrap();
+        let image = root.path().join("art.png");
+        assert!(
+            std::process::Command::new("magick")
+                .args(["-size", "4x3", "xc:white"])
+                .arg(&image)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let sha = crate::images::file_sha512(&image).unwrap();
+        let id = "00000000-0000-4000-8000-000000000001";
+        std::fs::write(root.path().join("publications.json"), serde_json::to_vec(&json!([{
+            "uuid":id,"state":"DESCRIBED","title":"Title","description":"Description",
+            "submissionTimestamp":1_700_002_800,"apparitionTimestampIfDifferentThanSubmission":1_700_002_800,
+            "files":[{"basename":"art.png","sha512sum":sha}],
+            "apparitions":[{"platformName":"deviantart","state":"unpublished","tiers":[],"galleries":[]}]
+        }])).unwrap()).unwrap();
+        std::fs::write(root.path().join("tags.txt"), "tag\n").unwrap();
+        let store = Arc::new(
+            crate::store::Store::new(
+                Paths::resolve(Some(root.path()), None).unwrap(),
+                Config {
+                    tags: Some("tags.txt".into()),
+                    ..Config::default()
+                },
+            )
+            .unwrap(),
+        );
+        let application = Application::new(
+            store,
+            MetadataClient::new(
+                reqwest::Client::new(),
+                Endpoints {
+                    openrouter: "http://127.0.0.1:1".into(),
+                    ollama: "http://127.0.0.1:1".into(),
+                },
+                "llmfit".into(),
+            ),
+            || 0,
+        );
+        let worker = root.path().join("worker.sh");
+        std::fs::write(&worker, "#!/bin/sh\n[ \"$1\" = \"--check-steps\" ] && exit 0\nIFS= read -r open || exit 1\nsleep 10\n").unwrap();
+        let mut permissions = std::fs::metadata(&worker).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&worker, permissions).unwrap();
+        let publisher =
+            Publisher::new(worker, root.path().join("skill.md")).with_timeouts(Timeouts {
+                ready: Duration::from_millis(50),
+                artwork: Duration::from_millis(250),
+                cleanup: Duration::from_millis(50),
+            });
+        let error = publisher
+            .publish(
+                &application,
+                PublishRequest {
+                    uuids: None,
+                    headless: true,
+                },
+                Arc::new(AtomicBool::new(false)),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("worker ready timeout"));
+    }
+
+    #[tokio::test]
+    async fn large_submit_to_nonreading_worker_times_out_with_unknown_intent() {
+        let root = tempfile::tempdir().unwrap();
+        let image = root.path().join("art.png");
+        assert!(
+            std::process::Command::new("magick")
+                .args(["-size", "4x3", "xc:white"])
+                .arg(&image)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let sha = crate::images::file_sha512(&image).unwrap();
+        let id = "00000000-0000-4000-8000-000000000001";
+        let publications = root.path().join("publications.json");
+        std::fs::write(&publications, serde_json::to_vec(&json!([{
+            "uuid": id, "state":"DESCRIBED", "title":"Title",
+            "description":"d".repeat(900_000), "submissionTimestamp":1_700_002_800,
+            "apparitionTimestampIfDifferentThanSubmission":1_700_002_800,
+            "files":[{"basename":"art.png","sha512sum":sha}],
+            "apparitions":[{"platformName":"deviantart","state":"unpublished","tiers":[],"galleries":[]}]
+        }])).unwrap()).unwrap();
+        std::fs::write(root.path().join("tags.txt"), "tag\n").unwrap();
+        let store = Arc::new(
+            crate::store::Store::new(
+                Paths::resolve(Some(root.path()), None).unwrap(),
+                Config {
+                    tags: Some("tags.txt".into()),
+                    ..Config::default()
+                },
+            )
+            .unwrap(),
+        );
+        let application = Application::new(
+            store,
+            MetadataClient::new(
+                reqwest::Client::new(),
+                Endpoints {
+                    openrouter: "http://127.0.0.1:1".into(),
+                    ollama: "http://127.0.0.1:1".into(),
+                },
+                "llmfit".into(),
+            ),
+            || 0,
+        );
+        let worker = root.path().join("worker.sh");
+        std::fs::write(&worker, "#!/bin/sh\n[ \"$1\" = \"--check-steps\" ] && exit 0\nIFS= read -r open || exit 1\necho '{\"protocol\":1,\"type\":\"ready\"}'\nsleep 10\n").unwrap();
+        let mut permissions = std::fs::metadata(&worker).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&worker, permissions).unwrap();
+        let publisher =
+            Publisher::new(worker, root.path().join("skill.md")).with_timeouts(Timeouts {
+                ready: Duration::from_millis(250),
+                artwork: Duration::from_millis(50),
+                cleanup: Duration::from_millis(100),
+            });
+        let report = publisher
+            .publish(
+                &application,
+                PublishRequest {
+                    uuids: None,
+                    headless: true,
+                },
+                Arc::new(AtomicBool::new(false)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(report.unknown, 1);
+        assert!(report.error.unwrap().contains("write timeout"));
+    }
+}

@@ -121,11 +121,17 @@ impl WorkerCommand {
                 .timezone
                 .parse::<chrono_tz::Tz>()
                 .map_err(|_| "invalid schedule timezone".to_string())?;
-            if zone
-                .with_ymd_and_hms(s.year, s.month, s.day, s.hour, s.minute, 0)
-                .single()
-                .is_none_or(|dt| dt.timestamp() != s.epoch)
-            {
+            let wall_time = chrono::NaiveDate::from_ymd_opt(s.year, s.month, s.day)
+                .and_then(|date| date.and_hms_opt(s.hour, s.minute, 0))
+                .ok_or_else(|| "invalid schedule parts".to_string())?;
+            let expected = match zone.from_local_datetime(&wall_time) {
+                chrono::LocalResult::Single(dt) => Some(dt.timestamp()),
+                chrono::LocalResult::Ambiguous(first, second) => {
+                    Some(first.timestamp().min(second.timestamp()))
+                }
+                chrono::LocalResult::None => None,
+            };
+            if expected != Some(s.epoch) {
                 return Err("schedule epoch does not match wall time".into());
             }
         }

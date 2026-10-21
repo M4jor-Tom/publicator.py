@@ -234,7 +234,7 @@ pub fn slots(profile: &Profile, zone: Tz, now: i64) -> Result<Vec<i64>> {
     Ok(output)
 }
 
-fn schedule_zone(config: &Config) -> Result<Tz> {
+pub fn timezone(config: &Config) -> Result<Tz> {
     let name = match config.schedule.get("timezone") {
         None => "Europe/Paris",
         Some(Value::String(name)) => name,
@@ -246,7 +246,7 @@ fn schedule_zone(config: &Config) -> Result<Tz> {
 
 pub fn repack(rows: &mut Publications, config: &Config, now: i64) -> Result<()> {
     let all_profiles = profiles(config)?;
-    let zone = schedule_zone(config)?;
+    let zone = timezone(config)?;
     let profile_slots: Vec<_> = all_profiles
         .iter()
         .map(|profile| Ok((profile, slots(profile, zone, now)?)))

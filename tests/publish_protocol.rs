@@ -75,6 +75,31 @@ fn bounded_frame_reader_rejects_oversized_line() {
 }
 
 #[test]
+fn submit_accepts_first_fold_occurrence_matching_schedule_fold_zero() {
+    let job = PublishJob {
+        protocol: 1,
+        attempt_id: "00000000-0000-4000-8000-000000000999".into(),
+        uuid: "00000000-0000-4000-8000-000000000001".into(),
+        image_path: PathBuf::from("x.png"),
+        title: "Title".into(),
+        description: "Description".into(),
+        tags: vec![],
+        schedule: ScheduleParts {
+            epoch: 1_793_509_200,
+            timezone: "America/New_York".into(),
+            year: 2026,
+            month: 11,
+            day: 1,
+            hour: 1,
+            minute: 0,
+        },
+        price: None,
+        tiers: vec![],
+        galleries: vec![],
+    };
+    assert!(WorkerCommand::Submit(job).validate().is_ok());
+}
+#[test]
 fn events_are_explicitly_versioned_and_keep_zero_price_distinct() {
     let job = PublishJob {
         protocol: 1,

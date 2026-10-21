@@ -265,6 +265,10 @@ fn actual_mime(path: &Path) -> Result<String> {
     Ok(mime.into())
 }
 
+pub fn validate_upload(path: &Path) -> Result<()> {
+    actual_mime(path).map(|_| ())
+}
+
 pub fn prepare_upload(source: &Path, attempt_dir: &Path) -> Result<PathBuf> {
     if !source
         .extension()
