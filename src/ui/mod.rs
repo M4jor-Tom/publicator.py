@@ -370,7 +370,7 @@ impl App {
                                 batch_selection,
                             });
                         } else if generate && can_generate {
-                            return self.continue_local_generation(selection);
+                            return self.continue_local_generation(selection, batch_selection);
                         }
                     }
                     Err(error) => {
@@ -842,19 +842,25 @@ impl App {
         )
     }
 
-    fn continue_local_generation(&mut self, selection: Option<String>) -> Task<Message> {
+    fn continue_local_generation(
+        &mut self,
+        selection: Option<String>,
+        batch_selection: Option<Vec<String>>,
+    ) -> Task<Message> {
         if let Some(uuid) = selection.as_deref() {
             if self.drafts.get(uuid).is_some_and(Draft::is_dirty) {
                 self.pending_generation = Some(uuid.to_owned());
                 self.pending_generation_install = false;
+                self.pending_generation_batch = batch_selection;
                 return self.save_uuid(uuid);
             }
         } else if self.any_dirty() {
             self.pending_generation = Some(String::new());
             self.pending_generation_install = false;
+            self.pending_generation_batch = batch_selection;
             return self.save_next_dirty();
         }
-        self.start_generation(selection, false, None)
+        self.start_generation(selection, false, batch_selection)
     }
 
     fn start_generation(

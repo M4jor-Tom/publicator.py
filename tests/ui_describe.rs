@@ -312,6 +312,123 @@ async fn missing_good_model_requires_confirmation_and_only_then_pulls() {
 }
 
 #[tokio::test]
+async fn installed_local_batch_keeps_identity_through_dirty_flush_and_admission() {
+    let f = Fixture::new();
+    f.image("1.png", 4, 4);
+    f.write(json!([marker_row(1), marker_row(2)]));
+    let model_name = VISION_MODELS[0].ollama_name.clone();
+    let tags = json!({"models":[{"name":model_name}]});
+    let server = common::http::Server::start(vec![
+        ollama_reply("/api/tags", tags.clone()),
+        ollama_reply("/api/tags", tags),
+    ]);
+    let (mut app, _) = local_fixture_app(
+        &f,
+        fake_llmfit(&f, "Good", &["Fits host"]),
+        server.url().into(),
+    );
+    let selected = run_task(app.update(Message::SelectSource(Source::Local))).await;
+    let _ = app.update(selected);
+
+    // The Good/installed fit result immediately continues without consent. Add
+    // a draft while status is pending so the batch identity must survive save.
+    let fit_task = app.update(Message::GenerateMarked);
+    let status = run_task(fit_task).await;
+    for (field, text) in [
+        (publicator::ui::drafts::Field::Title, "Manual title"),
+        (
+            publicator::ui::drafts::Field::Description,
+            "Manual description",
+        ),
+    ] {
+        let _ = app.update(Message::Edited {
+            uuid: id(1),
+            field,
+            text: text.into(),
+        });
+    }
+    let flush = app.update(status);
+    let saved = run_task(flush).await;
+    let generation = app.update(saved);
+
+    // The generation Task has not been polled/admitted yet. Its expected batch
+    // must still be the original two UUIDs, despite the dirty draft replacing
+    // one marker during the required save.
+    assert_eq!(f.read()[0]["title"], "Manual title");
+    let after_flush = std::fs::read(&f.store.paths().json).unwrap();
+    let finished = run_task(generation).await;
+    assert!(
+        matches!(
+            finished,
+            Message::GenerationFinished {
+                result: Err(ref error),
+                ..
+            } if error.contains("marked batch changed")
+        ),
+        "unexpected completion: {finished:?}"
+    );
+    let _ = app.update(finished);
+    assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), after_flush);
+    assert_eq!(f.read()[1]["title"], "[[PUBLICATOR:TODO_GENERATE]]");
+    assert!(!app.local_install_consent_pending());
+    let calls = server.requests();
+    assert!(!calls.iter().any(|call| call["path"] == "/api/pull"));
+    assert!(!calls.iter().any(|call| call["path"] == "/api/chat"));
+}
+
+#[tokio::test]
+async fn installed_local_batch_rejects_membership_changed_before_admission() {
+    let f = Fixture::new();
+    f.image("1.png", 4, 4);
+    f.write(json!([marker_row(1), marker_row(2)]));
+    let model_name = VISION_MODELS[0].ollama_name.clone();
+    let tags = json!({"models":[{"name":model_name}]});
+    let server = common::http::Server::start(vec![
+        ollama_reply("/api/tags", tags.clone()),
+        ollama_reply("/api/tags", tags),
+    ]);
+    let (mut app, _) = local_fixture_app(
+        &f,
+        fake_llmfit(&f, "Good", &["Fits host"]),
+        server.url().into(),
+    );
+    let selected = run_task(app.update(Message::SelectSource(Source::Local))).await;
+    let _ = app.update(selected);
+    let status = run_task(app.update(Message::GenerateMarked)).await;
+    let generation = app.update(status);
+    f.store
+        .mutate(|rows| {
+            rows[0]["title"] = json!("Manual title");
+            rows[0]["description"] = json!("Manual description");
+            Ok(())
+        })
+        .unwrap();
+    let saved = std::fs::read(&f.store.paths().json).unwrap();
+    let finished = run_task(generation).await;
+    assert!(matches!(
+        finished,
+        Message::GenerationFinished {
+            result: Err(ref error),
+            ..
+        } if error.contains("marked batch changed")
+    ));
+    let _ = app.update(finished);
+    assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), saved);
+    assert!(
+        !server
+            .requests()
+            .iter()
+            .any(|call| call["path"] == "/api/chat")
+    );
+    assert!(
+        !server
+            .requests()
+            .iter()
+            .any(|call| call["path"] == "/api/pull")
+    );
+}
+
+#[tokio::test]
 async fn batch_local_install_consent_rejects_a_changed_eligible_set() {
     let f = Fixture::new();
     f.image("1.png", 4, 4);
