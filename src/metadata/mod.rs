@@ -6,7 +6,9 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::LazyLock, time::Duration};
 
+mod local;
 mod openrouter;
+pub use local::{Fit, LocalStatus, consent_required};
 pub use openrouter::CatalogModel;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -97,6 +99,22 @@ impl MetadataClient {
     pub fn with_openrouter_key(mut self, key: impl Into<String>) -> Self {
         self.openrouter_key = Some(key.into());
         self
+    }
+
+    pub async fn generate(
+        &self,
+        image: &PreparedImage,
+        request: &GenerationRequest,
+    ) -> Result<Generated> {
+        match request.source {
+            Source::OpenRouter => self.openrouter_generate(image, request, None).await,
+            Source::Local => {
+                let deadline = tokio::time::Instant::now() + request.timeout;
+                self.prepare_local(&request.model, request.install_missing, deadline)
+                    .await?;
+                self.local_generate_until(image, request, deadline).await
+            }
+        }
     }
 }
 
