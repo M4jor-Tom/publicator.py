@@ -1,6 +1,7 @@
+use chrono::{Datelike, TimeZone};
 use publicator::{
     application::Application,
-    config::{Config, Paths},
+    config::{Config, Paths, PromptConfig, PromptGrammar},
     metadata::{Endpoints, MetadataClient},
     model::GENERATE_MARKER,
     publishing::Publisher,
@@ -151,6 +152,258 @@ fn fixture_rows(scenario: &str, dir: &Path) -> Vec<Value> {
         }
         _ => usage(),
     }
+}
+
+fn calendar_fixture(dir: &Path) -> (Vec<Value>, Config) {
+    let history = dir.join("history-art");
+    let pick = dir.join("pick");
+    let archive = dir.join("prompt-archive");
+    for path in [&history, &pick, &archive] {
+        fs::create_dir_all(path).unwrap();
+    }
+    let prompt_config = PromptConfig {
+        repo: "prompt-archive".into(),
+        filename: r"(?P<lineage>exact|nearest|unknown)_[^_]+_(?P<version>[0-9a-f]{40})\.png".into(),
+        version_hash: "sha1".into(),
+    };
+    let exact_text = (0..12)
+        .map(|line| format!("EXACT ARCHIVED PROMPT LINE {line:02} — literal <fixture> 雪"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for (path, body) in [
+        (archive.join("archive/exact"), exact_text.clone()),
+        (
+            archive.join("archive/lineage-a/nearest"),
+            "NEAREST CANDIDATE A\narchived prompt text <candidate>".into(),
+        ),
+        (
+            archive.join("archive/lineage-b/nearest"),
+            "NEAREST CANDIDATE B\nall candidate lineages remain visible".into(),
+        ),
+    ] {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, body).unwrap();
+    }
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&archive)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "fixture git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.name", "Calendar Fixture"]);
+    git(&["config", "user.email", "calendar@example.invalid"]);
+    git(&["add", "--all"]);
+    git(&["commit", "-qm", "archive disposable calendar prompts"]);
+    let exact_digest = PromptGrammar::compile(&prompt_config)
+        .unwrap()
+        .digest(exact_text.as_bytes())
+        .unwrap();
+    let identities = [
+        ("exact", exact_digest.as_str()),
+        ("nearest", "ffffffffffffffffffffffffffffffffffffffff"),
+        ("unknown", "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"),
+    ];
+    let mut color_index = 0usize;
+    for (branch, digest) in identities {
+        let color = fixture_color(color_index);
+        color_index += 1;
+        image(&pick.join(format!("{branch}_pick_{digest}.png")), color);
+    }
+
+    let zone: chrono_tz::Tz = "Pacific/Kiritimati".parse().unwrap();
+    let local_now = chrono::Utc::now().with_timezone(&zone);
+    let current_month = local_now.date_naive().with_day(1).unwrap();
+    let mut rows = Vec::new();
+    let mut manifest = Vec::new();
+    let mut uuid = 10_000u64;
+    for months_back in (0..=5).rev() {
+        let month = calendar_month_offset(current_month, -months_back);
+        let cluster = if months_back == 0 {
+            month
+        } else {
+            month.with_day(10).unwrap()
+        };
+        for (branch_index, (branch, digest)) in identities.iter().enumerate() {
+            let time = if months_back == 0 {
+                (0, 15 + branch_index as u32 * 20)
+            } else {
+                (8 + branch_index as u32, 0)
+            };
+            let timestamp = fixture_timestamp(zone, cluster, time.0, time.1);
+            let color = fixture_color(color_index);
+            color_index += 1;
+            let basename = format!("{branch}_calendar{uuid}_{digest}.png");
+            let path = history.join(&basename);
+            image(&path, color);
+            let title = if months_back == 0 && branch_index == 0 {
+                "Timezone boundary exact apparition".to_owned()
+            } else {
+                format!("Calendar {branch} history {uuid}")
+            };
+            let apparitions = if months_back == 0 && branch_index == 0 {
+                json!([
+                    {"platformName":"deviantart","state":"published_or_scheduled","url":"https://example.test/calendar-actual"},
+                    {"platformName":"historical-pixiv","state":"unpublished"}
+                ])
+            } else {
+                json!([{"platformName":format!("history-{branch}"),"state":"published_or_scheduled"}])
+            };
+            rows.push(calendar_publication(
+                uuid,
+                "APPEARED",
+                &title,
+                timestamp,
+                &basename,
+                Some(&path),
+                apparitions,
+            ));
+            manifest.push(json!({"uuid":format!("00000000-0000-4000-8000-{uuid:012}"),"title":title,"basename":basename,"rgb":color,"timestamp":timestamp,"prompt":branch}));
+            uuid += 1;
+        }
+        let date = month.with_day(24).unwrap();
+        let timestamp = fixture_timestamp(zone, date, 12, 0);
+        let color = fixture_color(color_index);
+        color_index += 1;
+        let basename = format!("exact_calendar{uuid}_{}.png", identities[0].1);
+        let path = history.join(&basename);
+        image(&path, color);
+        let title = format!("Calendar later-month event {uuid}");
+        rows.push(calendar_publication(
+            uuid,
+            "APPEARED",
+            &title,
+            timestamp,
+            &basename,
+            Some(&path),
+            json!([{"platformName":"historical-pixiv","state":"published_or_scheduled"}]),
+        ));
+        manifest.push(json!({"uuid":format!("00000000-0000-4000-8000-{uuid:012}"),"title":title,"basename":basename,"rgb":color,"timestamp":timestamp,"prompt":"exact"}));
+        uuid += 1;
+    }
+
+    let current_day = local_now.date_naive();
+    for (state, name, apparitions) in [
+        (
+            "PICKED",
+            "PICKED",
+            json!([{"platformName":"historical-picked","state":"unpublished"}]),
+        ),
+        (
+            "SCHEDULED",
+            "SCHEDULED",
+            json!([{"platformName":"historical-scheduled","state":"unpublished"}]),
+        ),
+        (
+            "DESCRIBED",
+            "DESCRIBED",
+            json!([{"platformName":"deviantart","state":"unpublished","tiers":[],"galleries":[]}]),
+        ),
+        (
+            "APPEARED",
+            "APPEARED",
+            json!([{"platformName":"deviantart","state":"published_or_scheduled","url":"https://example.test/calendar-jump-appeared"}]),
+        ),
+    ] {
+        let timestamp = fixture_timestamp(zone, current_day, 14 + rows.len() as u32 % 4, 0);
+        let color = fixture_color(color_index);
+        color_index += 1;
+        let basename = format!("calendar-jump-{name}.png");
+        let path = history.join(&basename);
+        image(&path, color);
+        let title = format!("Calendar jump target {name}");
+        rows.push(calendar_publication(
+            uuid,
+            state,
+            &title,
+            timestamp,
+            &basename,
+            Some(&path),
+            apparitions,
+        ));
+        manifest.push(json!({"uuid":format!("00000000-0000-4000-8000-{uuid:012}"),"title":title,"basename":basename,"rgb":color,"timestamp":timestamp,"prompt":"unmatched"}));
+        uuid += 1;
+    }
+    let missing_timestamp = fixture_timestamp(zone, current_day, 19, 0);
+    rows.push(calendar_publication(
+        uuid,
+        "APPEARED",
+        "Missing artwork historical event",
+        missing_timestamp,
+        "missing-calendar-art.png",
+        None,
+        json!([
+            {"platformName":"historical-missing-a","state":"published_or_scheduled"},
+            {"platformName":"historical-missing-b","state":"unpublished"}
+        ]),
+    ));
+    manifest.push(json!({"uuid":format!("00000000-0000-4000-8000-{uuid:012}"),"title":"Missing artwork historical event","basename":"missing-calendar-art.png","rgb":null,"timestamp":missing_timestamp,"prompt":"missing"}));
+    fs::write(
+        dir.join("calendar-fixture-manifest.json"),
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let mut config = Config {
+        publicable: vec!["pick".into()],
+        prompts: Some(prompt_config),
+        ..Config::default()
+    };
+    config.schedule.insert(
+        "timezone".into(),
+        toml::Value::String("Pacific/Kiritimati".into()),
+    );
+    (rows, config)
+}
+
+fn fixture_color(index: usize) -> [u8; 3] {
+    [
+        30 + (index * 71 % 190) as u8,
+        30 + (index * 109 % 190) as u8,
+        30 + (index * 43 % 190) as u8,
+    ]
+}
+
+fn calendar_month_offset(month: chrono::NaiveDate, offset: i32) -> chrono::NaiveDate {
+    let ordinal = month.year() * 12 + month.month0() as i32 + offset;
+    chrono::NaiveDate::from_ymd_opt(ordinal.div_euclid(12), ordinal.rem_euclid(12) as u32 + 1, 1)
+        .unwrap()
+}
+
+fn fixture_timestamp(zone: chrono_tz::Tz, date: chrono::NaiveDate, hour: u32, minute: u32) -> i64 {
+    zone.from_local_datetime(&date.and_hms_opt(hour, minute, 0).unwrap())
+        .single()
+        .unwrap()
+        .timestamp()
+}
+
+fn calendar_publication(
+    uuid: u64,
+    state: &str,
+    title: &str,
+    timestamp: i64,
+    basename: &str,
+    path: Option<&Path>,
+    apparitions: Value,
+) -> Value {
+    json!({
+        "uuid": format!("00000000-0000-4000-8000-{uuid:012}"),
+        "state": state,
+        "title": if state == "SCHEDULED" { GENERATE_MARKER } else { title },
+        "description": if state == "SCHEDULED" { GENERATE_MARKER } else { "Fixture description" },
+        "submissionTimestamp": timestamp - 86400,
+        "apparitionTimestampIfDifferentThanSubmission": timestamp,
+        "files": [{"basename": basename, "sha512sum": path.map(|path| publicator::images::file_sha512(path).unwrap()).unwrap_or_else(|| "0".repeat(128))}],
+        "apparitions": apparitions,
+    })
 }
 
 fn initialize_publications_if_absent(path: &Path, rows: &[Value]) -> std::io::Result<()> {
@@ -441,6 +694,109 @@ mod tests {
     use publicator::metadata::VISION_MODELS;
 
     #[test]
+    fn calendar_fixture_is_schema_valid_and_shares_exact_nearest_unknown_prompts_with_pick() {
+        let dir = tempfile::tempdir().unwrap();
+        let (rows, config) = calendar_fixture(dir.path());
+        let store = Store::new(
+            Paths::resolve(Some(dir.path()), None).unwrap(),
+            config.clone(),
+        )
+        .unwrap();
+        store
+            .mutate(|saved| {
+                *saved = rows.clone();
+                Ok(())
+            })
+            .unwrap();
+        let saved = store.read().unwrap();
+        let scheduled = saved
+            .iter()
+            .find(|row| row["state"] == "SCHEDULED")
+            .unwrap();
+        assert_eq!(scheduled["apparitions"][0]["state"], "unpublished");
+        let events = publicator::calendar::timeline(&saved).unwrap();
+        assert!(events.len() >= 31);
+        assert!(
+            events
+                .iter()
+                .any(|event| { event.basename.as_deref() == Some("missing-calendar-art.png") })
+        );
+        let zone = publicator::scheduling::timezone(&config).unwrap();
+        assert_eq!(zone, "Pacific/Kiritimati".parse().unwrap());
+        let boundary = events
+            .iter()
+            .find(|event| event.title == "Timezone boundary exact apparition")
+            .unwrap();
+        let local = chrono::DateTime::<chrono::Utc>::from_timestamp(boundary.timestamp, 0)
+            .unwrap()
+            .with_timezone(&zone);
+        assert_eq!(local.date_naive().day(), 1);
+        assert_ne!(
+            local.date_naive().month(),
+            local.with_timezone(&chrono::Utc).month()
+        );
+
+        let archive =
+            publicator::prompts::PromptArchive::new(dir.path(), config.prompts.as_ref().unwrap())
+                .unwrap();
+        let find = |folder: &str, prefix: &str| {
+            fs::read_dir(dir.path().join(folder))
+                .unwrap()
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .find(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with(prefix))
+                })
+                .unwrap()
+        };
+        assert!(matches!(
+            archive.resolve_path(&find("history-art", "exact_calendar")),
+            Ok(publicator::prompts::PromptMatch::Exact(_))
+        ));
+        let nearest = archive
+            .resolve_path(&find("history-art", "nearest_calendar"))
+            .unwrap();
+        assert!(matches!(
+            &nearest,
+            publicator::prompts::PromptMatch::Nearest(lineages)
+                if lineages.len() == 2
+                    && lineages.iter().any(|lineage| lineage.path == "archive/lineage-a/nearest")
+                    && lineages.iter().any(|lineage| lineage.path == "archive/lineage-b/nearest")
+        ));
+        assert!(matches!(
+            archive.resolve_path(&find("history-art", "unknown_calendar")),
+            Ok(publicator::prompts::PromptMatch::Unknown(_))
+        ));
+        let candidates = publicator::images::find_candidates(
+            &store,
+            &publicator::images::Search {
+                limit: 25,
+                paths: vec!["pick".into()],
+            },
+        )
+        .unwrap();
+        assert_eq!(candidates.len(), 3);
+        for candidate in &candidates {
+            let branch = candidate
+                .path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .split('_')
+                .next()
+                .unwrap()
+                .to_owned();
+            let calendar_path = find("history-art", &format!("{branch}_calendar"));
+            assert_eq!(
+                std::mem::discriminant(&archive.resolve_path(&candidate.path).unwrap()),
+                std::mem::discriminant(&archive.resolve_path(&calendar_path).unwrap())
+            );
+        }
+    }
+
+    #[test]
     fn fixture_worker_outcomes_are_configurable_for_retry_and_reconciliation() {
         let dir = tempfile::tempdir().unwrap();
         let settings = FixtureSettings {
@@ -689,22 +1045,28 @@ fn main() -> iced::Result {
     fs::create_dir_all(&dir).expect("create explicit disposable fixture directory");
     let art = dir.join("art");
     fs::create_dir_all(&art).unwrap();
-    let seed_scenario = if scenario == "reopen" {
-        "mixed"
-    } else {
-        &scenario
-    };
-    let rows = fixture_rows(seed_scenario, &art);
     let settings_path = dir.join("native-fixture.json");
     let settings = load_fixture_settings(&dir);
     fs::write(dir.join("tags.txt"), "fixture-tag\n").unwrap();
-    let config = Config {
-        publicable: vec!["art".into()],
-        tags: Some("tags.txt".into()),
-        tiers: settings.tiers.clone(),
-        galleries: settings.galleries.clone(),
-        ..Config::default()
+    let (rows, mut config) = if scenario == "calendar" {
+        calendar_fixture(&dir)
+    } else {
+        let seed_scenario = if scenario == "reopen" {
+            "mixed"
+        } else {
+            &scenario
+        };
+        (
+            fixture_rows(seed_scenario, &art),
+            Config {
+                publicable: vec!["art".into()],
+                ..Config::default()
+            },
+        )
     };
+    config.tags = Some("tags.txt".into());
+    config.tiers = settings.tiers.clone();
+    config.galleries = settings.galleries.clone();
     let paths = Paths::resolve(Some(&dir), None).unwrap();
     initialize_publications_if_absent(&paths.json, &rows).unwrap();
     let store = Arc::new(Store::new(paths, config).unwrap());
