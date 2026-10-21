@@ -95,7 +95,12 @@ impl MetadataClient {
         }
         let url = format!("{}/models", self.endpoints.openrouter.trim_end_matches('/'));
         let mut req = self.http.get(url);
-        if let Ok(key) = std::env::var("OPENROUTER_KEY") {
+        if let Some(key) = self
+            .openrouter_key
+            .as_ref()
+            .cloned()
+            .or_else(|| std::env::var("OPENROUTER_KEY").ok())
+        {
             req = req.bearer_auth(key);
         }
         let bytes = self.bounded(req, deadline).await?;
@@ -118,8 +123,12 @@ impl MetadataClient {
         schema: bool,
         deadline: tokio::time::Instant,
     ) -> Result<Generated> {
-        let key = std::env::var("OPENROUTER_KEY")
-            .map_err(|_| Error::Provider("OPENROUTER_KEY is not set".into()))?;
+        let key = self
+            .openrouter_key
+            .as_ref()
+            .cloned()
+            .or_else(|| std::env::var("OPENROUTER_KEY").ok())
+            .ok_or_else(|| Error::Provider("OPENROUTER_KEY is not set".into()))?;
         let model = model.strip_prefix("openrouter/").unwrap_or(model);
         let rejected = self.rejected_schemas.lock().unwrap().contains(model);
         let use_schema = schema && !rejected;
@@ -158,11 +167,7 @@ impl MetadataClient {
             .ok_or_else(|| Error::Protocol("OpenRouter response missing message content".into()))?;
         Ok(Generated {
             metadata: parse_metadata(content)?,
-            model_used: v
-                .get("model")
-                .and_then(Value::as_str)
-                .unwrap_or(model)
-                .to_owned(),
+            model_used: model.to_owned(),
         })
     }
     pub async fn openrouter_generate(

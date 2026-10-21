@@ -16,6 +16,7 @@ fn client(base: &str) -> MetadataClient {
         },
         PathBuf::new(),
     )
+    .with_openrouter_key("DUMMY-test-credential")
 }
 fn image() -> (tempfile::TempDir, PreparedImage) {
     let dir = tempfile::tempdir().unwrap();
@@ -143,6 +144,35 @@ async fn schema_rejection_retries_once_prompt_shaped_then_memoizes() {
 }
 
 #[tokio::test]
+async fn response_model_alias_never_becomes_paid_preference() {
+    let (_dir, img) = image();
+    let server = common::http::Server::start(vec![
+        common::http::Reply {
+            path: "/chat/completions".into(),
+            status: 200,
+            body: completion("vendor/canonical-without-free"),
+        },
+        common::http::Reply {
+            path: "/chat/completions".into(),
+            status: 200,
+            body: completion("vendor/canonical-without-free"),
+        },
+    ]);
+    let c = client(server.url());
+    let first = c.openrouter_generate(&img, &request(), None).await.unwrap();
+    assert_eq!(first.model_used, "vendor/selected:free");
+    c.openrouter_generate(&img, &request(), Some(&first.model_used))
+        .await
+        .unwrap();
+    assert!(
+        server
+            .requests()
+            .iter()
+            .all(|r| r["body"]["model"] == "vendor/selected:free")
+    );
+}
+
+#[tokio::test]
 async fn unrelated_bad_request_does_not_trigger_schema_retry() {
     let (_dir, img) = image();
     let server = common::http::Server::start(vec![common::http::Reply {
@@ -204,11 +234,25 @@ async fn body_reads_are_inside_total_deadline() {
         io::{Read, Write},
         net::TcpListener,
         thread,
+        time::Instant,
     };
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
     let addr = listener.local_addr().unwrap();
     let worker = thread::spawn(move || {
-        let (mut s, _) = listener.accept().unwrap();
+        let until = Instant::now() + Duration::from_secs(3);
+        let (mut s, _) = loop {
+            match listener.accept() {
+                Ok(connection) => break connection,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < until =>
+                {
+                    thread::sleep(Duration::from_millis(10))
+                }
+                Err(_) => return,
+            }
+        };
+        s.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
         let mut b = [0; 2048];
         let _ = s.read(&mut b);
         let body = b"{\"choices\":[{\"message\":{\"content\":\"x\"}}]}";
