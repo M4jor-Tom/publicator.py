@@ -334,6 +334,14 @@ impl Application {
         publisher.publish(self, request, cancel).await
     }
 }
+pub fn first_pending_uuid(rows: &[Value]) -> Result<Option<String>> {
+    Ok(pending_targets(rows, None)?
+        .first()
+        .and_then(|row| row.get("uuid"))
+        .and_then(Value::as_str)
+        .map(str::to_owned))
+}
+
 fn pending_targets<'a>(rows: &'a [Value], uuids: Option<&[String]>) -> Result<Vec<&'a Value>> {
     let mut selected = Vec::new();
     for row in rows {

@@ -7,7 +7,7 @@ use publicator::{
     model::{GENERATE_MARKER, Phase, phase},
     prompts::{PromptArchive, audit},
     publish_journal::{PublishJournal, ReconcileOutcome},
-    publishing::{PublishRequest, Publisher},
+    publishing::{PublishRequest, Publisher, first_pending_uuid},
     store::Store,
 };
 use std::{
@@ -44,7 +44,7 @@ enum Command {
         model: Option<String>,
         #[arg(long, default_value_t = 300)]
         timeout: u64,
-        #[arg(long)]
+        #[arg(long, short = 'y')]
         yes: bool,
         #[arg(long, short)]
         verbose: bool,
@@ -63,7 +63,7 @@ enum Command {
         uuid: Option<String>,
         #[arg(long, conflicts_with = "reconcile_attempt")]
         all: bool,
-        #[arg(long, conflicts_with_all = ["all", "uuid"]) ]
+        #[arg(long, conflicts_with_all = ["all", "uuid", "check_steps"]) ]
         reconcile_attempt: Option<String>,
         #[arg(long, value_enum, requires = "reconcile_attempt")]
         outcome: Option<OutcomeArg>,
@@ -71,7 +71,7 @@ enum Command {
         url: Option<String>,
         #[arg(long, conflicts_with = "reconcile_attempt")]
         headless: bool,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "reconcile_attempt")]
         check_steps: bool,
         #[arg(long)]
         data_dir: Option<PathBuf>,
@@ -178,6 +178,8 @@ async fn run() -> Result<()> {
                         .unwrap_or("")
                 );
                 println!("schedule: {}", date.format("%Y-%m-%d %H:%M %Z"));
+            } else {
+                return Err(Error::NotFound("no unpublished publication".into()));
             }
         }
         Command::GenerateMeta {
@@ -309,9 +311,7 @@ async fn run() -> Result<()> {
                     .unwrap_or_else(|| PathBuf::from(".claude/skills/publish-deviantart/SKILL.md"));
                 Publisher::new(worker, skill).check_steps().await?;
                 println!("check-steps OK");
-                if reconcile_attempt.is_none() && uuid.is_none() && !all {
-                    return Ok(());
-                }
+                return Ok(());
             }
             let (paths, config, store) = paths(data_dir, json)?;
             let worker = std::env::var_os("PUBLICATOR_WORKER")
@@ -342,19 +342,10 @@ async fn run() -> Result<()> {
             let ids = if let Some(id) = uuid {
                 Some(vec![id])
             } else if all {
-                Some(
-                    store
-                        .read()?
-                        .iter()
-                        .filter_map(|r| {
-                            r.get("uuid")
-                                .and_then(serde_json::Value::as_str)
-                                .map(str::to_owned)
-                        })
-                        .collect(),
-                )
-            } else {
                 None
+            } else {
+                let rows = store.read()?;
+                Some(first_pending_uuid(&rows)?.into_iter().collect())
             };
             let app = Application::new(store, metadata_client(), || chrono::Utc::now().timestamp())
                 .with_publisher(publisher);

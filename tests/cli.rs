@@ -47,6 +47,70 @@ fn llmfit(root: &std::path::Path) -> std::path::PathBuf {
     path
 }
 
+fn publication_batch(root: &std::path::Path) {
+    use common::{id, row};
+    let mut historical = row(1, "APPEARED");
+    historical["apparitions"] = json!([{"platformName":"historical-site","state":"unpublished"}]);
+    let mut unrelated = row(2, "PICKED");
+    unrelated["apparitions"] =
+        json!([{"platformName":"deviantart","state":"unpublished","tiers":[],"galleries":[]}]);
+    let mut rows = vec![historical, unrelated];
+    for n in 3..=4 {
+        let image = root.join(format!("art{n}.png"));
+        assert!(
+            Command::new("magick")
+                .args(["-size", "4x4", "xc:white"])
+                .arg(&image)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let mut item = row(n, "DESCRIBED");
+        item["files"][0]["basename"] = json!(format!("art{n}.png"));
+        item["files"][0]["sha512sum"] = json!(publicator::images::file_sha512(&image).unwrap());
+        item["apparitionTimestampIfDifferentThanSubmission"] = json!(1700002800);
+        item["apparitions"] =
+            json!([{"platformName":"deviantart","state":"unpublished","tiers":[],"galleries":[]}]);
+        rows.push(item);
+    }
+    fs::write(root.join("tags.txt"), "tag\n").unwrap();
+    fs::write(root.join("publicator.toml"), "tags='tags.txt'\n").unwrap();
+    fs::write(
+        root.join("publications.json"),
+        serde_json::to_string(&rows).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(id(3), "00000000-0000-4000-8000-000000000003");
+}
+
+fn logging_worker(root: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let worker = root.join("worker.sh");
+    let calls = root.join("worker-calls.txt");
+    let script = format!(
+        r#"#!/bin/sh
+if [ "$1" = "--check-steps" ]; then echo "$*" >> '{}'; exit 0; fi
+while IFS= read -r line; do
+case "$line" in
+*'"type":"open"'*) echo OPEN >> '{}'; echo '{{"protocol":1,"type":"ready"}}' ;;
+*'"type":"submit"'*)
+  attempt=$(printf '%s' "$line" | sed -n 's/.*"attempt_id":"\([^"]*\)".*/\1/p')
+  uuid=$(printf '%s' "$line" | sed -n 's/.*"uuid":"\([^"]*\)".*/\1/p')
+  echo "$uuid" >> '{}'
+  printf '{{"protocol":1,"type":"scheduled","attempt_id":"%s","uuid":"%s"}}\n' "$attempt" "$uuid" ;;
+*'"type":"close"'*) exit 0 ;;
+esac
+done
+"#,
+        calls.display(),
+        calls.display(),
+        calls.display()
+    );
+    fs::write(&worker, script).unwrap();
+    fs::set_permissions(&worker, fs::Permissions::from_mode(0o755)).unwrap();
+    (worker, calls)
+}
+
 fn local_reply(path: &str, value: Value) -> Reply {
     Reply {
         path: path.into(),
@@ -220,10 +284,122 @@ fn generation_requires_explicit_source_and_local_model() {
     let root = tempdir().unwrap();
     assert!(!cli(root.path(), &["generate-meta"]).status.success());
     assert!(
+        !cli(root.path(), &["generate-meta", "--source", "unknown"])
+            .status
+            .success()
+    );
+    assert!(
         !cli(root.path(), &["generate-meta", "--source", "local"])
             .status
             .success()
     );
+}
+
+#[test]
+fn default_publish_is_first_pending_and_all_uuid_remain_explicit_batches() {
+    use common::id;
+    for (selection, expected) in [
+        (vec![], vec![id(3)]),
+        (vec!["--all"], vec![id(3), id(4)]),
+        (
+            vec!["--uuid", "00000000-0000-4000-8000-000000000004"],
+            vec![id(4)],
+        ),
+    ] {
+        let root = tempdir().unwrap();
+        publication_batch(root.path());
+        let (worker, calls) = logging_worker(root.path());
+        let skill = root.path().join("skill.md");
+        fs::write(&skill, "fixture").unwrap();
+        let mut args = vec!["da-publish", "--data-dir", root.path().to_str().unwrap()];
+        args.extend(selection);
+        let output = Command::new(env!("CARGO_BIN_EXE_publicator"))
+            .current_dir(root.path())
+            .env("PUBLICATOR_WORKER", &worker)
+            .env("PUBLICATOR_SKILL", &skill)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let called = fs::read_to_string(calls)
+            .unwrap()
+            .lines()
+            .filter(|line| !line.starts_with("--check-steps") && *line != "OPEN")
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(called, expected);
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .contains(&format!("published: {},", expected.len()))
+        );
+    }
+}
+
+#[test]
+fn check_steps_is_check_only_even_with_submission_flags_or_bad_data() {
+    for malformed in [false, true] {
+        let root = tempdir().unwrap();
+        if malformed {
+            fs::write(root.path().join("publications.json"), b"{not-json").unwrap();
+        } else {
+            publication_batch(root.path());
+        }
+        let original = fs::read(root.path().join("publications.json")).unwrap();
+        let (worker, calls) = logging_worker(root.path());
+        let skill = root.path().join("skill.md");
+        fs::write(&skill, "fixture").unwrap();
+        for selection in [
+            vec!["--all"],
+            vec![
+                "--uuid",
+                "00000000-0000-4000-8000-000000000003",
+                "--headless",
+            ],
+        ] {
+            let output = Command::new(env!("CARGO_BIN_EXE_publicator"))
+                .current_dir(root.path())
+                .env("PUBLICATOR_WORKER", &worker)
+                .env("PUBLICATOR_SKILL", &skill)
+                .arg("da-publish")
+                .arg("--check-steps")
+                .args(&selection)
+                .arg("--data-dir")
+                .arg(root.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("check-steps OK"));
+            assert_eq!(
+                fs::read(root.path().join("publications.json")).unwrap(),
+                original
+            );
+            assert!(!root.path().join(".publicator").exists());
+        }
+        let calls = fs::read_to_string(calls).unwrap();
+        assert_eq!(calls.lines().count(), 2);
+        assert!(calls.lines().all(|line| line.starts_with("--check-steps")));
+    }
+    let root = tempdir().unwrap();
+    let reconcile = cli(
+        root.path(),
+        &[
+            "da-publish",
+            "--check-steps",
+            "--reconcile-attempt",
+            "attempt",
+            "--outcome",
+            "not-submitted",
+        ],
+    );
+    assert!(!reconcile.status.success());
 }
 
 #[test]
@@ -237,7 +413,7 @@ fn explicit_missing_uuid_is_an_error_after_steps_check() {
     fs::set_permissions(&worker, permissions).unwrap();
     let result = Command::new(env!("CARGO_BIN_EXE_publicator"))
         .current_dir(root.path())
-        .env("PUBLICATOR_WORKER", worker)
+        .env("PUBLICATOR_WORKER", &worker)
         .env("PUBLICATOR_SKILL", root.path().join("skill.md"))
         .args([
             "da-publish",
@@ -281,8 +457,16 @@ fn cli_local_consent_paths_are_terminal_and_nonterminal_safe() {
     );
     assert_eq!(server.requests().len(), 1);
 
-    // Actual terminal input: explicit no and EOF each refuse without changing data.
-    for input in [b"no\n".as_slice(), b"\x04".as_slice()] {
+    // Actual terminal input: all refusal spellings, arbitrary answers and EOF refuse unchanged.
+    for input in [
+        b"n\n".as_slice(),
+        b"N\n".as_slice(),
+        b"no\n".as_slice(),
+        b"NO\n".as_slice(),
+        b"maybe\n".as_slice(),
+        b"anything\n".as_slice(),
+        b"\x04".as_slice(),
+    ] {
         let root = tempdir().unwrap();
         marked_data(root.path());
         llmfit(root.path());
@@ -296,21 +480,30 @@ fn cli_local_consent_paths_are_terminal_and_nonterminal_safe() {
             fs::read(root.path().join("publications.json")).unwrap(),
             original
         );
+        assert_eq!(
+            server
+                .requests()
+                .iter()
+                .map(|r| r["path"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["/api/tags"]
+        );
     }
 
-    // Enter and y authorize a missing-model install; --yes authorizes without a PTY.
-    for (input, yes_flag) in [
-        (b"\n".as_slice(), false),
-        (b"y\n".as_slice(), false),
-        (b"yes\n".as_slice(), false),
-        (b"".as_slice(), true),
+    // Enter and y/yes authorize; both -y and --yes do so without a PTY.
+    for (input, flag) in [
+        (b"\n".as_slice(), None),
+        (b"y\n".as_slice(), None),
+        (b"yes\n".as_slice(), None),
+        (b"".as_slice(), Some("--yes")),
+        (b"".as_slice(), Some("-y")),
     ] {
         let root = tempdir().unwrap();
         marked_data(root.path());
         llmfit(root.path());
         let server = Server::start(vec![tags(false), tags(false), tags(false), pull(), chat()]);
-        let output = if yes_flag {
-            run_local(root.path(), &server, &["--yes"])
+        let output = if let Some(flag) = flag {
+            run_local(root.path(), &server, &[flag])
         } else {
             run_local_pty(root.path(), &server, input)
         };
@@ -367,11 +560,29 @@ fn cli_local_consent_paths_are_terminal_and_nonterminal_safe() {
         id(1)
     );
 
+    use std::os::unix::fs::PermissionsExt;
     let root = tempdir().unwrap();
     fs::write(root.path().join("publications.json"), "[]").unwrap();
-    let output = cli(
-        root.path(),
-        &[
+    let marker = root.path().join("llmfit-called");
+    let fit = root.path().join("llmfit");
+    fs::write(
+        &fit,
+        format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&fit, fs::Permissions::from_mode(0o755)).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_publicator"))
+        .current_dir(root.path())
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                root.path().display(),
+                std::env::var_os("PATH").unwrap().to_string_lossy()
+            ),
+        )
+        .env("PUBLICATOR_OLLAMA_URL", "http://127.0.0.1:1")
+        .args([
             "generate-meta",
             "--source",
             "local",
@@ -379,13 +590,15 @@ fn cli_local_consent_paths_are_terminal_and_nonterminal_safe() {
             "gemma4:26b-a4b",
             "--data-dir",
             root.path().to_str().unwrap(),
-        ],
-    );
+        ])
+        .output()
+        .unwrap();
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(!marker.exists());
 }
 
 #[test]
@@ -439,6 +652,18 @@ fn echo_first_uses_configured_timezone_and_vision_models_only_runs_llmfit() {
 }
 
 #[test]
+fn echo_first_fails_when_no_publication_is_pending() {
+    let root = tempdir().unwrap();
+    fs::write(root.path().join("publications.json"), "[]").unwrap();
+    let output = cli(
+        root.path(),
+        &["echo-first", "--data-dir", root.path().to_str().unwrap()],
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no unpublished publication"));
+}
+
+#[test]
 fn publish_empty_batch_succeeds_without_worker() {
     let root = tempdir().unwrap();
     fs::write(root.path().join("publications.json"), "[]").unwrap();
@@ -479,14 +704,15 @@ fn publish_unknown_worker_result_is_nonzero() {
         "apparitions":[{"platformName":"deviantart","state":"unpublished","tiers":[],"galleries":[]}]
     }]).to_string()).unwrap();
     let worker = root.path().join("worker.sh");
-    fs::write(&worker, "#!/bin/sh\nif [ \"$1\" = \"--check-steps\" ]; then exit 0; fi\nwhile IFS= read -r line; do case \"$line\" in *'\"type\":\"open\"'*) echo '{\"protocol\":1,\"type\":\"ready\"}' ;; *'\"type\":\"submit\"'*) echo malformed ;; *'\"type\":\"close\"'*) exit 0 ;; esac; done\n").unwrap();
+    let starts = root.path().join("worker-starts.txt");
+    fs::write(&worker, format!("#!/bin/sh\nif [ \"$1\" = \"--check-steps\" ]; then exit 0; fi\nwhile IFS= read -r line; do case \"$line\" in *'\"type\":\"open\"'*) echo start >> '{}'; echo '{{\"protocol\":1,\"type\":\"ready\"}}' ;; *'\"type\":\"submit\"'*) echo malformed ;; *'\"type\":\"close\"'*) exit 0 ;; esac; done\n", starts.display())).unwrap();
     fs::set_permissions(&worker, fs::Permissions::from_mode(0o755)).unwrap();
     let skill = root.path().join("skill.md");
     fs::write(&skill, "fixture skill").unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_publicator"))
         .current_dir(root.path())
-        .env("PUBLICATOR_WORKER", worker)
-        .env("PUBLICATOR_SKILL", skill)
+        .env("PUBLICATOR_WORKER", &worker)
+        .env("PUBLICATOR_SKILL", &skill)
         .args(["da-publish", "--data-dir", root.path().to_str().unwrap()])
         .output()
         .unwrap();
@@ -502,6 +728,17 @@ fn publish_unknown_worker_result_is_nonzero() {
         "stdout={stdout} stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(fs::read_to_string(&starts).unwrap().lines().count(), 1);
+    let unresolved = Command::new(env!("CARGO_BIN_EXE_publicator"))
+        .current_dir(root.path())
+        .env("PUBLICATOR_WORKER", &worker)
+        .env("PUBLICATOR_SKILL", &skill)
+        .args(["da-publish", "--data-dir", root.path().to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!unresolved.status.success());
+    assert!(String::from_utf8_lossy(&unresolved.stderr).contains("unresolved"));
+    assert_eq!(fs::read_to_string(starts).unwrap().lines().count(), 1);
 }
 
 #[test]
@@ -533,8 +770,8 @@ fn publish_failed_worker_result_is_nonzero() {
     fs::write(&skill, "fixture skill").unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_publicator"))
         .current_dir(root.path())
-        .env("PUBLICATOR_WORKER", worker)
-        .env("PUBLICATOR_SKILL", skill)
+        .env("PUBLICATOR_WORKER", &worker)
+        .env("PUBLICATOR_SKILL", &skill)
         .args(["da-publish", "--data-dir", root.path().to_str().unwrap()])
         .output()
         .unwrap();
