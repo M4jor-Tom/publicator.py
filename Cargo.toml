@@ -3,7 +3,22 @@ name = "publicator"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+desktop = ["dep:iced", "tokio/rt-multi-thread"]
+
+[[bin]]
+name = "publicator-ui"
+path = "src/bin/publicator-ui.rs"
+required-features = ["desktop"]
+
+[[test]]
+name = "ui_drafts"
+path = "tests/ui_drafts.rs"
+required-features = ["desktop"]
+
 [dependencies]
+iced = { version = "=0.14.0", optional = true, default-features = false, features = ["wgpu", "tiny-skia", "x11", "wayland", "tokio"] }
 chrono = "0.4"
 chrono-tz = "0.10"
 clap = { version = "4", features = ["derive"] }

@@ -83,6 +83,16 @@
         buildInputs = [ pkgs.openssl ];
         doCheck = false;
       };
+      rustDesktop = pkgs.rustPlatform.buildRustPackage {
+        pname = "publicator-rust-desktop";
+        version = "0.1.0";
+        src = ./.;
+        cargoLock.lockFile = ./Cargo.lock;
+        cargoBuildFlags = [ "--features" "desktop" "--bin" "publicator-ui" ];
+        nativeBuildInputs = [ pkgs.pkg-config ];
+        buildInputs = [ pkgs.openssl pkgs.libxkbcommon pkgs.wayland pkgs.libGL ];
+        doCheck = false;
+      };
       rustWorker = pkgs.writeShellScriptBin "publicator-da-worker" ''
         export PYTHONPATH=${src}/python
         export PLAYWRIGHT_BROWSERS_PATH=${browsers}
@@ -119,6 +129,7 @@
       packages.${system} = {
         publicator-core = rustCli;
         publicator-rust-cli = rustCli;
+        publicator-rust-desktop = rustDesktop;
       };
       apps.${system} = {
         # Rust CLI wrappers are opt-in during the migration; existing app names remain Python.
@@ -129,6 +140,14 @@
         rust-prompt-audit = rustCommand "rust-prompt-audit" "prompt-audit" [ pkgs.git ];
         rust-da-publish = rustCommand "rust-da-publish" "da-publish" [ pkgs.imagemagick browsers ];
         rust-check-steps = rustCommand "rust-check-steps" "check-steps" [ ];
+        rust-ui = {
+          type = "app";
+          program = "${pkgs.writeShellApplication {
+            name = "rust-ui";
+            runtimeInputs = [ rustDesktop python pkgs.git pkgs.imagemagick pkgs.ollama pkgs.llmfit ];
+            text = ''exec ${rustDesktop}/bin/publicator-ui "$@"'';
+          }}/bin/rust-ui";
+        };
         # `claude` on PATH so llm-claude-cli can shell out for AI metadata
         # (uses the logged-in Claude subscription at $HOME/.claude — no API key).
         ui = app "ui" "ui" [ pkgs.git pkgs.imagemagick browsers claude pkgs.ollama pkgs.llmfit ] true;
