@@ -107,13 +107,14 @@ pub fn view(state: &App) -> Element<'_, Message> {
     if state.source == Source::Local {
         let fit = state.local_fit_status();
         if let Some(status) = fit {
+            let reason: String = status.fit.reason.chars().take(512).collect();
             content = content.push(text(format!(
                 "Local fit: {} — {}. {}",
                 status.fit.level,
-                if status.fit.reason.is_empty() {
+                if reason.is_empty() {
                     "No additional fit notes"
                 } else {
-                    &status.fit.reason
+                    &reason
                 },
                 if !status.fit.fit {
                     "This model does not fit this host."
