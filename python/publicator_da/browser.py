@@ -23,20 +23,25 @@ class BrowserSession:
             raise RuntimeError("no valid DeviantArt session; run the real Firefox login first")
         if self.work.exists():
             shutil.rmtree(self.work)
-        shutil.copytree(self.source, self.work, symlinks=True,
+        shutil.copytree(self.source, self.work,
                         ignore=shutil.ignore_patterns("cache2", "startupCache", "thumbnails", "*.log"))
         for name in ("lock", ".parentlock", "parent.lock", "compatibility.ini"):
             (self.work / name).unlink(missing_ok=True)
-        self.playwright = sync_playwright().start()
-        self.context = self.playwright.firefox.launch_persistent_context(
-            str(self.work), headless=open_command["headless"], timezone_id=open_command["timezone"])
-        self.page = self.context.pages[0] if self.context.pages else self.context.new_page()
-        self.context.add_cookies(self._cookies())
-        self.page.goto("https://www.deviantart.com/studio?new=1", wait_until="domcontentloaded", timeout=45000)
-        self.page.wait_for_timeout(2000)
-        if "/users/login" in self.page.url:
+        self.playwright = None
+        self.context = None
+        try:
+            self.playwright = sync_playwright().start()
+            self.context = self.playwright.firefox.launch_persistent_context(
+                str(self.work), headless=open_command["headless"], timezone_id=open_command["timezone"])
+            self.page = self.context.pages[0] if self.context.pages else self.context.new_page()
+            self.context.add_cookies(self._cookies())
+            self.page.goto("https://www.deviantart.com/studio?new=1", wait_until="domcontentloaded", timeout=45000)
+            self.page.wait_for_timeout(2000)
+            if "/users/login" in self.page.url:
+                raise RuntimeError("no valid DeviantArt session; sign in using the real Firefox login profile")
+        except Exception:
             self.close()
-            raise RuntimeError("no valid DeviantArt session; sign in using the real Firefox login profile")
+            raise
 
     def _cookies(self):
         db = self.source / "cookies.sqlite"
@@ -59,12 +64,14 @@ class BrowserSession:
         return event
 
     def close(self):
-        if getattr(self, "context", None):
-            self.context.close()
-            self.context = None
-        if getattr(self, "playwright", None):
-            self.playwright.stop()
-            self.playwright = None
+        context, self.context = getattr(self, "context", None), None
+        playwright, self.playwright = getattr(self, "playwright", None), None
+        try:
+            if context:
+                context.close()
+        finally:
+            if playwright:
+                playwright.stop()
 
 
 def set_checkbox(page, name, want=True):
