@@ -13,6 +13,18 @@ use publicator::{
 use serde_json::json;
 use std::{sync::Arc, time::Duration};
 
+async fn run_task(task: iced::Task<Message>) -> Message {
+    use iced_runtime::{Action, futures::futures::StreamExt};
+
+    let mut actions = iced_runtime::task::into_stream(task).expect("dispatched task stream");
+    while let Some(action) = actions.next().await {
+        if let Action::Output(message) = action {
+            return message;
+        }
+    }
+    panic!("dispatched task produced no completion message");
+}
+
 fn app_with_rows(
     rows: serde_json::Value,
 ) -> (
@@ -62,9 +74,9 @@ fn search_uses_default_limit_and_all_configured_paths() {
     assert_eq!(app.search_paths(), vec!["images".to_owned()]);
 }
 
-#[test]
-fn custom_date_ui_operation_persists_exact_wall_input_without_profile() {
-    let (mut app, application, store, _root) = app_with_rows(json!([common::row(1, "PICKED")]));
+#[tokio::test]
+async fn custom_date_ui_operation_persists_exact_wall_input_without_profile() {
+    let (mut app, _application, store, _root) = app_with_rows(json!([common::row(1, "PICKED")]));
     let uuid = common::id(1);
     let _ = app.update(Message::CustomDate {
         uuid: uuid.clone(),
@@ -75,17 +87,12 @@ fn custom_date_ui_operation_persists_exact_wall_input_without_profile() {
         value: "19:30".into(),
     });
     let task = app.update(Message::SaveCustomDate(uuid.clone()));
-    assert!(
-        task.units() > 0,
-        "Custom-date message must dispatch an async save"
-    );
-    schedule::edit_date(
-        &application,
-        &uuid,
-        DateEdit::Custom("2027-01-01T19:30".into()),
-        common::epoch("2026-12-01T00:00:00Z"),
-    )
-    .unwrap();
+    let completion = run_task(task).await;
+    assert!(matches!(
+        &completion,
+        Message::WorkflowFinished { result: Ok(()), .. }
+    ));
+    let _ = app.update(completion);
     let saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&store.paths().json).unwrap()).unwrap();
     assert_eq!(saved[0]["scheduleIsManual"], true);
@@ -94,15 +101,11 @@ fn custom_date_ui_operation_persists_exact_wall_input_without_profile() {
         saved[0]["apparitionTimestampIfDifferentThanSubmission"],
         common::epoch("2027-01-01T18:30:00Z")
     );
-    let _ = app.update(Message::WorkflowFinished {
-        message: "Saved schedule date".into(),
-        result: Ok(()),
-    });
 }
 
-#[test]
-fn pick_dispatch_persists_candidate_before_refreshing_phase() {
-    let (mut app, application, store, root) = app_with_rows(json!([]));
+#[tokio::test]
+async fn pick_dispatch_persists_candidate_before_refreshing_phase() {
+    let (mut app, _application, store, root) = app_with_rows(json!([]));
     let image_dir = root.path().join("images");
     std::fs::create_dir_all(&image_dir).unwrap();
     let image_fixture = common::Fixture::new();
@@ -113,20 +116,12 @@ fn pick_dispatch_persists_candidate_before_refreshing_phase() {
     assert_eq!(candidates.len(), 1);
     let _ = app.update(Message::SearchFinished(Ok(candidates.clone())));
     let task = app.update(Message::Pick(candidates[0].clone()));
-    assert!(
-        task.units() > 0,
-        "authorized Pick message must dispatch its operation"
-    );
-    let saved_uuid = pick::pick_candidate(
-        &application,
-        &candidates[0],
-        common::epoch("2026-12-01T00:00:00Z"),
-    )
-    .unwrap();
+    let completion = run_task(task).await;
+    assert!(matches!(&completion, Message::PickFinished(Ok(()))));
+    let _ = app.update(completion);
     let rows = store.read().unwrap();
-    assert_eq!(rows[0]["uuid"], saved_uuid);
+    assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["state"], "PICKED");
-    let _ = app.update(Message::PickFinished(Ok(())));
     assert_eq!(app.current_tab(), publicator::ui::Tab::Schedule);
 }
 

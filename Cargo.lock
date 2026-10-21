@@ -2564,6 +2564,7 @@ dependencies = [
  "clap",
  "fs2",
  "iced",
+ "iced_runtime",
  "image",
  "jsonschema",
  "libc",
