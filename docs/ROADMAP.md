@@ -1,12 +1,13 @@
 # Roadmap
 
-## Rust / Iced migration — IN PROGRESS
+## Rust / Iced migration — IMPLEMENTED AND ACCEPTED
 
-**Current execution frontier — Task23C, 2026-10-21:** Tasks1–22 are parent-accepted; full Task23 A/B cutover is committed. Task23C is updating maintained documentation, repairing the four audit labels identified in the final metadata correction, and running the one required post-cutover validation/native wrapper set. This does **not** mean the final consolidated whole-branch correctness/complexity review or parent integration has passed.
+**Current execution frontier — final parent acceptance:** All23 tasks are implemented. The single whole-branch correctness/simplicity review, consolidated fix wave and fresh scoped fix review are complete. The scoped review confirmed F1–F13 addressed; the parent accepted the remaining historical options-clear uncertainty explicitly, not as a diagnosed or harmless failure. Authorized parent-only fast-forward, push and clean-worktree removal follow the final Git gate.
 
-- Task23 full fixed base: `af414d8d7444e2f8e02403e19247f31d230f10f4`; current feature branch is `feat/rust-iced` in `/tmp/publicator-rust-migration/worktree`.
-- Task23A audit/regressions and Task23B Rust/Nix cutover are committed; legacy Python application and HTTP UI are removed. Python remains only for Playwright browser work/probing.
-- After Task23C: one consolidated fresh whole-branch review/fix wave and parent gate remain. Only the parent may fast-forward/push/remove the clean worktree after all final checks. No live provider/model/profile/publishing effects are authorized.
+- Task23 full fixed base: `af414d8d7444e2f8e02403e19247f31d230f10f4`; consolidated safety/parity fixes: `f9dbb25b5e427c042bef81f928a131c81b2c41a8`. The feature branch `feat/rust-iced` is retained after integration.
+- The exact legacy audit covers845 assertion identities plus3 execution-only functions and367 collected cases, with zero unresolved dispositions. Legacy Python application/HTTP UI and Claude tooling are removed; Python remains only for browser work/probing. Runtime packaging and changed native stories have current affected-check evidence; unchanged passing evidence was reused.
+- **Disclosed residual:** One historical `publish_options_ui_persists_plural_allow_lists_zero_and_clear` failure remains unexplained. Bounded investigation and independent scoped review found no substantiated current defect; current strengthened completion/persistence assertions pass. The original failed witness remains preserved outside Git. Later passes are not a historical-cause diagnosis.
+- No real artwork/profile changes, model installation, paid/live provider calls or DeviantArt submission were performed. Live-site/calendar markup remains unverified; unsupported full-date selection fails safely.
 - The pause and recovery sections below are historical execution provenance, not current instructions or status. Their unchecked substeps and prior frontier tables must not override this live checkpoint.
 
 ### Historical pause checkpoint

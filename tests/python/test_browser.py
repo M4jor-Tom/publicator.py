@@ -63,10 +63,7 @@ class CalendarPage:
 
     def locator(self, selector):
         self.selector = selector
-        if selector.startswith("button[aria-label*="):
-            needle = selector.split('"', 2)[1]
-            labels = [label for label in self.labels if needle in label]
-        elif selector == "#schedule-draft-date-picker button[aria-label]":
+        if selector == "#schedule-draft-date-picker button[aria-label]":
             labels = self.labels
         else:
             labels = []
@@ -83,7 +80,7 @@ class CalendarPage:
             return CalendarLocator(self, ["Confirm Schedule"])
         return CalendarLocator(self)
 
-def test_schedule_chooses_the_requested_full_year_and_exact_day(tmp_path):
+def test_schedule_chooses_the_requested_full_year_and_exact_day():
     page = CalendarPage([
         "Wednesday, January 1, 2025",
         "Thursday, January 1, 2026",
@@ -94,7 +91,7 @@ def test_schedule_chooses_the_requested_full_year_and_exact_day(tmp_path):
     assert page.confirmed
 
 
-def test_schedule_refuses_unqualified_calendar_dates(tmp_path):
+def test_schedule_refuses_unqualified_calendar_dates():
     page = CalendarPage(["January 15", "January 15"])
     with pytest.raises(RuntimeError, match="full requested date"):
         browser._pick_schedule(page, {"year": 2026, "month": 1, "day": 15, "hour": 20})
