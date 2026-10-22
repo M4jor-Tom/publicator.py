@@ -3,8 +3,8 @@ name = "publicator"
 version = "0.1.0"
 description = "Human-review gallery + DeviantArt publishing pipeline"
 requires-python = ">=3.12"
-dependencies = ["jsonschema", "playwright", "llm"]
+dependencies = ["playwright"]
 
 [tool.pytest.ini_options]
-pythonpath = ["python", "src"]
-testpaths = ["tests"]
+pythonpath = ["python"]
+testpaths = ["tests/python"]

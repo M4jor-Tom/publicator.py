@@ -1,86 +1,30 @@
 {
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-  # Key-free AI metadata: `llm` drives the logged-in `claude` CLI via llm-claude-cli.
-  inputs.claude-code.url = "github:sadjow/claude-code-nix";
-  outputs = { self, nixpkgs, claude-code }:
+  outputs = { nixpkgs, ... }:
     let
       system = "x86_64-linux";
-      pkgs = import nixpkgs {
-        inherit system;
-        # inline-snapshot (a test-only transitive dep of llm's closure) has failing
-        # self-tests in this pin; skip its check so llm can build. (from scenharnist)
-        overlays = [
-          (final: prev: {
-            pythonPackagesExtensions = prev.pythonPackagesExtensions ++ [
-              (pyfinal: pyprev: {
-                inline-snapshot =
-                  pyprev.inline-snapshot.overridePythonAttrs (_: { doCheck = false; });
-              })
-            ];
-          })
-        ];
-      };
-      claude = claude-code.packages.${system}.default;
-      # 3.12, not the default: llm's closure pulls sphinx, which dropped 3.11 in
-      # this pin. The scripts are version-agnostic.
+      pkgs = import nixpkgs { inherit system; };
       pyInterp = pkgs.python312;
-      # `llm-claude-cli` isn't in nixpkgs — package it from PyPI so `llm` discovers
-      # it via its entry point (no stateful `llm install`). Vendored, hash-pinned.
-      llm-claude-cli = pyInterp.pkgs.buildPythonPackage {
-        pname = "llm-claude-cli";
-        version = "0.1.3";
-        pyproject = true;
-        src = pkgs.fetchurl {
-          url = "https://files.pythonhosted.org/packages/68/90/392ed1ee834eeb20fb2c7324a94284d860aef7c24a1568d214ee0e5f98d7/llm_claude_cli-0.1.3.tar.gz";
-          hash = "sha256-crhtbO1xTWY3BCRrIq6J8bVe732pGUkAZtD2Pg+kB5E=";
-        };
-        build-system = [ pyInterp.pkgs.setuptools ];
-        dependencies = [ pyInterp.pkgs.llm ];
-        pythonImportsCheck = [ "llm_claude_cli" ];
-        doCheck = false;  # upstream tests drive the real claude CLI
-      };
-      # `llm-openrouter` IS in this nixpkgs pin (unlike llm-claude-cli above), so
-      # no vendoring needed. The API key is NOT baked in: it reads $OPENROUTER_KEY
-      # at runtime.
-      pyPkgs = ps: [ ps.jsonschema ps.playwright ps.llm llm-claude-cli ps.llm-openrouter ];
+      pyPkgs = ps: [ ps.playwright ];
       python = pyInterp.withPackages pyPkgs;
-      # devShell adds pytest so `nix develop -c pytest` runs the suite; apps don't ship it.
+      # devShell adds pytest; the only shipped Python runtime is the browser worker.
       devPython = pyInterp.withPackages (ps: pyPkgs ps ++ [ ps.pytest ]);
       src = ./.;
       browsers = pkgs.playwright-driver.browsers;
-      # Each script resolves its code assets (the JSON schema) via __file__, so apps
-      # must run them from the packaged source dir. The tags file, like all other
-      # data + runtime state, resolves against CWD — invoke from the Art data dir
-      # (`nix run <this>#app`).
-      # extra: per-app runtime deps. pw: needs Playwright browsers (drags in the
-      # heavy chromium/webkit closure — only the browser-driving apps set it).
-      app = name: module: extra: pw: {
-        type = "app";
-        program = "${pkgs.writeShellApplication {
-          name = name;
-          runtimeInputs = [ python ] ++ extra;
-          text = (if pw then ''
-            export PLAYWRIGHT_BROWSERS_PATH=${browsers}
-            export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=true
-          '' else "") + ''
-            export PYTHONPATH=${src}/src
-            exec python -m publicator.apps.${module} "$@"
-          '';
-        }}/bin/${name}";
-      };
-
-      # A real, non-automated Firefox for a one-time DeviantArt sign-in. DA's
-      # PerimeterX wall blocks every Playwright browser at the login page, so
-      # login must happen in a genuine browser (no navigator.webdriver). It
-      # writes the logged-in + cleared session to the repo-local profile that
-      # the UI then copies. Reproducible: firefox is flake-pinned.
+      # Keep the worker and static skill independent of the source-tree store path.
+      runtimeAssets = pkgs.runCommand "publicator-runtime-assets" { } ''
+        mkdir -p $out/python/publicator_da $out/skill
+        cp ${src}/python/publicator_da/*.py $out/python/publicator_da/
+        cp ${src}/.claude/skills/publish-deviantart/SKILL.md $out/skill/SKILL.md
+      '';
+      # The Rust publisher starts this isolated Python Playwright protocol worker.
       rustWorker = pkgs.writeShellScriptBin "publicator-da-worker" ''
-        export PYTHONPATH=${src}/python
+        export PYTHONPATH=${runtimeAssets}/python
         export PLAYWRIGHT_BROWSERS_PATH=${browsers}
         export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=true
         exec ${python}/bin/python -m publicator_da.worker "$@"
       '';
-      rustSkill = "${src}/.claude/skills/publish-deviantart/SKILL.md";
+      rustSkill = "${runtimeAssets}/skill/SKILL.md";
       rustRuntime = [ pkgs.git pkgs.imagemagick pkgs.llmfit rustWorker ];
       desktopRuntime = [
         pkgs.libxkbcommon pkgs.wayland pkgs.libGL
@@ -137,11 +81,13 @@
           runtimeInputs = [ rustCli python rustWorker ] ++ extra;
           text = ''
             export PUBLICATOR_WORKER=${rustWorker}/bin/publicator-da-worker
-            export PUBLICATOR_SKILL=${src}/.claude/skills/publish-deviantart/SKILL.md
+            export PUBLICATOR_SKILL=${rustSkill}
             exec ${rustCli}/bin/publicator ${subcommand} "$@"
           '';
         }}/bin/${name}";
       };
+      # A real, non-automated Firefox for one-time DeviantArt sign-in. Playwright
+      # is blocked at login; the publisher copies this flake-pinned profile.
       login = {
         type = "app";
         program = "${pkgs.writeShellApplication {
@@ -164,62 +110,42 @@
         publicator-rust-desktop = rustDesktop;
       };
       apps.${system} = {
-        # Rust CLI wrappers are opt-in during the migration; existing app names remain Python.
-        rust-validate = rustCommand "rust-validate" "validate" [ ];
-        rust-echo-first = rustCommand "rust-echo-first" "echo-first" [ ];
-        rust-generate-meta = rustCommand "rust-generate-meta" "generate-meta" [ pkgs.ollama pkgs.llmfit pkgs.imagemagick ];
-        rust-vision-models = rustCommand "rust-vision-models" "vision-models" [ pkgs.llmfit ];
-        rust-prompt-audit = rustCommand "rust-prompt-audit" "prompt-audit" [ pkgs.git ];
-        rust-da-publish = rustCommand "rust-da-publish" "da-publish" [ pkgs.imagemagick browsers ];
-        rust-check-steps = rustCommand "rust-check-steps" "check-steps" [ ];
-        rust-ui = {
+        # `ui` is the native Iced frontend; browser publishing remains a CLI worker.
+        ui = {
           type = "app";
           program = "${pkgs.writeShellApplication {
-            name = "rust-ui";
-            runtimeInputs = [ rustDesktop python pkgs.git pkgs.imagemagick pkgs.ollama pkgs.llmfit ];
-            text = ''
-              export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath desktopRuntime}
-              exec ${rustDesktop}/bin/publicator-ui "$@"
-            '';
-          }}/bin/rust-ui";
+            name = "ui";
+            runtimeInputs = [ rustDesktop ];
+            text = ''exec ${rustDesktop}/bin/publicator-ui "$@"'';
+          }}/bin/ui";
         };
-        # `claude` on PATH so llm-claude-cli can shell out for AI metadata
-        # (uses the logged-in Claude subscription at $HOME/.claude — no API key).
-        ui = app "ui" "ui" [ pkgs.git pkgs.imagemagick browsers claude pkgs.ollama pkgs.llmfit ] true;
-        # Publish the first pending publications.json entry, one by uuid, or --all (the extracted Playwright flow):
-        #   nix run .#da-publish -- --data-dir <dir> [--uuid <id> | --all] [--headless]
-        da-publish = app "da-publish" "da_publish" [ pkgs.imagemagick browsers ] true;
-        pw-daemon = app "pw-daemon" "pw_daemon" [ browsers ] true;
-        # AI title/description for image paths, no gallery/data dir needed:
-        #   nix run .#generate-meta -- [--openrouter] IMAGE...
-        # `claude` for the key-free path; no browsers (this one never publishes).
-        generate-meta = app "generate-meta" "generate_meta" [ claude pkgs.ollama pkgs.llmfit pkgs.imagemagick ] false;
-        # Host-fit verdicts for configured local vision models; no Ollama daemon needed.
-        vision-models = app "vision-models" "vision_models" [ pkgs.llmfit ] false;
-        validate = app "validate" "validate" [ ] false;
-        # First state=unpublished entry's path/title/schedule (used by the skill).
-        echo-first = app "echo-first" "echo_first" [ ] false;
-        # Prompt-mapping coverage. `parsed` drops to 0 on grammar drift;
-        # `nearest` rising means archive writes are failing (docs/features/prompt-mapping.md).
-        prompt-audit = app "prompt-audit" "prompt_audit" [ pkgs.git ] false;
-        # Drift guard: fails if the publish-deviantart skill grew a step that
-        # deviantart.py's STEPS doesn't implement. No browser/data deps (cheap CI).
-        check-steps = {
+        # Publish one pending entry by default, one by UUID, or all pending entries.
+        da-publish = rustCommand "da-publish" "da-publish" [ pkgs.imagemagick browsers ];
+        # Explicit Python-only DOM prober; not part of the publication pipeline.
+        pw-daemon = {
           type = "app";
           program = "${pkgs.writeShellApplication {
-            name = "check-steps";
-            runtimeInputs = [ python ];
+            name = "pw-daemon";
+            runtimeInputs = [ python browsers ];
             text = ''
-              export PYTHONPATH=${src}/src
-              exec python -m publicator.apps.da_publish --check-steps "$@"
+              export PYTHONPATH=${runtimeAssets}/python
+              export PLAYWRIGHT_BROWSERS_PATH=${browsers}
+              export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=true
+              exec ${python}/bin/python -m publicator_da.pw_daemon "$@"
             '';
-          }}/bin/check-steps";
+          }}/bin/pw-daemon";
         };
+        generate-meta = rustCommand "generate-meta" "generate-meta" [ pkgs.ollama pkgs.llmfit pkgs.imagemagick ];
+        vision-models = rustCommand "vision-models" "vision-models" [ pkgs.llmfit ];
+        validate = rustCommand "validate" "validate" [ ];
+        echo-first = rustCommand "echo-first" "echo-first" [ ];
+        prompt-audit = rustCommand "prompt-audit" "prompt-audit" [ pkgs.git ];
+        check-steps = rustCommand "check-steps" "check-steps" [ ];
         login = login;
       };
       devShells.${system}.default = pkgs.mkShell {
         packages = [
-          devPython pkgs.git pkgs.imagemagick pkgs.playwright-driver.browsers claude
+          devPython pkgs.git pkgs.imagemagick pkgs.playwright-driver.browsers
           pkgs.ollama pkgs.llmfit pkgs.rustc pkgs.cargo pkgs.rustfmt pkgs.clippy
           pkgs.pkg-config pkgs.openssl pkgs.pcre2 pkgs.jq pkgs.curl pkgs.xvfb pkgs.xvfb-run pkgs.x11vnc
           pkgs.novnc pkgs.python312Packages.websockify pkgs.xdotool pkgs.xwininfo
@@ -230,7 +156,6 @@
           export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=true
           export NOVNC_WEB=${pkgs.novnc}/share/webapps/novnc
           export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath desktopRuntime}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
-          export PYTHONPATH="$PWD/src''${PYTHONPATH:+:$PYTHONPATH}"
         '';
       };
     };
