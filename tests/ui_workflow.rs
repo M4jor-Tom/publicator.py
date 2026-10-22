@@ -262,7 +262,9 @@ fn stale_candidate_authorization_cannot_delete_file() {
     assert!(path.exists());
     std::fs::write(&path, b"edited after picking").unwrap();
     let edited = std::fs::read(&path).unwrap();
-    assert!(pick::delete_candidate(&application, &[candidate.clone()], &candidate).is_err());
+    assert!(
+        pick::delete_candidate(&application, std::slice::from_ref(&candidate), &candidate).is_err()
+    );
     assert_eq!(std::fs::read(&path).unwrap(), edited);
 }
 

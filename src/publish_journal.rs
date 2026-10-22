@@ -129,6 +129,7 @@ pub fn publisher_lock(data_dir: &Path) -> Result<PublisherLock> {
     }
     let file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(dir.join("publish.lock"))?;
@@ -1033,7 +1034,7 @@ mod durability_tests {
             store.read().unwrap()[0]["apparitions"][0]["url"],
             "https://example.invalid/work"
         );
-        assert_eq!(journal.read_receipt(&job.attempt_id).unwrap().applied, true);
+        assert!(journal.read_receipt(&job.attempt_id).unwrap().applied);
     }
 
     #[test]

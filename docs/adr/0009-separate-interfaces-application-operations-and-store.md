@@ -3,7 +3,7 @@
 | Field    | Value |
 |----------|-------|
 | Date     | 2026-10-19 |
-| Status   | Accepted |
+| Status   | Superseded for application interfaces by [ADR0010](0010-rust-core-and-native-iced-interface.md) |
 | Deciders | theta (repo owner) |
 
 ## Context
@@ -119,7 +119,15 @@ Persisted completed-phase and delivery states remain separate and authoritative.
   this decision adds no service layer framework, database or CLI commands.
 - Feature-specific contracts and their rationale stay in `docs/features/`.
 
-## Resumption (for Agent)
+## Supersession
+
+This ADR records the former Python/HTTP application architecture and is retained
+as historical design context. Its interface implementation was replaced by the
+Rust core and native Iced decision in [ADR0010](0010-rust-core-and-native-iced-interface.md).
+The persistence principles—validated Store writes, short-lived locks, durable
+state, and no provider/browser work under the mutation lock—remain relevant.
+
+## Resumption (historical implementation notes)
 
 ### Current state
 

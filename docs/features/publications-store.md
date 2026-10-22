@@ -1,43 +1,30 @@
-# Publications store (publications.json + schema)
+# Publications store (`publications.json`)
 
-- **Does:** Validated, locked read-modify-atomic-replace persistence for picking, approvals, drafts, schedule repacks, platform selections/options and delivery successes.
-- **Run:** `nix run .#validate -- --data-dir DIR`
-- **Run:** `nix run .#echo-first -- --data-dir DIR` (first metadata-approved pending DeviantArt target)
-- **Code:** `src/publicator/workflow.py` (application operations and phase transitions), `src/publicator/store.py` (validated persistence and compatibility forwards), `src/publicator/entries.py` (states/readers), `src/publicator/publicationsSchema.json` (schema), `src/publicator/config.py` (schema + option allow-lists), `src/publicator/migration.py` (pure legacy transformation), `src/publicator/apps/validate.py`, `src/publicator/apps/echo_first.py`.
-- **Tests:** `tests/test_store.py`, `tests/test_config.py`, `tests/test_migration.py`, `tests/test_server.py` (HTTP persistence and reopening), `tests/test_platforms.py` (delivery/retry).
-- **Config:** `[deviantart]` tiers/galleries are validated on every write; `[schedule]` timezone/profiles control date resolution/repacking. Callers should pass their data-directory config explicitly.
-- **Data:** `publications.json` owns shared title/description/date, UUIDs, file identities and completed phase; `apparitions[]` owns platform delivery states/options and optional HTTP(S) URL. Schema resolves via `__file__`, never the data directory.
-- **Decisions:** One JSON database, no runtime migration/title lookup; historical platform names do not require executable registration. [Architecture: UI/CLI → application operations → Store](../adr/0009-separate-interfaces-application-operations-and-store.md).
-- **Verify:** `nix develop -c pytest tests/test_store.py tests/test_config.py tests/test_migration.py tests/test_server.py tests/test_platforms.py -q`
+- **Does:** Validated, locked JSON persistence for publication phases, shared content, schedules, platform choices and delivery outcomes.
+- **Run:** `nix run .#validate -- --data-dir DIR`; `nix run .#echo-first -- --data-dir DIR`.
+- **Code:** `src/store.rs`, `src/model.rs`, `src/workflow.rs`, `src/application.rs`, `src/migration.rs`, `assets/publicationsSchema.json`, `src/bin/publicator.rs`.
+- **Tests:** `tests/store.rs`, `tests/config.rs`, `tests/migration.rs`, `tests/workflow*.rs`, `tests/publishing.rs`.
+- **Config:** DeviantArt option allow-lists and schedule profiles are resolved from the data directory.
+- **Data:** Publication phase/title/description/date and file identities live in `publications.json`; apparition records own platform delivery state/options and an optional actual URL. Schema is packaged code.
+- **Decisions:** One JSON source of truth. Persistent lock files are not disposable; provider/browser I/O never runs under the mutation lock. See [ADR0010](../adr/0010-rust-core-and-native-iced-interface.md).
+- **Verify:** `nix develop -c cargo test --test store --test workflow --test migration --test publishing`
 
 ## How it works
 
-Publication state records **completed** phases:
+Store reads validate the complete document. A mutation obtains the per-store thread and advisory file locks, rereads current bytes, applies one operation, validates and atomically replaces the file. Locks are persistent; do not unlink them while another process could be using them. Long provider/browser operations happen outside the Store lock and merge results into fresh state.
 
-| State | Completed action | Next action |
-|---|---|---|
-| PICKED | File identity saved, deduplicated by content hash | Approve a date |
-| SCHEDULED | Explicit date approval | Write and approve metadata, or generate a complete pair |
-| DESCRIBED | Valid title and description accepted manually or through AI generation | Select platforms, submit/retry |
-| APPEARED | Every selected apparition accepted, at least one selected | View history, or add an undelivered platform |
-
-APPEARED includes scheduled submissions, not only publicly visible artwork.
-Adding an undelivered platform returns an APPEARED publication to DESCRIBED;
-successful targets are never unchecked or resubmitted. Removing the last pending target restores APPEARED when all remaining selections succeeded. Before any delivery
-success, explicit backwards actions preserve saved content and pending selections.
+Publication state records completed phases PICKED, SCHEDULED, DESCRIBED and APPEARED. Apparitions retain delivery states/options and actual URLs. Successful delivery is saved per target. `.publicator/` contains durable send intents, receipts and staged uploads used to recover or reconcile publishing across restarts.
 
 ## Invariants
 
-- Publication `apparitionTimestampIfDifferentThanSubmission` is the only date override; historical records fall back to `submissionTimestamp`. No apparition-level override is allowed. `title` and `description` are shared across platforms.
-- Apparition delivery state remains `unpublished` / `published_or_scheduled`; optional `url` is an actual HTTP(S) URL. `urlElsePublicationName` and singular `tier` are rejected, never normalized as compatibility aliases; only plural `tiers` is supported.
-- Blank or marker-bearing required metadata cannot advance or publish; the exact token is `[[PUBLICATOR:TODO_GENERATE]]`, blocked even inside other text. Manual drafts require approval; a complete generated pair advances SCHEDULED to DESCRIBED through `workflow`.
-- Every store mutation validates before same-directory temporary-file replacement. A standard-library thread lock plus advisory file lock protects short mutations; neither is held during AI/browser calls. Invalid JSON is an error, never an empty queue.
-- Delivery successes are persisted individually. Retry resolves fresh stored approved targets and skips successes. External submission and subsequent disk persistence cannot be one atomic transaction.
+- Blank or TODO-marked required metadata cannot advance or publish. Manual approval and generated complete-pair transitions remain distinct.
+- Mutations validate before atomic replacement; invalid data is an error, never an empty queue.
+- Retry selects fresh registered pending targets and skips recorded successes. A remote send and local durable write cannot be atomic together.
+- An unknown delivery outcome is not retried automatically. Preserve its receipt and require explicit reconciliation while holding the publisher lock.
+- Keep `.publicator/`, `publications.json.lock`, and data outside source control; ignore them in the separate data repository.
 
 ## Gotchas
 
-- Legacy migration is a pure, tested, idempotent transformation. Conflicting names/dates fail rather than discard data. UUIDs, hashes, filenames, historical options and unrelated fields survive. New-contract empty drafts remain intentionally empty on reruns.
-- Empty legacy titles need verified artwork-page titles before replacement; never infer from numeric IDs or URL slugs. Recovery uses a temporary copy of the named Firefox privacy profile headlessly, **not** private-window mode. No original browser profile may be mutated.
-- Migration must preflight the source snapshot, validate the complete transformed array, and compare the original again before replacement. Keep backups/audits outside Art; Art changes remain unstaged/uncommitted for human inspection.
-- The sibling `publications.json.lock` is persistent runtime state, not publication data. Do not unlink it while writers may be active; keep it out of the data repository's index.
-- Specs, plans, trackers and reports stay in `/tmp` or managed scratch space, never committed. Feature docs hold maintained operational contracts, not implementation diaries.
+- The persistent lock file must not be deleted as cleanup.
+- A receipt is evidence of an attempted side effect, not proof the remote site rejected it. Resolve ambiguous outcomes before retrying.
+- Migration is a pure validated transformation; title recovery never guesses URL slugs or mutates the original browser profile.

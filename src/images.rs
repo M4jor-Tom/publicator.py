@@ -343,11 +343,12 @@ pub fn delete_candidate(store: &Store, authorized: &[Candidate], path: &Path) ->
     let data_root = fs::canonicalize(&store.paths().data_dir)?;
     let mut in_configured_root = false;
     for configured in &store.config().publicable {
-        if let Ok(root) = fs::canonicalize(store.paths().data_dir.join(configured)) {
-            if root.starts_with(&data_root) && current_path.starts_with(root) {
-                in_configured_root = true;
-                break;
-            }
+        if let Ok(root) = fs::canonicalize(store.paths().data_dir.join(configured))
+            && root.starts_with(&data_root)
+            && current_path.starts_with(root)
+        {
+            in_configured_root = true;
+            break;
         }
     }
     if !in_configured_root {

@@ -336,18 +336,17 @@ pub fn select(
                     (true, None) => {
                         validate_metadata(&title, &description)?;
                         let mut app = json!({"platformName": name, "state": "unpublished"});
-                        if name == "deviantart" {
-                            if let Some(profile) =
+                        if name == "deviantart"
+                            && let Some(profile) =
                                 profiles(store.config())?.into_iter().find(|profile| {
                                     Some(profile.name.as_str()) == profile_name.as_deref()
                                 })
-                            {
-                                if !profile.default_tiers.is_empty() {
-                                    app["tiers"] = json!(profile.default_tiers);
-                                }
-                                if let Some(price) = profile.default_price {
-                                    app["priceIfNotFree"] = json!(price);
-                                }
+                        {
+                            if !profile.default_tiers.is_empty() {
+                                app["tiers"] = json!(profile.default_tiers);
+                            }
+                            if let Some(price) = profile.default_price {
+                                app["priceIfNotFree"] = json!(price);
                             }
                         }
                         apps.push(app);

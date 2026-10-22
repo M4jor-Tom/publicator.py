@@ -92,6 +92,7 @@ impl Store {
         }
         Ok(OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(path)?)

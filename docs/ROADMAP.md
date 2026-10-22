@@ -2,15 +2,12 @@
 
 ## Rust / Iced migration — IN PROGRESS
 
-**Resumed by owner, 2026-10-21:** Continue from Task20 fix2, complete Tasks21–23, run the required validation/reviews, then parent fast-forwards `master` preserving all commits and pushes normally. After successful integration/push, remove this worktree only when clean. This supersedes the historical pause and worktree-preservation instructions below; no real-data/provider/profile/publishing permissions are added.
+**Current execution frontier — Task23C, 2026-10-21:** Tasks1–22 are parent-accepted; full Task23 A/B cutover is committed. Task23C is updating maintained documentation, repairing the four audit labels identified in the final metadata correction, and running the one required post-cutover validation/native wrapper set. This does **not** mean the final consolidated whole-branch correctness/complexity review or parent integration has passed.
 
-### Live execution checkpoint — 2026-10-21
-
-- **Tasks1–21:** implementation gates accepted, through `c9ff382cf17ab90e98da11cabee987ed4ec0150d`; full real-native acceptance is still required.
-- **Task22:** packaging/renderer/editor/harness implementation committed as `604d1dc86854ce6946cb93748f8d90637bdd12d0`. Core/desktop suites, worker tests, Nix builds/checks and partial real noVNC interaction passed; the full native scenario checklist and console triage are **incomplete**, so Task22 is **NOT accepted**.
-- **Next:** bounded real-native Pick/Schedule/Describe, Publish/recovery/close, Calendar/viewport/jump passes; then aggregate source-absent/package/replay checks and independent Task22 review. Task23 cutover/removal is blocked until22 passes. Final whole-branch review/fixes/fresh verification still precede parent-only fast-forward/push and removal of the clean worktree.
-- Source worktree is `feat/rust-iced` at `/tmp/publicator-rust-migration/worktree`; original `master` remains unchanged at `7b5c4d6e4c423e4e23c8897e5fcc13ae5237b41c`. No merge/push/worktree removal or live provider/model/profile/publishing effects occurred. Source/status checkpoint was clean before this documentation update; no unfinished source changes to apply from the old Task20 stash.
-- Current recovery map: `/tmp/publicator-rust-migration/sdd/progress.md` (parent-write-only); Task22 initial report honestly lists unverified stories. Do not redo accepted tasks or treat partial screenshots/green reducers as completed native acceptance. Historical paused-state details below are provenance, **not** the current frontier.
+- Task23 full fixed base: `af414d8d7444e2f8e02403e19247f31d230f10f4`; current feature branch is `feat/rust-iced` in `/tmp/publicator-rust-migration/worktree`.
+- Task23A audit/regressions and Task23B Rust/Nix cutover are committed; legacy Python application and HTTP UI are removed. Python remains only for Playwright browser work/probing.
+- After Task23C: one consolidated fresh whole-branch review/fix wave and parent gate remain. Only the parent may fast-forward/push/remove the clean worktree after all final checks. No live provider/model/profile/publishing effects are authorized.
+- The pause and recovery sections below are historical execution provenance, not current instructions or status. Their unchecked substeps and prior frontier tables must not override this live checkpoint.
 
 ### Historical pause checkpoint
 
@@ -87,7 +84,7 @@ The stash object was created/stored **without removing the working changes**; it
 - No real Art changes/migration, original Firefox-profile changes, model installation, provider spending, real publishing, tags/releases or force push. Git push authorization does not grant those effects.
 - The implementation procedures below preserve the approved task detail. Their unchecked substeps are reference checklists, **not a contradiction of the accepted-state checkpoint above**. Completed code and `Cargo.lock` supersede draft API/dependency suggestions (e.g. actual process-group code uses libc). Do not rerun completed work just to tick historical boxes.
 
-## Task status
+## Historical task status at pause (superseded by the live execution frontier above)
 
 | Task | Work | State at pause |
 |---|---|---|
@@ -110,10 +107,10 @@ The stash object was created/stored **without removing the working changes**; it
 | 17 | Port CLI operations and preserve exit/consent semantics | Accepted |
 | 18 | Native application shell and revision-safe drafts | Accepted |
 | 19 | Native Pick and Schedule stories | Accepted scoped; preview follow-through in Task20, native proof in Task22 |
-| 20 | Native Describe, local consent and AI batches | NOT accepted; fix2 partial/uncommitted |
-| 21 | Native Publish, recovery, Calendar and shared prompt panel | Not started |
-| 22 | Real native-window acceptance and packaged runtime assets | Not started |
-| 23 | Switch Nix apps, delete old application and remove Claude toolchain | Not started |
+| 20 | Native Describe, local consent and AI batches | Historical pause status: NOT accepted; subsequently completed and accepted |
+| 21 | Native Publish, recovery, Calendar and shared prompt panel | Historical pause status: Not started; subsequently completed and accepted |
+| 22 | Real native-window acceptance and packaged runtime assets | Historical pause status: Not started; subsequently completed and accepted |
+| 23 | Switch Nix apps, delete old application and remove Claude toolchain | Historical pause status: Not started; A/B committed, C in progress; final review/integration pending |
 
 ## Approved design reference
 

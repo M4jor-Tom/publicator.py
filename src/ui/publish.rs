@@ -217,11 +217,11 @@ fn attempt_view<'a>(state: &'a App, attempt: &'a AttemptStatus) -> Element<'a, M
             }
         }),
     );
-    let actual_url = value
-        .trim()
-        .is_empty()
-        .then_some(None)
-        .unwrap_or_else(|| Some(value.trim().to_owned()));
+    let actual_url = if value.trim().is_empty() {
+        None
+    } else {
+        Some(value.trim().to_owned())
+    };
     let scheduled_id = attempt.attempt_id.clone();
     let mut actions =
         row![
@@ -399,6 +399,13 @@ fn options_view<'a>(state: &'a App, uuid: &'a str, apparition: &'a Value) -> Ele
     panel.into()
 }
 
+fn contains_option(apparition: &Value, key: &str, selected: &str) -> bool {
+    apparition
+        .get(key)
+        .and_then(Value::as_array)
+        .is_some_and(|values| values.iter().any(|value| value.as_str() == Some(selected)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,11 +419,4 @@ mod tests {
         let ordered = ordered_rows(&rows, Some("target"));
         assert_eq!(ordered[0]["uuid"], "target");
     }
-}
-
-fn contains_option(apparition: &Value, key: &str, selected: &str) -> bool {
-    apparition
-        .get(key)
-        .and_then(Value::as_array)
-        .is_some_and(|values| values.iter().any(|value| value.as_str() == Some(selected)))
 }

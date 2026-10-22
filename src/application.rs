@@ -9,7 +9,7 @@ use crate::{
 use serde_json::Value;
 use std::{
     collections::HashSet,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
@@ -217,9 +217,7 @@ impl Application {
                     title: g.metadata.title.clone(),
                     description: g.metadata.description.clone(),
                 };
-                if let Err(error) = workflow::save_generated_pair(&self.store, uuid, &pair) {
-                    return Err(error);
-                }
+                workflow::save_generated_pair(&self.store, uuid, &pair)?;
                 Ok(g)
             }
             Err(error) => {
@@ -253,7 +251,7 @@ impl Application {
     }
     async fn generate_provider(
         &self,
-        image: &PathBuf,
+        image: &Path,
         request: &GenerationRequest,
         preferred: Option<&str>,
     ) -> Result<Generated> {
@@ -374,7 +372,7 @@ mod ordering_tests {
         };
         let result = record_batch_error(&mut report, "uuid".into(), error);
         assert!(
-            matches!(result, Err(Error::DurabilityUncertain { path, .. }) if path == PathBuf::from("publications.json"))
+            matches!(result, Err(Error::DurabilityUncertain { path, .. }) if path == std::path::Path::new("publications.json"))
         );
         assert_eq!(report, BatchReport::default());
     }

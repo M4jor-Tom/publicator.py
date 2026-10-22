@@ -63,6 +63,8 @@ struct Index {
     by_path: BTreeMap<String, Vec<String>>,
     by_basename: BTreeMap<String, Vec<String>>,
 }
+type BlobIndex = (BTreeMap<String, String>, BTreeMap<String, Vec<u8>>);
+
 pub struct PromptArchive {
     repo: PathBuf,
     grammar: PromptGrammar,
@@ -246,10 +248,7 @@ impl PromptArchive {
         Ok(())
     }
 
-    fn read_blobs(
-        &self,
-        stream: &[u8],
-    ) -> Result<(BTreeMap<String, String>, BTreeMap<String, Vec<u8>>)> {
+    fn read_blobs(&self, stream: &[u8]) -> Result<BlobIndex> {
         let mut by_oid = BTreeMap::new();
         let mut blobs = BTreeMap::new();
         let mut cursor = 0usize;
@@ -440,10 +439,10 @@ fn matching_ratio(a: &[char], b: &[char]) -> f64 {
     ) -> (usize, usize, usize) {
         let mut previous = vec![0usize; bj - bi + 1];
         let mut best = (ai, bi, 0);
-        for i in ai..aj {
+        for (i, &character) in a.iter().enumerate().take(aj).skip(ai) {
             let mut current = vec![0usize; bj - bi + 1];
             for j in bi..bj {
-                if a[i] == b[j] {
+                if character == b[j] {
                     current[j - bi + 1] = previous[j - bi] + 1;
                     let n = current[j - bi + 1];
                     if n > best.2 {
@@ -646,41 +645,6 @@ pub fn search(
     Ok(result)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    #[test]
-    fn malformed_blob_framing_skips_bad_headers_and_stops_at_truncation() {
-        let root = tempdir().unwrap();
-        let config = PromptConfig {
-            repo: ".".into(),
-            filename: r"(?P<version>.+)".into(),
-            version_hash: "sha256".into(),
-        };
-        let archive = PromptArchive::new(root.path(), &config).unwrap();
-        let good = format!("{} blob 5\nhello\n", "a".repeat(40));
-        let stream = [
-            good.as_bytes(),
-            b"malformed\n",
-            b"b blob nope\n",
-            good.as_bytes(),
-        ]
-        .concat();
-        let (ids, blobs) = archive.read_blobs(&stream).unwrap();
-        assert_eq!(ids.len(), 1);
-        assert_eq!(blobs.values().next().unwrap(), b"hello");
-
-        let truncated = [
-            good.as_bytes(),
-            format!("{} blob 50\nshort", "c".repeat(40)).as_bytes(),
-        ]
-        .concat();
-        assert!(archive.read_blobs(&truncated).is_err());
-    }
-}
-
 pub fn audit(
     data_dir: &Path,
     config: &Config,
@@ -720,4 +684,39 @@ pub fn audit(
     counts.exact_versions = exact_versions.len();
     counts.nearest_versions = nearest_versions.len();
     Ok(counts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn malformed_blob_framing_skips_bad_headers_and_stops_at_truncation() {
+        let root = tempdir().unwrap();
+        let config = PromptConfig {
+            repo: ".".into(),
+            filename: r"(?P<version>.+)".into(),
+            version_hash: "sha256".into(),
+        };
+        let archive = PromptArchive::new(root.path(), &config).unwrap();
+        let good = format!("{} blob 5\nhello\n", "a".repeat(40));
+        let stream = [
+            good.as_bytes(),
+            b"malformed\n",
+            b"b blob nope\n",
+            good.as_bytes(),
+        ]
+        .concat();
+        let (ids, blobs) = archive.read_blobs(&stream).unwrap();
+        assert_eq!(ids.len(), 1);
+        assert_eq!(blobs.values().next().unwrap(), b"hello");
+
+        let truncated = [
+            good.as_bytes(),
+            format!("{} blob 50\nshort", "c".repeat(40)).as_bytes(),
+        ]
+        .concat();
+        assert!(archive.read_blobs(&truncated).is_err());
+    }
 }

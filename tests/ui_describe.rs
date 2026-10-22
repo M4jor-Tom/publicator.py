@@ -775,8 +775,10 @@ async fn describe_dispatch_holds_only_target_until_provider_result_is_persisted(
 
 #[tokio::test]
 async fn previews_are_requested_for_initial_visible_cards_then_later_scrolled_cards() {
-    let mut config = publicator::config::Config::default();
-    config.publicable = vec!["images".into()];
+    let config = publicator::config::Config {
+        publicable: vec!["images".into()],
+        ..publicator::config::Config::default()
+    };
     let f = Fixture::with_config(config);
     let dir = f.path("images");
     std::fs::create_dir_all(&dir).unwrap();
@@ -907,6 +909,7 @@ async fn delayed_title_save_preserves_newer_same_and_other_field_edits() {
         lock_path.as_mut_os_string().push(".lock");
         let lock = std::fs::OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(lock_path)

@@ -107,12 +107,12 @@ fn month_view<'a>(
             cell = cell.push(event_view(state, event, zone));
         }
         week = week.push(container(cell).width(Length::Fill).padding(4));
-        if (first_weekday + day as usize) % 7 == 0 {
+        if (first_weekday + day as usize).is_multiple_of(7) {
             section = section.push(week);
             week = row![].spacing(4);
         }
     }
-    if (first_weekday + days as usize) % 7 != 0 {
+    if !(first_weekday + days as usize).is_multiple_of(7) {
         for _ in (first_weekday + days as usize) % 7..7 {
             week = week.push(container(text("")).width(Length::Fill));
         }

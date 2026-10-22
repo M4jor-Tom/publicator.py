@@ -18,8 +18,10 @@ fn app(f: &Fixture) -> Application {
 }
 fn app_with_timezone(f: &Fixture, timezone: Option<&str>) -> Application {
     std::fs::write(f.path("tags.txt"), "one\ntwo\n").unwrap();
-    let mut config = publicator::config::Config::default();
-    config.tags = Some("tags.txt".into());
+    let mut config = publicator::config::Config {
+        tags: Some("tags.txt".into()),
+        ..publicator::config::Config::default()
+    };
     if let Some(timezone) = timezone {
         config
             .schedule

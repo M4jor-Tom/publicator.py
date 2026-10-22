@@ -403,6 +403,14 @@ fn parse_install_consent(answer: &str, bytes_read: usize) -> bool {
         )
 }
 
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    if let Err(error) = run().await {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
+}
+
 #[cfg(test)]
 mod consent_tests {
     use super::{choose_model, parse_install_consent};
@@ -427,13 +435,5 @@ mod consent_tests {
             assert!(!parse_install_consent(answer, answer.len()), "{answer:?}");
         }
         assert!(!parse_install_consent("", 0));
-    }
-}
-
-#[tokio::main(flavor = "current_thread")]
-async fn main() {
-    if let Err(error) = run().await {
-        eprintln!("{error}");
-        std::process::exit(1);
     }
 }

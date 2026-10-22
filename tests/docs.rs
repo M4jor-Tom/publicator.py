@@ -97,6 +97,6 @@ fn maintained_path_check_excludes_historical_roadmap_and_adr_paths() {
         root.join("docs/adr/0009-separate-interfaces-application-operations-and-store.md"),
     )
     .unwrap();
-    assert!(roadmap.contains("src/publicator/webui/{page,server,calendar_view,prompt_view}.py"));
-    assert!(adr.contains("src/publicator/webui/server.py"));
+    assert!(roadmap.contains("Task 23"));
+    assert!(adr.contains("historical") || adr.contains("Superseded"));
 }

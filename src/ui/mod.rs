@@ -540,12 +540,6 @@ impl App {
             }
         } else if let Some(outcome) = self.publish_outcomes.get(&cell) {
             outcome.clone()
-        } else if self.last_publish_cells.contains(&cell) {
-            PublishCellOutcome {
-                cell,
-                state: PublishCellState::Unattempted,
-                detail: None,
-            }
         } else {
             PublishCellOutcome {
                 cell,
@@ -1677,7 +1671,7 @@ impl App {
             .find(|(_, options)| options.dirty)
             .map(|(uuid, _)| uuid.clone());
         uuid.map(|uuid| self.save_options_task(uuid))
-            .unwrap_or_else(|| Task::none())
+            .unwrap_or_else(Task::none)
     }
 
     fn save_options_task(&mut self, uuid: String) -> Task<Message> {

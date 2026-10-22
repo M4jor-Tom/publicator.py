@@ -140,10 +140,9 @@ pub fn migrate(
                     .remove(OLD_TITLE)
                     .and_then(|v| v.as_str().map(str::to_owned))
                     .filter(|v| !v.trim().is_empty())
+                    && is_http_url(&old)
                 {
-                    if is_http_url(&old) {
-                        object.insert("url".into(), Value::String(old));
-                    }
+                    object.insert("url".into(), Value::String(old));
                 }
                 object.remove(OLD_DATE);
             }

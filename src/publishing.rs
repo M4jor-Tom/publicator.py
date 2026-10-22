@@ -274,6 +274,8 @@ impl Publisher {
             diagnostics: worker_diagnostics,
         }
     }
+    // This function coordinates the batch, process, Store, journal, and bounded worker lifecycle.
+    #[allow(clippy::too_many_arguments)]
     async fn run_batch(
         &self,
         child: &mut Child,
@@ -655,37 +657,31 @@ async fn read_matching_terminal(
     job: &PublishJob,
     deadline: Instant,
 ) -> Result<WorkerEvent> {
-    loop {
-        let event = tokio::time::timeout_at(deadline, read_event(r))
-            .await
-            .map_err(|_| Error::Protocol("worker artwork timeout".into()))??;
-        match &event {
-            WorkerEvent::Scheduled {
-                protocol,
-                attempt_id,
-                uuid,
-                ..
-            }
-            | WorkerEvent::Failed {
-                protocol,
-                attempt_id,
-                uuid,
-                ..
-            }
-            | WorkerEvent::Unknown {
-                protocol,
-                attempt_id,
-                uuid,
-                ..
-            } if *protocol == 1 && attempt_id == &job.attempt_id && uuid == &job.uuid => {
-                return Ok(event);
-            }
-            _ => {
-                return Err(Error::Protocol(
-                    "worker terminal identity/version mismatch".into(),
-                ));
-            }
+    let event = tokio::time::timeout_at(deadline, read_event(r))
+        .await
+        .map_err(|_| Error::Protocol("worker artwork timeout".into()))??;
+    match &event {
+        WorkerEvent::Scheduled {
+            protocol,
+            attempt_id,
+            uuid,
+            ..
         }
+        | WorkerEvent::Failed {
+            protocol,
+            attempt_id,
+            uuid,
+            ..
+        }
+        | WorkerEvent::Unknown {
+            protocol,
+            attempt_id,
+            uuid,
+            ..
+        } if *protocol == 1 && attempt_id == &job.attempt_id && uuid == &job.uuid => Ok(event),
+        _ => Err(Error::Protocol(
+            "worker terminal identity/version mismatch".into(),
+        )),
     }
 }
 async fn shutdown(child: &mut Child, cleanup_timeout: Duration, process_group: Option<u32>) {

@@ -19,7 +19,7 @@ fn calendar_keeps_two_apparitions_with_one_shared_title() {
         {"platformName":"deviantart","state":"unpublished","url":"https://da.example/artwork/123"},
         {"platformName":"pixiv","state":"published_or_scheduled","url":"https://pixiv.example/artwork/123"}
     ]);
-    let ev = timeline(&vec![p]).unwrap();
+    let ev = timeline(&[p]).unwrap();
     assert_eq!(ev.len(), 2);
     assert_ne!(ev[0].apparition_index, ev[1].apparition_index);
     assert_eq!(ev[0].title, "Shared title");
@@ -44,7 +44,7 @@ fn calendar_labels_marker_metadata_and_preserves_file_name() {
     p["title"] = json!("[[PUBLICATOR:TODO_GENERATE]] title");
     p["files"][0] = json!({"basename":"old.png", "fileSha512sum":"legacy"});
     p["apparitions"] = json!([{"platformName":"other","state":"unpublished"}]);
-    let event = &timeline(&vec![p]).unwrap()[0];
+    let event = &timeline(&[p]).unwrap()[0];
     assert_eq!(event.title, "AI metadata pending");
     assert_eq!(event.url, None);
     assert_eq!(event.basename.as_deref(), Some("old.png"));
@@ -137,7 +137,7 @@ fn calendar_keeps_equal_timestamp_apparitions_in_source_order() {
 fn calendar_treats_a_publication_without_apparitions_as_empty() {
     let mut p = row(1, "No delivery", 1700000000);
     p.as_object_mut().unwrap().remove("apparitions");
-    assert!(timeline(&vec![p]).unwrap().is_empty());
+    assert!(timeline(&[p]).unwrap().is_empty());
 }
 
 #[test]
@@ -150,7 +150,7 @@ fn calendar_uses_publication_schedule_for_every_platform() {
             .timestamp()
     );
     p["apparitions"] = json!([{"platformName":"one","state":"unpublished"},{"platformName":"two","state":"unpublished"}]);
-    let events = timeline(&vec![p]).unwrap();
+    let events = timeline(&[p]).unwrap();
     assert_eq!(events[0].timestamp, events[1].timestamp);
     assert_eq!(
         events[0].timestamp,

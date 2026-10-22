@@ -17,8 +17,10 @@ fn publish_fixture() -> Fixture {
     f.write(json!([item]));
     std::fs::write(f.path("tags.txt"), "one\ntwo\n").unwrap();
     let paths = publicator::config::Paths::resolve(Some(f.root.path()), None).unwrap();
-    let mut config = publicator::config::Config::default();
-    config.tags = Some("tags.txt".into());
+    let config = publicator::config::Config {
+        tags: Some("tags.txt".into()),
+        ..publicator::config::Config::default()
+    };
     let store = publicator::store::Store::new(paths, config).unwrap();
     Fixture {
         root: f.root,

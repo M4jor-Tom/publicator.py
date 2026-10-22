@@ -1,40 +1,30 @@
 # Gallery UI
 
-- **Does:** Durable human review in Pick / Schedule / Describe / Publish phases, plus a read-only calendar; phase labels indicate the next action, not stored state.
-- **Run:** `nix run .#ui -- [--data-dir DIR] [--json FILE] [--ai-model ID] [--openrouter-model ID] [--ai-timeout 300] [--port 8765] [-v]` (Search defaults to 25 candidates and all configured `publicable` paths selected)
-- **Code:** `src/publicator/webui/page.py` (pure renderer and small client), `src/publicator/webui/server.py` (`GalleryHandler`, `create_handler`, `serve`), `src/publicator/apps/ui.py` (startup); persistence owned by `src/publicator/store.py`, dispatch by `src/publicator/platforms.py`.
-- **Tests:** `tests/test_page.py` (escaping, phase forms, accessible selection grid), `tests/test_server.py` (real HTTP + real JSON persistence, reopen, AI races, retry, batch guards), `tests/test_scheduling.py` (server allocation).
-- **Config:** `publicator.toml`: `publicable`, `[deviantart]` allow-lists, read-only `[schedule]` profiles, optional `[prompts]`; local model availability from llmfit/Ollama.
-- **Data:** `publications.json` is authoritative on every request/refresh; `.thumbs/` is a lazy content-addressed cache. Disk deletion is restricted to unpicked candidate paths; no persisted publication is removed by the UI.
-- **Decisions:** Native inputs/popovers and server-rendered HTML; no database/frontend framework, RAM-only publish queue, or browser-clock allocation. Provider/browser calls run without store mutation locks. [Architecture: UI/CLI → application operations → Store](../adr/0009-separate-interfaces-application-operations-and-store.md).
-- **Verify:** `nix develop -c pytest tests/test_page.py tests/test_server.py tests/test_scheduling.py tests/test_docs.py -q`
+- **Does:** Native Iced human-review workflow for Pick, Schedule, Describe and Publish, with a read-only Calendar.
+- **Run:** `nix run .#ui -- --data-dir DIR`.
+- **Code:** `src/ui/`, `src/application.rs`, `src/workflow.rs`, `src/store.rs`, `src/calendar.rs`.
+- **Tests:** `tests/ui*.rs`, `tests/calendar.rs`, `tests/application*.rs`, `tests/docs.rs`.
+- **Config:** Search uses a runtime subset of configured `publicable` roots; schedule and prompt options come from the data-dir config.
+- **Data:** `publications.json` is authoritative on refresh/reopen; `.thumbs/` is persistent preview cache. Deletion applies only to unpicked candidate files.
+- **Decisions:** Native Iced controls replace the retired HTTP/HTML UI. App operations own state changes; no RAM-only queue or browser clock.
+- **Verify:** `nix develop -c cargo test --features desktop --test ui_workflow --test ui_publish_calendar --test calendar`
 
 ## How it works
 
-Search chooses a runtime subset of the configured `publicable` paths; paths are
-never arbitrary filesystem inputs and TOML is read-only. Its candidate limit is
-Empty/0, 25, 50, 75, or 100; launch defaults to 25 with every configured path
-selected. The four phases expose different actions, so picking does not imply a
-platform, metadata, or approval. UI mutations delegate to application operations,
-which validate and persist; refresh and reopening reconstruct phases and calendar
-from disk, including history-only data. Publication state meanings belong to
-[publications-store](publications-store.md).
+Pick scans configured roots and supports a runtime subset. Candidate limits are Empty/0, 25, 50, 75, or 100; startup defaults to 25 and all configured `publicable` paths selected. The four workflow phases have distinct actions. UI actions call Rust application operations, which persist validated state. Refresh and restart reconstruct the workflow and history from disk.
+
+Publish selection is separate from submission. Only registered platform cells are executable; completed sends remain locked and retries skip persisted successes. Calendar is read-only and navigates to the relevant workflow phase.
 
 ## Invariants
 
-- `/pick` takes an allow-listed candidate path. Other publication actions take a UUID and resolve fresh stored records; `/publish` accepts no client metadata or queue. `/stage` and `/update` no longer exist.
-- `/schedule`, `/schedule/approve`, `/metadata`, `/metadata/approve`, `/ai`, `/ai/batch`, `/selection`, `/selection/all`, and `/options` persist before reporting saved. Explicit backwards actions are `/schedule/return` and `/metadata/return`; successful deliveries forbid shared-content rewrites.
-- Manual drafts debounce, phase changes flush pending saves, failed saves remain dirty, and leaving unsaved work triggers a native warning. AI always requests both title and description; only a valid pair advances SCHEDULED to DESCRIBED. Single generation preserves the per-card action. “Describe all marked” selects only SCHEDULED records with an exact top-level TODO marker, merges only fields still bearing the exact marker, saves independently, and continues after failures. OpenRouter batches try the last eligible record first and prefer the first successful model on remaining records; local and Claude batches preserve persisted order. Local install-on-use asks consent.
-- All eligible registered-platform cells are selected/unselected in one store mutation by select-all. Native `indeterminate` reflects partial selection; successful cells are locked. Selection never submits; Publish selected / Retry is separate.
-- A batch guard rejects simultaneous publish attempts and HTTP mutations while publishing. Only registered pending cells participate in executable preflight, dispatch and remaining/unattempted counts; historical pending cells are preserved and do not block registered targets. Historical-only pending data publishes nothing, and undelivered historical apparitions still prevent APPEARED completion. Accepted AI requests block duplicate generation and phase advancement for that UUID until results/markers are saved; unrelated drafts remain editable.
-- Native controls disable autocomplete so Firefox reload restoration cannot override saved drafts/selections.
-- Errors and results use `textContent`, not HTML interpolation. Dynamic model JSON lives in escaped attributes, never script text. Prompt blocks/search/delete remain on candidate cards; calendar prompt popovers retain the shared renderer.
-- Originals and thumbnails retain exact allow-lists of rendered paths/names, including search results. Arbitrary paths, obsolete request fields and unregistered platforms are rejected.
-- Every mutation requires `application/json` (charset parameters allowed). Browser `Origin` must match the bound HTTP address or `localhost` at that port, never an origin inferred from the request's `Host`; foreign/opaque origins are rejected before dispatch. Non-browser JSON clients without `Origin` remain supported.
+- UI and CLI share Rust application operations and Store; the Python worker is not an application service.
+- Draft edits are revision-safe and flush at phase changes; failed saves remain visible and retryable.
+- Dates and approvals require explicit user action. Only valid complete metadata advances to DESCRIBED.
+- Publish results are durably recorded per target. Unknown remote outcomes require reconciliation; never infer failure and resend.
+- Native selection controls remain keyboard-operable and visibly indicate focus/context.
+- Actual stored apparition URLs are the only external URL actions; no URL-slug guessing.
 
 ## Gotchas
 
-- Publication results stay in this tab's session storage across reload; durable success/pending states live in JSON. Other tabs see successes on refresh, not an automatic live update. The server stays open after attempts; stop it with Ctrl-C.
-- Search reloads candidates from the selected configured paths; prompt search walks those paths with a 200-result cap before hashing. The UI may select only a runtime subset of TOML `publicable` paths. Missing stored artwork remains visible rather than silently disappearing.
-- The localhost UI is intended for one trusted human, not deployment on a public interface. Publishing is synchronous per request but other requests can read the workflow during it.
-- Browser/UI checks must use disposable data and stub publishers/providers. Never demonstrate a workflow by submitting real artwork or changing the Art directory.
+- The native UI is a local trusted-human application, not a network service.
+- Keep test fixtures disposable and publishers/providers stubbed. Never use the UI acceptance harness to submit real art.

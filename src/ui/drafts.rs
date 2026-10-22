@@ -150,10 +150,11 @@ impl Draft {
     }
 
     fn defer_retry(field: &mut FieldDraft, sent: Option<&SentField>) {
-        if let Some(sent) = sent {
-            if field.revision == sent.revision && field.text == sent.text {
-                field.last_edit_ms = None;
-            }
+        if let Some(sent) = sent
+            && field.revision == sent.revision
+            && field.text == sent.text
+        {
+            field.last_edit_ms = None;
         }
     }
 

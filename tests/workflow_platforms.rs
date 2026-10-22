@@ -117,15 +117,15 @@ fn only_registered_platform_can_be_selected_or_recorded() {
 
 #[test]
 fn profile_defaults_apply_once_to_new_deviantart_target_not_custom() {
-    let mut config = Config::default();
-    config.tiers = vec!["Gold".into()];
-    config.galleries = vec!["Art".into()];
-    config.schedule = toml::from_str::<toml::Table>(
-        r#"
-        profiles = [{name="Standard", day="tuesday", default_tiers=["Gold"], default_price=3.5}]
-    "#,
-    )
-    .unwrap();
+    let config = Config {
+        tiers: vec!["Gold".into()],
+        galleries: vec!["Art".into()],
+        schedule: toml::from_str::<toml::Table>(
+            r#"profiles = [{name="Standard", day="tuesday", default_tiers=["Gold"], default_price=3.5}]"#,
+        )
+        .unwrap(),
+        ..Config::default()
+    };
     let f = Fixture::with_config(config);
     let mut with_profile = row(1, "DESCRIBED");
     with_profile["scheduleProfile"] = json!("Standard");
@@ -143,9 +143,11 @@ fn profile_defaults_apply_once_to_new_deviantart_target_not_custom() {
 
 #[test]
 fn options_edit_deviantart_not_first_historical_apparition_and_keep_unedited_price() {
-    let mut config = Config::default();
-    config.tiers = vec!["Gold".into()];
-    config.galleries = vec!["Art".into()];
+    let config = Config {
+        tiers: vec!["Gold".into()],
+        galleries: vec!["Art".into()],
+        ..Config::default()
+    };
     let f = Fixture::with_config(config);
     let mut p = row(1, "DESCRIBED");
     p["apparitions"] = json!([

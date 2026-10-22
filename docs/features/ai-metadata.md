@@ -1,131 +1,29 @@
-# AI metadata (title/description via llm CLI and Ollama)
+# AI metadata
 
-- **Does:** Generates shared publication title and description together through local Ollama, OpenRouter free, or Claude. Every accepted Phase 3 failure leaves the publication SCHEDULED and persists the exact TODO marker in both fields for retry; generate-meta can later replace marked fields. OpenRouter walks its dynamic free vision catalogue; vision-models reports local host fit.
-- **Run:** `nix run .#generate-meta -- --data-dir ../Art --source {local,openrouter,claude} [--model MODEL] [--timeout S] [-y] [-v]` (publication-driven, no image arguments; source required; local requires a model; `-y` accepts missing-model installation)
-- **Run:** `nix run .#ui -- [--ai-model ID] [--openrouter-model ID] [--ai-timeout S] [-v]` (Generate with AI → `POST /ai {uuid, source, model}`; Describe all marked → `POST /ai/batch {source, model}`; model is a catalog object or null for Claude)
-- **Run:** `nix run .#vision-models` (fit verdicts for configured local vision models; requires neither a data directory nor a running Ollama service)
-- **Code:** `src/publicator/llm_meta.py` (`TODO_GENERATE`, `ProviderUnavailable`, `generate_metadata`, `VISION_MODELS`, `local_model_fit`, `local_model_status`, `prepare_local_model`, `run_llm`, `_attempt`, `_fallbacks`), `src/publicator/apps/generate_meta.py` (`generate_pending`, `main_args`), `src/publicator/apps/vision_models.py` (host-fit CLI), `src/publicator/images.py` (`thumb_for_ai`, `ensure_thumb`), `src/publicator/webui/server.py` (`GalleryHandler.do_POST` `/ai`, local status), `src/publicator/webui/page.py` (`render_page`), `src/publicator/apps/ui.py` (`main`), `flake.nix` (Ollama, llmfit, llm providers)
-- **Tests:** `tests/test_llm_meta.py` (provider routing, Ollama and llmfit behavior, schema retry, model fallback); `tests/test_vision_models.py` (fit report and unavailable status); `tests/test_generate_meta.py` (marker selection, consent, writes and failures); `tests/test_page.py` and `tests/test_server.py` (model options and endpoint)
-- **Config:** no model IDs in `publicator.toml`; paired model objects explicitly map `ollama_name`, `openrouter_name`, and `llmfit_name` in `llm_meta.VISION_MODELS`. llmfit owns fit classification; only `Good` models fit, and unassessable models are unavailable. The `vision-models` fit report does not need Ollama; local generation still requires its service, which publicator does not start.
-- **Data:** `publications.json` exact sentinel in publication `title` and/or `description`; `<data-dir>/.thumbs/` for AI thumbnails; `$OPENROUTER_KEY` at runtime; `$HOME/.claude` logged-in session.
-- **Decisions:** Delegate local fit to llmfit; keep provider IDs and provider selection explicit; recover schema rejection and failed OpenRouter candidates centrally rather than pinning a supposedly reliable free model. See the provider and recovery sections below.
-- **Verify:** `nix run .#vision-models`
-- **Verify:** `nix develop -c pytest tests/test_vision_models.py tests/test_llm_meta.py -q`
-- **Verify:** `nix develop -c pytest tests/test_page.py -q`
-- **Verify:** `nix develop -c pytest tests/test_llm_meta_openrouter.py -q` (live when keyed and online; keyless runs a complete mocked response with a warning; keyed offline skips with a warning)
-- **Verify:** `nix run .#generate-meta -- --data-dir ../Art --source openrouter` (publication-driven; requires marked records and `$OPENROUTER_KEY`; local generation additionally requires a running Ollama service)
+- **Does:** Generates a validated title/description pair through OpenRouter or local Ollama; only a complete pair advances a publication to DESCRIBED.
+- **Run:** `nix run .#generate-meta -- --help`; or use the native `ui` Describe phase.
+- **Code:** `src/metadata/`, `src/application.rs`, `src/images.rs`, `src/bin/publicator.rs`, `src/bin/publicator-ui.rs`.
+- **Tests:** `tests/metadata*.rs`, `tests/application_ai.rs`, `tests/cli.rs`, `tests/ui_describe.rs`.
+- **Config:** Provider/model selection is explicit; local fit is assessed with llmfit. CLI-only `PUBLICATOR_OLLAMA_URL` overrides the Ollama endpoint.
+- **Data:** `publications.json` stores title/description; `.thumbs/` holds AI input previews. Runtime credentials are read only when the selected provider needs them.
+- **Decisions:** Local Ollama and OpenRouter only. No Claude CLI, Python `llm` bridge, automatic cross-provider fallback, or production fake mode.
+- **Verify:** `nix develop -c cargo test --test metadata --test application_ai --test cli`
 
 ## How it works
 
-The UI accepts single generation only for a fresh SCHEDULED UUID and batch generation only for SCHEDULED publications with an exact top-level TODO marker, using a canonical model,
-source and stored artwork. Every request generates both title and description.
-Rejected requests do not write markers. After acceptance, provider/model failures
-save `[[PUBLICATOR:TODO_GENERATE]]` in both fields, regardless of local fit or
-prior hosted failures; the publication remains SCHEDULED and retryable. Only a
-validated nonempty pair advances it to DESCRIBED. Results merge through the
-application operation into fresh stored data before reporting saved. Unexpected
-exceptions remain visible server errors, not a successful generation response.
+All calls request both title and description and validate the response as a complete usable pair. UI acceptance saves the exact TODO marker in both fields on generation failure; the publication remains SCHEDULED and retryable. Generated results merge against fresh Store state so a newer manual edit is not overwritten. Batch admission validates the complete source document before any provider call; each successful record is persisted before processing the next.
 
-Manual drafts require explicit metadata approval; a complete generated pair
-advances SCHEDULED to DESCRIBED through `workflow`. Blank or marker-bearing
-metadata cannot advance/publish. The CLI replaces only fields still equal to
-the exact marker, advances only once both fields are complete, saves successes
-individually through the locked mutation, and returns nonzero on failures. OpenRouter batches attempt the last eligible
-record first and reuse the first successful model as the next item's preferred
-candidate, then its ordinary dynamic fallback order. Local and Claude batches
-retain persisted record order. Each record is
-saved independently and failures leave markers retryable. No apparition is
-needed for generation.
-
-### Local vision and installation consent
-
-Local inference keeps the artwork off hosted providers and requires no provider
-API key. `local_model_fit` runs `llmfit info <llmfit_name> --json`; only `Good`
-is eligible. `Too Tight`, failed or unassessable verdicts are unavailable, with
-llmfit's reason exposed rather than a second set of hardware heuristics here.
-The verdict depends on the installed catalogue and current host resources, not
-a guarantee of speed or future availability.
-
-`vision-models` only assesses fit. Generation additionally uses Ollama's local
-HTTP API for inventory, pull and vision chat; publicator neither starts nor
-manages the service. A fitting but absent model is “Install on use” in the UI:
-the Generate action permits pulling it, with the UI indicating/confirming that
-installation. The CLI instead prompts `[Y/n]` (Enter accepts), or accepts `-y`;
-a non-interactive CLI without `-y` aborts before changing publications.
-
-All providers use the shared metadata instructions and title/description schema;
-local and hosted callers share `generate_metadata` and thumbnail preparation.
-The three explicit catalogue IDs must stay separate because Ollama, OpenRouter
-and llmfit names cannot reliably be derived from one another. Model defaults
-are implementation choices with interface overrides, not a filename/data-repo
-contract to put in `publicator.toml`.
-
-### Schema recovery and catalogue fallback
-
-Schema capability belongs at the invocation boundary, not in model selection.
-In the 2026-08-23 catalogue audit, 7 of 8 free vision models lacked structured
-outputs. Pinning the one qualifying preview model would merely postpone the
-same failure when free IDs or capabilities changed. Always omitting `--schema`
-would unnecessarily discard real structured output where it works.
-
-`_attempt` instead retries a schema rejection once without the flag, appending
-the shape to the prompt and memoising the model. The `llm` guard runs before HTTP
-and attachment reads, so discovering rejection costs a spawn, not API tokens.
-Capability probes via the Python plugin API would add plugin loading/network
-coupling and bypass the injected `run=` test seam; a CLI probe would add a spawn
-even on successful calls. Keeping recovery below callers avoids duplicated
-retry logic in the UI and batch CLI. Prompt-shaped JSON is a weaker guarantee
-than provider enforcement, so permissive parsing still rejects unusable output.
-
-OpenRouter's free upstream pools can be saturated across users; backing off on
-one vendor need not help. After **any** candidate failure (not just 429),
-`run_llm` lazily walks the plugin's free image-capable catalogue, trying other
-vendors before siblings of the selected model. The plugin cache is also what
-`llm -m` resolves, so a separately fetched list could advertise unusable IDs.
-The walk stops at a validated response or the shared timeout budget; catalogue
-listing failure preserves the model error. Exhaustion exposes the final error
-with its original classification. Missing credentials may therefore fail
-repeatedly, but never trigger a silent move to Claude/Ollama. A different model
-can change the writing style; keep the INFO log identifying the model that
-actually answered.
+OpenRouter requests use Rust HTTP clients and loopback fixtures in ordinary tests. Local generation uses an already-running Ollama service; Publicator does not start or install the service/model. `vision-models` reports local host fit. Install-on-use requires explicit consent in the GUI or CLI.
 
 ## Invariants
 
-- **The Claude path passes the image as a Read-able PATH (`-o allowedTools Read -o cwd DIR`, basename in the prompt), never `-a`.** `llm -a` is broken through llm-claude-cli; `run_llm` else-branch, `tests/test_llm_meta.py::test_run_llm_builds_argv_and_parses_schema`, `::test_generate_metadata_returns_title_desc`.
-- **`openrouter/*` ids use `-a <abspath>` and carry NO claude-cli `-o` options.** llm-openrouter models have no Read tool and no `-o` options; `generate_metadata` prefix branch, `tests/test_llm_meta.py::test_generate_metadata_openrouter_uses_attachment`.
-- **A `--schema` rejection (stderr has "does not support schemas") is retried once, schema in the prompt, and the model memoised in `_NO_SCHEMA`.** llm refuses client-side before any HTTP call, so the retry costs one spawn; `test_llm_meta.py::test_run_llm_retries_without_schema_then_remembers_the_model`.
-- **Any failed OpenRouter candidate advances to the next eligible free vision model; the final failure is preserved.** Only known transport/HTTP-unavailable errors use `ProviderUnavailable`; unknown-model, auth/configuration, and invalid-output errors remain ordinary `RuntimeError`s after the walk and still persist requested UI markers after acceptance. `run_llm`, `tests/test_llm_meta.py::test_run_llm_retries_after_any_candidate_failure`.
-- **Only `openrouter/*` ids walk, and models are listed only after the selected candidate fails.** `_fallbacks` is a generator that returns after its first yield otherwise, so the Claude path and every happy path spawn nothing extra; `tests/test_llm_meta.py::test_run_llm_429_on_the_claude_path_never_lists_models`.
-- **An unlistable or reshaped catalogue does not replace the original model error.** The rescue path must never become the failure, but the catch is the narrow `(OSError, ValueError, KeyError, TypeError)` so our own bugs still raise; `tests/test_llm_meta.py::test_run_llm_unlistable_models_still_raise_the_original_429`.
-- **`timeout` budgets the whole call, not each attempt.** Otherwise the walk turns one 300 s ceiling into N x 2 x 300 s on a synchronous `/ai` the gallery tab blocks on; `run_llm` `deadline`, `tests/test_llm_meta.py::test_run_llm_stops_walking_once_the_timeout_budget_is_spent`.
-- **Candidates come from `llm-openrouter`'s cache, never from a direct fetch of openrouter.ai.** `register_models` mints the ids `llm -m` accepts from that same copy, so listed fallback IDs are resolvable; stale external listings could waste the bounded walk on repeated `Unknown model` errors; `llm_meta.FREE_MODELS_ARGV`.
-- **Both recoveries live under `run_llm` (`_attempt` owns `--schema`, the loop owns `-m`); callers never know about either.** This avoids duplicating provider retry logic at call sites; `rg -n -- '--schema' src/` hits only `src/publicator/llm_meta.py`.
-- **Every AI caller hands the model a thumbnail via `images.thumb_for_ai`.** Same visual info for a fraction of tokens on a 300px-bound call; both gallery and batch use the data-dir `.thumbs` cache.
-- **`/ai` accepts explicit provider sources and canonical catalog objects only.** Local/OpenRouter objects must exactly match `VISION_MODELS`; Claude accepts no model object, local fit/availability is enforced server-side, and each request produces both metadata fields (`docs/features/gallery-ui.md`).
-- **Permissive JSON parsing (outermost `{...}`) still raises on unparseable output; empty title/description also raises.** Permissive parsing must not decay into returning `{}`; `tests/test_llm_meta.py::test_run_llm_bad_json_with_schema_raises`, `::test_generate_metadata_empty_raises`.
-- **The OpenRouter integration test is credential-free in keyless runs.** Without `$OPENROUTER_KEY`, it validates a complete mocked response and warns; with a key, it exercises live behavior when online and skips with a warning when offline. `tests/test_llm_meta_openrouter.py::test_openrouter_generates_title_and_description`.
-- **The live test targets a model that does NOT advertise `structured_outputs` (`SCHEMALESS_VISION_MODEL`).** Its purpose is to exercise the fallback end to end; `tests/test_llm_meta_openrouter.py` docstring.
-- **Provider IDs are explicit catalog values, not derived from another provider's name.** Local/OpenRouter selection resolves against `VISION_MODELS`; Claude retains its module model. The CLI's OpenRouter default is `OPENROUTER_MODEL`; local requires explicit `--model`.
-- Relies on the UI's model selector default and server-side canonical-model validation, owned by `docs/features/gallery-ui.md`.
+- A missing, blank or marker-bearing field cannot be approved or published.
+- Provider work occurs outside Store locks; save merges only fields still carrying the exact marker.
+- Invalid source data/config fails before provider admission and leaves source bytes unchanged.
+- The `PUBLICATOR_OLLAMA_URL` override is CLI-only and selects a dependency endpoint; it is not a hidden test/fake switch.
+- Tests use deterministic local/loopback fixtures and never require live provider credentials.
 
 ## Gotchas
 
-- A provider with a different schema-rejection message needs explicit handling at `_attempt`; do not replace recovery with a hunt for another free model ID.
-- A 404 or `Unknown model` on the live test's selected model now advances to the next catalogue candidate; the INFO log identifies when another model answered. Keep `SCHEMALESS_VISION_MODEL` current so the live test continues to exercise the intended model.
-- `_NO_SCHEMA` is process-global mutable state. Any test exercising the retry must `monkeypatch.setattr(llm_meta, "_NO_SCHEMA", set())` or it poisons later tests expecting `--schema` in argv.
-- Schema-rejection detection string-matches llm's error text (`NO_SCHEMA_SUPPORT = "does not support schemas"`, originally traced in llm 0.31.1). Re-check on an `llm` bump; the live test catches drift. Failure is a loud `RuntimeError`, never a wrong answer.
-- The timeout budget covers the complete schema retry and catalogue walk, not each invocation separately.
-- `run_llm` walks other free vision ids after any OpenRouter candidate failure. There is still no *cross-provider* fallback: OpenRouter errors never silently move generation to Claude or local Ollama.
-- A walk can hand you metadata from a model you did not select — the INFO line naming which id answered is the only signal, so don't silence it. Eligibility is "free + takes images", which admits non-captioners like `nvidia/nemotron-3.5-content-safety:free`.
-- Everything stubs through the one `run=` seam, the listing included; `free_vision_models` takes an already-parsed list, so it tests with a literal. The plugin's own cache is on disk (1 h, shared across processes) and serves its last good copy when openrouter.ai is down, so the listing needs neither a key nor a network.
-- Unknown-model, auth/configuration, transport, timeout, and HTTP failures all advance through the OpenRouter candidate list. After exhaustion, known transport and HTTP 408/429/5xx errors are `ProviderUnavailable`; unknown-model or auth/configuration errors remain ordinary `RuntimeError`s, and accepted UI requests still persist markers.
-- `thumb_for_ai` degrades to the full-res file: `ensure_thumb` copies when `convert` is absent/fails, and an unwritable cache dir (`OSError`) returns the original. Costlier, not broken.
-- The `generate-meta` app includes Ollama and llmfit in its runtime closure; the Ollama service itself must be started separately. Batch uses persistent `<data-dir>/.thumbs`; without ImageMagick, the existing thumbnail fallback may pass the original image.
-- The vision call is slow (default timeout 300 s per image); the publication-driven batch processes each marked record and atomically saves successful results one at a time.
-- Refresh the UI after external CLI generation; requests reread the current database.
-- The claude-cli path needs `claude` on PATH and a logged-in subscription; the flake apps add it via runtimeInputs, a bare `python -m publicator.apps...` outside nix does not.
-- llm-claude-cli 0.1.3 is vendored from PyPI in `flake.nix` (hash-pinned); llm-openrouter comes from nixpkgs `ps.llm-openrouter`. No `llm install` state anywhere.
-
-## Open items
-
-- Local generation requires an already-running Ollama service; publicator does not manage its lifecycle.
+- A complete source snapshot must validate before a batch starts; invalid rows are not reported as ordinary per-record provider failures.
+- Local service/model installation has external effects and is outside routine validation.

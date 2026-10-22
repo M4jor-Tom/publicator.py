@@ -13,8 +13,10 @@ use std::fs;
 
 #[test]
 fn search_accepts_only_configured_unique_paths_and_supported_limits() {
-    let mut config = Config::default();
-    config.publicable = vec!["picked".into(), "more".into(), "missing".into()];
+    let config = Config {
+        publicable: vec!["picked".into(), "more".into(), "missing".into()],
+        ..Config::default()
+    };
     let f = Fixture::with_config(config);
     fs::create_dir_all(f.path("picked")).unwrap();
     fs::create_dir_all(f.path("more")).unwrap();
@@ -120,8 +122,10 @@ fn discovery_skips_a_duplicate_hash_under_a_new_basename() {
 
 #[test]
 fn discovery_deduplicates_both_hash_keys_in_files_and_previews() {
-    let mut config = Config::default();
-    config.publicable = vec!["picked".into()];
+    let config = Config {
+        publicable: vec!["picked".into()],
+        ..Config::default()
+    };
     let f = Fixture::with_config(config);
     fs::create_dir_all(f.path("picked")).unwrap();
     let a = f.image("picked/a.png", 10, 10);
@@ -185,8 +189,10 @@ fn discovery_skips_changed_bytes_under_a_referenced_basename() {
 
 #[test]
 fn referenced_basename_blocks_delete_even_when_art_bytes_changed() {
-    let mut config = Config::default();
-    config.publicable = vec!["art".into()];
+    let config = Config {
+        publicable: vec!["art".into()],
+        ..Config::default()
+    };
     let f = Fixture::with_config(config);
     fs::create_dir_all(f.path("art")).unwrap();
     let p = f.image("art/changed.png", 12, 12);
@@ -199,7 +205,7 @@ fn referenced_basename_blocks_delete_even_when_art_bytes_changed() {
     published["files"][0]["sha512sum"] = json!("f".repeat(128));
     f.write(json!([published]));
     let before_delete = fs::read(&p).unwrap();
-    assert!(delete_candidate(&f.store, &[candidate.clone()], &p).is_err());
+    assert!(delete_candidate(&f.store, std::slice::from_ref(&candidate), &p).is_err());
     assert!(p.exists());
     assert_eq!(fs::read(&p).unwrap(), before_delete);
     assert!(delete_candidate(&f.store, &[], &p).is_err());

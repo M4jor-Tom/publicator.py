@@ -70,10 +70,10 @@ pub fn profiles(config: &Config) -> Result<Vec<Profile>> {
         let table = value
             .as_table()
             .ok_or_else(|| config_error(format!("profile {} must be a table", index + 1)))?;
-        if let Some(freq) = table.get("frequency") {
-            if freq.as_str() != Some("weekly") {
-                return Err(config_error("frequency must be 'weekly'"));
-            }
+        if let Some(freq) = table.get("frequency")
+            && freq.as_str() != Some("weekly")
+        {
+            return Err(config_error("frequency must be 'weekly'"));
         }
         let name = match table.get("name") {
             None => "default".to_owned(),
