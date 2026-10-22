@@ -57,15 +57,36 @@ fn schedule_zone(config: &Config) -> Result<Tz> {
 }
 
 pub fn pick(store: &Store, candidate: &Candidate, now: i64) -> Result<String> {
+    pick_with_hooks(store, candidate, now, || {}, || {})
+}
+
+fn pick_with_hooks(
+    store: &Store,
+    candidate: &Candidate,
+    now: i64,
+    after_hash: impl FnOnce(),
+    before_commit: impl FnOnce(),
+) -> Result<String> {
+    let identity = crate::images::file_identity(&candidate.path)?;
     let sha = file_sha512(&candidate.path)?;
-    let sha = if candidate.sha512.eq_ignore_ascii_case(&sha) {
-        sha
+    if candidate.sha512.eq_ignore_ascii_case(&sha) {
+        if crate::images::file_identity(&candidate.path)? != identity {
+            return Err(Error::InvalidState(
+                "candidate changed since discovery".into(),
+            ));
+        }
     } else {
         return Err(Error::Validation(
             "candidate content changed since discovery".into(),
         ));
-    };
+    }
+    after_hash();
     store.mutate(|rows| {
+        if crate::images::file_identity(&candidate.path)? != identity {
+            return Err(Error::InvalidState(
+                "candidate changed or disappeared since discovery".into(),
+            ));
+        }
         for row in rows.iter() {
             for files in ["files", "previewFilesIfNotFree"] {
                 if row.get(files).and_then(Value::as_array).into_iter().flatten().any(|file| {
@@ -85,6 +106,7 @@ pub fn pick(store: &Store, candidate: &Candidate, now: i64) -> Result<String> {
             "apparitions":[]
         }));
         repack(rows, store.config(), now)?;
+        before_commit();
         Ok(uuid)
     })
 }
@@ -476,4 +498,144 @@ pub fn return_to_scheduling(store: &Store, uuid: &str) -> Result<()> {
         row["state"] = json!("PICKED");
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod pick_delete_race_tests {
+    use super::pick_with_hooks;
+    use crate::{
+        config::{Config, Paths},
+        error::Error,
+        images::{Candidate, delete_candidate_with_hooks, file_sha512},
+        store::Store,
+    };
+    use serde_json::json;
+    use std::{fs, sync::mpsc, thread};
+
+    fn fixture() -> (tempfile::TempDir, Store, Candidate) {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("art")).unwrap();
+        let path = root.path().join("art/candidate.png");
+        fs::write(&path, b"disposable candidate").unwrap();
+        let store = Store::new(
+            Paths::resolve(Some(root.path()), None).unwrap(),
+            Config {
+                publicable: vec!["art".into()],
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        store
+            .mutate(|rows| {
+                rows.push(json!({
+                    "uuid":"00000000-0000-4000-8000-000000000001",
+                    "state":"PICKED", "title":"Title", "description":"Description",
+                    "submissionTimestamp":1700000000,
+                    "files":[{"basename":"unrelated.png","sha512sum":"0".repeat(128)}],
+                    "apparitions":[]
+                }));
+                Ok(())
+            })
+            .unwrap();
+        let candidate = Candidate {
+            path,
+            sha512: file_sha512(&root.path().join("art/candidate.png")).unwrap(),
+        };
+        (root, store, candidate)
+    }
+
+    #[test]
+    fn delete_finishing_before_pick_admission_prevents_missing_reference_and_keeps_fresh_edits() {
+        let (_root, store, candidate) = fixture();
+        let (hashed_tx, hashed_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let pick_store = store.clone();
+        let pick_candidate = candidate.clone();
+        let pick = thread::spawn(move || {
+            pick_with_hooks(
+                &pick_store,
+                &pick_candidate,
+                1_700_000_001,
+                || {
+                    hashed_tx.send(()).unwrap();
+                    resume_rx.recv().unwrap();
+                },
+                || {},
+            )
+        });
+        hashed_rx.recv().unwrap();
+
+        delete_candidate_with_hooks(
+            &store,
+            std::slice::from_ref(&candidate),
+            &candidate.path,
+            || {},
+            || {},
+        )
+        .unwrap();
+        assert!(!candidate.path.exists());
+        store
+            .mutate(|rows| {
+                rows[0]["description"] = json!("unrelated concurrent edit");
+                Ok(())
+            })
+            .unwrap();
+        resume_tx.send(()).unwrap();
+        assert!(matches!(pick.join().unwrap(), Err(Error::Io(_))));
+        let rows = store.read().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["description"], "unrelated concurrent edit");
+    }
+
+    #[test]
+    fn pick_committing_before_delete_keeps_referenced_art_and_unrelated_rows() {
+        let (_root, store, candidate) = fixture();
+        let (admitted_tx, admitted_rx) = mpsc::channel();
+        let (resume_pick_tx, resume_pick_rx) = mpsc::channel();
+        let (hashed_delete_tx, hashed_delete_rx) = mpsc::channel();
+        let (resume_delete_tx, resume_delete_rx) = mpsc::channel();
+        let pick_store = store.clone();
+        let pick_candidate = candidate.clone();
+        let pick = thread::spawn(move || {
+            pick_with_hooks(
+                &pick_store,
+                &pick_candidate,
+                1_700_000_001,
+                || {},
+                || {
+                    admitted_tx.send(()).unwrap();
+                    resume_pick_rx.recv().unwrap();
+                },
+            )
+        });
+        admitted_rx.recv().unwrap();
+
+        let delete_store = store.clone();
+        let delete_candidate = candidate.clone();
+        let delete = thread::spawn(move || {
+            delete_candidate_with_hooks(
+                &delete_store,
+                std::slice::from_ref(&delete_candidate),
+                &delete_candidate.path,
+                || {
+                    hashed_delete_tx.send(()).unwrap();
+                    resume_delete_rx.recv().unwrap();
+                },
+                || {},
+            )
+        });
+        hashed_delete_rx.recv().unwrap();
+        resume_pick_tx.send(()).unwrap();
+        assert!(pick.join().unwrap().is_ok());
+        resume_delete_tx.send(()).unwrap();
+        assert!(matches!(
+            delete.join().unwrap(),
+            Err(Error::InvalidState(_))
+        ));
+        assert!(candidate.path.exists());
+        let rows = store.read().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["description"], "Description");
+        assert_eq!(rows[1]["files"][0]["basename"], "candidate.png");
+    }
 }

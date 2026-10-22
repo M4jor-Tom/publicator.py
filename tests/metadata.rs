@@ -30,6 +30,16 @@ fn metadata_parser_accepts_short_literal_description_markup() {
 }
 
 #[test]
+fn parser_trims_only_metadata_outer_whitespace_before_validation() {
+    let title = format!("  {}  ", "x".repeat(50));
+    let description = " \nline one <literal>\nline two\n ";
+    let parsed =
+        parse_metadata(&json!({"title":title,"description":description}).to_string()).unwrap();
+    assert_eq!(parsed.title, "x".repeat(50));
+    assert_eq!(parsed.description, "line one <literal>\nline two");
+}
+
+#[test]
 fn metadata_requires_string_pair_and_valid_title() {
     for input in [
         r#"{"title":7,"description":"D"}"#,

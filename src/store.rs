@@ -13,6 +13,7 @@ use std::{
 };
 use tempfile::NamedTempFile;
 
+// ponytail: process-wide Store serialization; use per-path mutexes if measured contention warrants it.
 static MUTATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(Clone)]
@@ -52,6 +53,14 @@ impl Store {
         let lock = self.lock_file()?;
         lock.lock_exclusive()?;
         self.mutate_unlocked(f)
+    }
+
+    pub fn with_exclusive_read<R>(&self, f: impl FnOnce(&Publications) -> Result<R>) -> Result<R> {
+        let _process = MUTATION_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let lock = self.lock_file()?;
+        lock.lock_exclusive()?;
+        let rows = self.read_unlocked()?;
+        f(&rows)
     }
 
     fn read_unlocked(&self) -> Result<Publications> {

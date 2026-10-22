@@ -7,20 +7,172 @@ import pytest
 from publicator_da import browser
 
 
+class CalendarLocator:
+    def __init__(self, page, labels=None, index=0):
+        self.page = page
+        self.labels = labels if labels is not None else []
+        self.index = index
+
+    @property
+    def first(self):
+        return self.nth(0)
+
+    @property
+    def last(self):
+        return self.nth(len(self.labels) - 1)
+
+    def nth(self, index):
+        return CalendarLocator(self.page, self.labels, index)
+
+    def count(self):
+        return len(self.labels)
+
+    def get_attribute(self, name):
+        return self.labels[self.index] if name == "aria-label" else None
+
+    def click(self, *args, **kwargs):
+        if self.labels:
+            if self.labels[self.index] == "Confirm Schedule":
+                self.page.confirmed = True
+            else:
+                self.page.selected = self.labels[self.index]
+            return
+        if self.page.selector == 'button[aria-label="Go to the Next Month"]':
+            self.page.next_months += 1
+        elif self.page.selector == "#schedule-draft-date-picker [role=button]":
+            self.page.date_picker_opened = True
+        elif self.page.selector == 'button[aria-haspopup="menu"]':
+            self.page.menu_opened = True
+        elif self.page.selector == '[role=menuitem][label="Schedule"]':
+            self.page.schedule_menu_opened = True
+
+    def scroll_into_view_if_needed(self):
+        pass
+
+
+class CalendarPage:
+    def __init__(self, labels):
+        self.labels = labels
+        self.selector = None
+        self.selected = None
+        self.next_months = 0
+        self.date_picker_opened = False
+        self.menu_opened = False
+        self.schedule_menu_opened = False
+        self.confirmed = False
+
+    def locator(self, selector):
+        self.selector = selector
+        if selector.startswith("button[aria-label*="):
+            needle = selector.split('"', 2)[1]
+            labels = [label for label in self.labels if needle in label]
+        elif selector == "#schedule-draft-date-picker button[aria-label]":
+            labels = self.labels
+        else:
+            labels = []
+        return CalendarLocator(self, labels)
+
+    def select_option(self, *args, **kwargs):
+        pass
+
+    def wait_for_timeout(self, milliseconds):
+        pass
+
+    def get_by_text(self, text, **kwargs):
+        if text == "Confirm Schedule":
+            return CalendarLocator(self, ["Confirm Schedule"])
+        return CalendarLocator(self)
+
+def test_schedule_chooses_the_requested_full_year_and_exact_day(tmp_path):
+    page = CalendarPage([
+        "Wednesday, January 1, 2025",
+        "Thursday, January 1, 2026",
+        "Saturday, January 10, 2026",
+    ])
+    browser._pick_schedule(page, {"year": 2026, "month": 1, "day": 1, "hour": 20})
+    assert page.selected == "Thursday, January 1, 2026"
+    assert page.confirmed
+
+
+def test_schedule_refuses_unqualified_calendar_dates(tmp_path):
+    page = CalendarPage(["January 15", "January 15"])
+    with pytest.raises(RuntimeError, match="full requested date"):
+        browser._pick_schedule(page, {"year": 2026, "month": 1, "day": 15, "hour": 20})
+    assert page.selected is None
+    assert not page.confirmed
+
+
 def test_profile_trees_must_be_disjoint(tmp_path):
-    source = tmp_path / "login"
-    work = tmp_path / "work"
+    source = tmp_path / ".deviantart-login"
+    work = tmp_path / ".deviantart-session"
     source.mkdir()
     work.mkdir()
-    browser.validate_profiles(source, work)
+    browser.validate_profiles(tmp_path, source, work)
     for a, b in ((source, source), (source, source / "nested"), (source / "nested", source)):
         with pytest.raises(ValueError):
-            browser.validate_profiles(a, b)
+            browser.validate_profiles(tmp_path, a, b)
+
+
+def test_foreign_or_symlink_work_profile_is_rejected_untouched(tmp_path, monkeypatch):
+    import sys
+    from types import ModuleType, SimpleNamespace
+
+    source = tmp_path / ".deviantart-login"
+    source.mkdir()
+    (source / "prefs.js").write_text("login")
+    foreign = tmp_path / "unrelated"
+    foreign.mkdir()
+    sentinel = foreign / "sentinel"
+    sentinel.write_text("keep")
+    work = foreign
+    work_link = tmp_path / ".deviantart-session"
+    work_link.symlink_to(foreign, target_is_directory=True)
+    calls = []
+    module = ModuleType("playwright.sync_api")
+    module.sync_playwright = lambda: calls.append("acquire") or SimpleNamespace(start=lambda: None)
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", module)
+
+    for work_profile in (work, work_link):
+        with pytest.raises(ValueError):
+            browser.BrowserSession({
+                "login_profile": str(source), "work_profile": str(work_profile),
+                "headless": True, "timezone": "Europe/Paris",
+            }, tmp_path)
+        assert sentinel.read_text() == "keep"
+        assert list(foreign.iterdir()) == [sentinel]
+    assert calls == []
+
+
+def test_browser_session_rejects_same_name_foreign_root_before_playwright(tmp_path, monkeypatch):
+    from types import ModuleType, SimpleNamespace
+
+    trusted = tmp_path / "trusted"
+    trusted.mkdir()
+    source = tmp_path / "foreign" / ".deviantart-login"
+    work = tmp_path / "foreign" / ".deviantart-session"
+    work.parent.mkdir()
+    source.mkdir()
+    work.mkdir()
+    sentinel = work / "sentinel"
+    sentinel.write_text("keep")
+    acquired = []
+    module = ModuleType("playwright.sync_api")
+    module.sync_playwright = lambda: acquired.append(True) or SimpleNamespace(start=lambda: None)
+    monkeypatch.setitem(__import__("sys").modules, "playwright.sync_api", module)
+
+    with pytest.raises(ValueError):
+        browser.BrowserSession({
+            "login_profile": str(source), "work_profile": str(work),
+            "headless": True, "timezone": "Europe/Paris",
+        }, trusted)
+    assert acquired == []
+    assert sentinel.read_text() == "keep"
+    assert sorted(path.name for path in work.iterdir()) == ["sentinel"]
 
 
 def test_work_profile_copy_dereferences_symlinks(tmp_path, monkeypatch):
-    source = tmp_path / "login"
-    work = tmp_path / "work"
+    source = tmp_path / ".deviantart-login"
+    work = tmp_path / ".deviantart-session"
     external = tmp_path / "outside.sqlite"
     source.mkdir()
     external.write_text("source")
@@ -37,7 +189,7 @@ def test_work_profile_copy_dereferences_symlinks(tmp_path, monkeypatch):
     sys.modules["playwright.sync_api"].sync_playwright = lambda: SimpleNamespace(start=lambda: fake_playwright)
     monkeypatch.setattr(browser.BrowserSession, "_cookies", lambda self: [])
     session = browser.BrowserSession({"login_profile": str(source), "work_profile": str(work),
-                                     "headless": True, "timezone": "Europe/Paris"})
+                                     "headless": True, "timezone": "Europe/Paris"}, tmp_path)
     try:
         copied = work / "linked.sqlite"
         assert not copied.is_symlink()
@@ -51,7 +203,7 @@ def test_browser_without_cookie_database_passes_no_cookies(tmp_path, monkeypatch
     import sys
     from types import ModuleType
 
-    source, work = tmp_path / "login", tmp_path / "work"
+    source, work = tmp_path / ".deviantart-login", tmp_path / ".deviantart-session"
     source.mkdir()
     (source / "prefs.js").write_text("disposable profile")
     calls = {}
@@ -83,7 +235,7 @@ def test_browser_without_cookie_database_passes_no_cookies(tmp_path, monkeypatch
         "work_profile": str(work),
         "headless": True,
         "timezone": "Europe/Paris",
-    })
+    }, tmp_path)
     try:
         assert calls["cookies"] == []
     finally:
@@ -91,7 +243,7 @@ def test_browser_without_cookie_database_passes_no_cookies(tmp_path, monkeypatch
 
 
 def test_browser_setup_passes_headless_timezone_and_reinjects_cookies(tmp_path, monkeypatch):
-    source, work = tmp_path / "login", tmp_path / "work"
+    source, work = tmp_path / ".deviantart-login", tmp_path / ".deviantart-session"
     source.mkdir()
     db = sqlite3.connect(source / "cookies.sqlite")
     db.execute("create table moz_cookies (name,value,host,path,isSecure,isHttpOnly)")
@@ -121,7 +273,7 @@ def test_browser_setup_passes_headless_timezone_and_reinjects_cookies(tmp_path, 
     __import__("sys").modules["playwright.sync_api"].sync_playwright = lambda: SimpleNamespace(start=lambda: pw)
 
     session = browser.BrowserSession({"login_profile": str(source), "work_profile": str(work),
-                                     "headless": True, "timezone": "Europe/Paris"})
+                                     "headless": True, "timezone": "Europe/Paris"}, tmp_path)
     session.close()
     assert calls["launch"][1] == {"headless": True, "timezone_id": "Europe/Paris"}
     assert calls["cookies"] == [{"name": "auth", "value": "secret", "domain": ".deviantart.com",
@@ -131,7 +283,7 @@ def test_browser_setup_passes_headless_timezone_and_reinjects_cookies(tmp_path, 
 
 
 def test_initialization_failure_closes_partial_browser_resources(tmp_path, monkeypatch):
-    source, work = tmp_path / "login", tmp_path / "work"
+    source, work = tmp_path / ".deviantart-login", tmp_path / ".deviantart-session"
     source.mkdir(); (source / "profile").write_text("x")
     calls = []
     class Context:
@@ -150,7 +302,7 @@ def test_initialization_failure_closes_partial_browser_resources(tmp_path, monke
     monkeypatch.setattr(browser.BrowserSession, "_cookies", lambda self: [])
     with pytest.raises(RuntimeError, match="page failed"):
         browser.BrowserSession({"login_profile": str(source), "work_profile": str(work),
-                               "headless": False, "timezone": "Europe/Paris"})
+                               "headless": False, "timezone": "Europe/Paris"}, tmp_path)
     assert calls == ["context.close", "playwright.stop"]
 
 

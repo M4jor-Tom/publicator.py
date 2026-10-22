@@ -53,7 +53,7 @@ fn fixture_app(f: &Fixture, endpoint: String) -> (App, Arc<Application>) {
         "llmfit".into(),
     )
     .with_openrouter_key("fixture");
-    let application = Arc::new(Application::new(store, client, || 1_700_000_000));
+    let application = Arc::new(Application::new(store, client));
     let (mut app, _) = App::from_application(
         application.clone(),
         UiOptions {
@@ -130,7 +130,7 @@ fn local_fixture_app(
         },
         llmfit,
     );
-    let application = Arc::new(Application::new(store, client, || 1_700_000_000));
+    let application = Arc::new(Application::new(store, client));
     let (mut app, _) = App::from_application(
         application.clone(),
         UiOptions {
@@ -182,7 +182,7 @@ async fn local_generation_checks_and_exposes_fit_before_install_consent() {
     );
     let store = Arc::new(f.store.clone());
     let client = MetadataClient::new(reqwest::Client::new(), Endpoints::default(), llmfit);
-    let application = Arc::new(Application::new(store, client, || 1_700_000_000));
+    let application = Arc::new(Application::new(store, client));
     let (mut app, _) = App::from_application(
         application,
         UiOptions {
@@ -312,6 +312,72 @@ async fn missing_good_model_requires_confirmation_and_only_then_pulls() {
 }
 
 #[tokio::test]
+async fn dirty_local_batch_requires_consent_and_refusal_never_pulls() {
+    let f = Fixture::new();
+    f.write(json!([marker_row(1), marker_row(2)]));
+    let before = std::fs::read(&f.store.paths().json).unwrap();
+    let server =
+        common::http::Server::start(vec![ollama_reply("/api/tags", json!({"models": []}))]);
+    let (mut app, _) = local_fixture_app(
+        &f,
+        fake_llmfit(&f, "Good", &["Fits host"]),
+        server.url().into(),
+    );
+    let _pending_status = app.update(Message::SelectSource(Source::Local));
+    for (field, text) in [
+        (publicator::ui::drafts::Field::Title, "Manual title"),
+        (
+            publicator::ui::drafts::Field::Description,
+            "Manual description",
+        ),
+    ] {
+        let _ = app.update(Message::Edited {
+            uuid: id(1),
+            field,
+            text: text.into(),
+        });
+    }
+
+    let fit_result = run_task(app.update(Message::GenerateMarked)).await;
+    assert!(matches!(fit_result, Message::LocalFitFinished { .. }));
+    let _ = app.update(fit_result);
+    let status = app.local_fit_status().unwrap();
+    assert!(status.fit.fit && status.available && !status.installed);
+    assert!(app.local_install_consent_pending());
+    assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), before);
+    assert_eq!(
+        server
+            .requests()
+            .iter()
+            .filter(|call| call["path"] == "/api/tags")
+            .count(),
+        1
+    );
+    assert!(
+        !server
+            .requests()
+            .iter()
+            .any(|call| call["path"] == "/api/pull")
+    );
+
+    let _ = app.update(Message::CancelLocalInstall);
+    assert!(!app.local_install_consent_pending());
+    assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), before);
+    assert!(
+        !server
+            .requests()
+            .iter()
+            .any(|call| call["path"] == "/api/pull")
+    );
+    assert!(
+        !server
+            .requests()
+            .iter()
+            .any(|call| call["path"] == "/api/chat")
+    );
+}
+
+#[tokio::test]
 async fn installed_local_batch_keeps_identity_through_dirty_flush_and_admission() {
     let f = Fixture::new();
     f.image("1.png", 4, 4);
@@ -435,29 +501,33 @@ async fn batch_local_install_consent_rejects_a_changed_eligible_set() {
     f.write(json!([marker_row(1), marker_row(2)]));
     let before = std::fs::read(&f.store.paths().json).unwrap();
     let tags = json!({"models": []});
-    let server = common::http::Server::start(vec![
-        ollama_reply("/api/tags", tags.clone()),
-        ollama_reply("/api/tags", tags.clone()),
-        ollama_reply("/api/tags", tags.clone()),
-        ollama_reply("/api/pull", json!({"status":"success"})),
-        ollama_reply(
-            "/api/chat",
-            json!({"message":{"content":json!({"title":"Should not run","description":"Changed batch."}).to_string()}}),
-        ),
-    ]);
+    let server = common::http::Server::start(vec![ollama_reply("/api/tags", tags.clone())]);
     let (mut app, _) = local_fixture_app(
         &f,
         fake_llmfit(&f, "Good", &["Fits host"]),
         server.url().into(),
     );
-    let selected = run_task(app.update(Message::SelectSource(Source::Local))).await;
-    let _ = app.update(selected);
+    let _pending_status = app.update(Message::SelectSource(Source::Local));
+    for (field, text) in [
+        (publicator::ui::drafts::Field::Title, "Manual title"),
+        (
+            publicator::ui::drafts::Field::Description,
+            "Manual description",
+        ),
+    ] {
+        let _ = app.update(Message::Edited {
+            uuid: id(1),
+            field,
+            text: text.into(),
+        });
+    }
     let checked = run_task(app.update(Message::GenerateMarked)).await;
     let _ = app.update(checked);
     assert!(app.local_install_consent_pending());
+    assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), before);
 
-    // Confirmation creates an asynchronous Application task. Change eligibility
-    // before polling it to exercise the admission boundary, not just UI state.
+    // The consent continuation still carries the original set through the
+    // dirty-draft flush and checks it at actual Application admission.
     let confirm = app.update(Message::ConfirmLocalInstall);
     f.store
         .mutate(|rows| {
@@ -469,7 +539,13 @@ async fn batch_local_install_consent_rejects_a_changed_eligible_set() {
     let saved = std::fs::read(&f.store.paths().json).unwrap();
     assert_ne!(saved, before);
     assert_eq!(f.read()[0]["title"], "Manual title");
-    let finished = run_task(confirm).await;
+    let saved_message = run_task(confirm).await;
+    assert!(matches!(
+        saved_message,
+        Message::SaveFinished { result: Ok(()), .. }
+    ));
+    let generation = app.update(saved_message);
+    let finished = run_task(generation).await;
     assert!(matches!(
         finished,
         Message::GenerationFinished {
@@ -792,7 +868,7 @@ async fn previews_are_requested_for_initial_visible_cards_then_later_scrolled_ca
         Endpoints::default(),
         "llmfit".into(),
     );
-    let application = Arc::new(Application::new(store, client, || 0));
+    let application = Arc::new(Application::new(store, client));
     let (mut app, _) = App::from_application(
         application,
         UiOptions {
@@ -800,10 +876,14 @@ async fn previews_are_requested_for_initial_visible_cards_then_later_scrolled_ca
             ai_timeout: Duration::from_secs(1),
         },
     );
+    let _ = app.update(Message::LoadFinished(Ok(f.store.read().unwrap())));
     let candidates =
         publicator::ui::pick::search_candidates(&f.store, 25, &["images".into()]).unwrap();
     assert_eq!(candidates.len(), 10);
-    let task = app.update(Message::SearchFinished(Ok(candidates)));
+    let task = app.update(Message::SearchFinished {
+        request_id: 0,
+        result: Ok(candidates),
+    });
     let messages = run_tasks(task).await;
     for message in messages {
         let _ = app.update(message);

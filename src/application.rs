@@ -29,18 +29,16 @@ pub struct BatchReport {
 pub struct Application {
     store: Arc<Store>,
     metadata: MetadataClient,
-    _clock: fn() -> i64,
     operation: Mutex<()>,
     busy: Mutex<HashSet<String>>,
     publishing: Mutex<bool>,
     pub(crate) publisher: Option<crate::publishing::Publisher>,
 }
 impl Application {
-    pub fn new(store: Arc<Store>, metadata: MetadataClient, clock: fn() -> i64) -> Self {
+    pub fn new(store: Arc<Store>, metadata: MetadataClient) -> Self {
         Self {
             store,
             metadata,
-            _clock: clock,
             operation: Mutex::new(()),
             busy: Mutex::new(HashSet::new()),
             publishing: Mutex::new(false),

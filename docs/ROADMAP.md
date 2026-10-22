@@ -841,7 +841,7 @@ Each test file imports `mod common; use common::{Fixture, id, row, epoch};` only
 
 **Files:** Create `python/publicator_da/{__init__,browser,worker,pw_daemon}.py`, `src/publish_protocol.rs`, `tests/python/test_{browser,worker}.py`, `tests/publish_protocol.rs`; modify `src/lib.rs`, `pyproject.toml` test discovery and static publishing skill path instructions only as needed. Leave the old Python publisher executable until cutover. Narrow extra follow-through authorized by `task-14-application-followup.md`: modify `src/application.rs` and `tests/application_ai.rs` (or private unit tests) to retain the first valid model preference and propagate typed uncertain commits; do not redo the accepted Task13 concurrency fix.
 
-**Interfaces:** Python `BrowserSession(open_command)`, `submit(job)->dict`, `close()`; `worker.serve(stdin,stdout,session_factory=BrowserSession)->int`. Rust serde tagged `WorkerCommand`/`WorkerEvent` use explicit `protocol:1`. One bounded JSON line ≤1 MiB. Exact messages:
+**Interfaces:** Python `BrowserSession(open_command, data_root)`, `submit(job)->dict`, `close()`; `worker.serve(stdin,stdout,data_root,session_factory=None)->int` (defaults to `BrowserSession`). Rust launches the worker with Store `Paths.data_dir` as trusted `--data-root` argv (not an open-frame field); v1 profile paths must be exactly that root's `.deviantart-login` and `.deviantart-session` children. Rust serde tagged `WorkerCommand`/`WorkerEvent` use explicit `protocol:1`. One bounded JSON line ≤1 MiB. Exact messages:
 
 ```json
 {"protocol":1,"type":"open","login_profile":"/data/.deviantart-login","work_profile":"/data/.deviantart-session","headless":false,"timezone":"Europe/Paris"}
@@ -865,7 +865,7 @@ The example epoch matches 2027-01-15 20:00 Europe/Paris (19:00 UTC). `failed`/`u
           return original(path, *args, **kwargs)
       monkeypatch.setattr("builtins.open", guarded)
       # Valid open/submit/close commands are built by a local protocol fixture.
-      assert worker.serve(io.StringIO(valid_commands(tmp_path)), io.StringIO(), FakeSession) == 0
+      assert worker.serve(io.StringIO(valid_commands(tmp_path)), io.StringIO(), tmp_path, FakeSession) == 0
   ```
   Define `valid_commands` and `FakeSession` in `tests/python/test_worker.py`; FakeSession returns matching IDs, does no I/O. Also test the real subprocess framing with a test-only entry script injecting this fake session, not a production `--fake` switch.
 - [ ] **Run red:** `nix develop -c env PYTHONPATH=python pytest tests/python -q` and `nix develop -c cargo test --no-default-features --test publish_protocol`.

@@ -24,7 +24,7 @@ pub fn search_candidates(
     )
 }
 
-pub(super) fn search_task(app: &App) -> Task<Message> {
+pub(super) fn search_task(app: &App, request_id: u64) -> Task<Message> {
     let application = app.application.clone();
     let search = Search {
         limit: app.search_limit,
@@ -39,15 +39,16 @@ pub(super) fn search_task(app: &App) -> Task<Message> {
             .unwrap_or_else(|error| Err(crate::error::Error::Config(error.to_string())))
             .map_err(|error| error.to_string())
         },
-        Message::SearchFinished,
+        move |result| Message::SearchFinished { request_id, result },
     )
 }
 
-pub(super) fn prompt_search_task(app: &App) -> Task<Message> {
+pub(super) fn prompt_search_task(app: &App, request_id: u64) -> Task<Message> {
     let Some(archive) = app.prompt_archive.clone() else {
-        return Task::done(Message::PromptSearchFinished(Err(
-            "prompt archive is not configured".into(),
-        )));
+        return Task::done(Message::PromptSearchFinished {
+            request_id,
+            result: Err("prompt archive is not configured".into()),
+        });
     };
     let store = app.application.store().clone();
     let search = Search {
@@ -71,7 +72,7 @@ pub(super) fn prompt_search_task(app: &App) -> Task<Message> {
             .unwrap_or_else(|error| Err(crate::error::Error::Config(error.to_string())))
             .map_err(|error| error.to_string())
         },
-        Message::PromptSearchFinished,
+        move |result| Message::PromptSearchFinished { request_id, result },
     )
 }
 

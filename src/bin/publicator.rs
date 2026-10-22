@@ -191,7 +191,7 @@ async fn run() -> Result<()> {
             data_dir,
             json,
         } => {
-            let (paths, _, store) = paths(data_dir, json)?;
+            let (_, _, store) = paths(data_dir, json)?;
             let source: Source = source.into();
             let model = choose_model(source, model.as_deref())?;
             if timeout == 0 {
@@ -244,7 +244,7 @@ async fn run() -> Result<()> {
                 timeout: Duration::from_secs(timeout),
                 install_missing,
             };
-            let app = Application::new(store, client, || chrono::Utc::now().timestamp());
+            let app = Application::new(store, client);
             let report = app.generate_marked(&request).await?;
             for result in &report.results {
                 if let Some(error) = &result.error {
@@ -259,7 +259,6 @@ async fn run() -> Result<()> {
                     "one or more metadata records failed".into(),
                 ));
             }
-            let _ = paths;
         }
         Command::VisionModels => {
             let client = metadata_client();
@@ -320,7 +319,7 @@ async fn run() -> Result<()> {
                 println!("check-steps OK");
                 return Ok(());
             }
-            let (paths, config, store) = paths(data_dir, json)?;
+            let (paths, _, store) = paths(data_dir, json)?;
             let worker = std::env::var_os("PUBLICATOR_WORKER")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("python/publicator_da/worker.py"));
@@ -354,8 +353,7 @@ async fn run() -> Result<()> {
                 let rows = store.read()?;
                 Some(first_pending_uuid(&rows)?.into_iter().collect())
             };
-            let app = Application::new(store, metadata_client(), || chrono::Utc::now().timestamp())
-                .with_publisher(publisher);
+            let app = Application::new(store, metadata_client()).with_publisher(publisher);
             let report = app
                 .publish(
                     PublishRequest {
@@ -380,7 +378,6 @@ async fn run() -> Result<()> {
             if verbose {
                 println!("publication run complete");
             }
-            let _ = config;
         }
         Command::CheckSteps => {
             let worker = std::env::var_os("PUBLICATOR_WORKER")

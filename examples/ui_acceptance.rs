@@ -1262,10 +1262,8 @@ fn main() -> iced::Result {
         llmfit,
     )
     .with_openrouter_key("DUMMY_NATIVE_ACCEPTANCE_KEY");
-    let application = Arc::new(
-        Application::new(store, metadata, || 1_800_000_000)
-            .with_publisher(Publisher::new(worker, skill)),
-    );
+    let application =
+        Arc::new(Application::new(store, metadata).with_publisher(Publisher::new(worker, skill)));
     let result = ui::run(
         application,
         UiOptions {

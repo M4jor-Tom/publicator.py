@@ -146,7 +146,9 @@ pub fn parse_metadata(content: &str) -> Result<Metadata> {
     if end < begin {
         return Err(Error::Provider("no JSON object".into()));
     }
-    let pair: Metadata = serde_json::from_str(&content[begin..=end])?;
+    let mut pair: Metadata = serde_json::from_str(&content[begin..=end])?;
+    pair.title = pair.title.trim().to_owned();
+    pair.description = pair.description.trim().to_owned();
     validate_metadata(&pair.title, &pair.description)?;
     Ok(pair)
 }

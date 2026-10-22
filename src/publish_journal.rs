@@ -1,7 +1,7 @@
 use crate::{
     error::{Error, Result},
     images::{file_sha512, index_by_basename},
-    model::{Phase, phase, validate_metadata},
+    model::{Phase, deliveries_complete, phase, validate_metadata},
     publish_protocol::{PublishJob, WorkerEvent},
     store::Store,
 };
@@ -376,28 +376,37 @@ impl PublishJournal {
                     "approved content/options changed since submission".into(),
                 ));
             }
-            let Some(apps) = row.get_mut("apparitions").and_then(Value::as_array_mut) else {
-                return Err(Error::Validation("apparitions must be an array".into()));
-            };
-            let app = apps
-                .iter_mut()
-                .find(|app| app.get("platformName").and_then(Value::as_str) == Some("deviantart"))
-                .ok_or_else(|| Error::NotFound(format!("{uuid}:deviantart")))?;
-            match app.get("state").and_then(Value::as_str) {
-                Some("unpublished") => {
-                    app["state"] = Value::String("published_or_scheduled".into());
-                    if let Some(url) = url {
-                        app["url"] = Value::String(url.clone());
+            {
+                let Some(apps) = row.get_mut("apparitions").and_then(Value::as_array_mut) else {
+                    return Err(Error::Validation("apparitions must be an array".into()));
+                };
+                let app = apps
+                    .iter_mut()
+                    .find(|app| {
+                        app.get("platformName").and_then(Value::as_str) == Some("deviantart")
+                    })
+                    .ok_or_else(|| Error::NotFound(format!("{uuid}:deviantart")))?;
+                match app.get("state").and_then(Value::as_str) {
+                    Some("unpublished") => {
+                        app["state"] = Value::String("published_or_scheduled".into());
+                        if let Some(url) = url {
+                            app["url"] = Value::String(url.clone());
+                        }
                     }
-                    let complete = apps.iter().all(|a| {
-                        a.get("state").and_then(Value::as_str) == Some("published_or_scheduled")
-                    });
-                    row["state"] =
-                        Value::String(if complete { "APPEARED" } else { "DESCRIBED" }.into());
+                    Some("published_or_scheduled") => {}
+                    _ => {
+                        return Err(Error::InvalidState("delivery target is not pending".into()));
+                    }
                 }
-                Some("published_or_scheduled") => {}
-                _ => return Err(Error::InvalidState("delivery target is not pending".into())),
             }
+            row["state"] = Value::String(
+                if deliveries_complete(row) {
+                    "APPEARED"
+                } else {
+                    "DESCRIBED"
+                }
+                .into(),
+            );
             Ok(())
         })?;
         self.applied(attempt_id)

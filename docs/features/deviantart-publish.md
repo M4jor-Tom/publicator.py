@@ -15,7 +15,7 @@
 
 Rust validates the complete selected batch and current approved record before dispatch, writes a durable intent, and sends one artwork at a time to the versioned NDJSON worker. A result is saved before the next send. Success receipts prevent duplicate submissions on restart. If the remote outcome is unknown, preserve the receipt and stop; human reconciliation is required before retry.
 
-The Playwright worker uses the existing ordered browser steps and static skill. The login profile is never opened for publishing: Rust/worker use a copy. DeviantArt blocks automated login behind PerimeterX, so `login` remains a human-operated real Firefox action.
+The Playwright worker uses the existing ordered browser steps and static skill. Rust binds the Store data directory at process startup with `--data-root`; the worker accepts only the `.deviantart-login` and `.deviantart-session` children of that trusted root, while protocol v1 carries no root authority. The login profile is never opened for publishing: Rust/worker use a copy. DeviantArt blocks automated login behind PerimeterX, so `login` remains a human-operated real Firefox action.
 
 ## Invariants
 

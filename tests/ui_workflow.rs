@@ -46,7 +46,7 @@ fn app_with_rows(
         Endpoints::default(),
         "llmfit".into(),
     );
-    let application = Arc::new(Application::new(store.clone(), client, || 1_798_761_600));
+    let application = Arc::new(Application::new(store.clone(), client));
     let (mut app, _) = App::from_application(
         application.clone(),
         UiOptions {
@@ -90,7 +90,6 @@ fn default_search_selects_every_configured_publicable_directory() {
             Endpoints::default(),
             "llmfit".into(),
         ),
-        || 1_798_761_600,
     ));
     let (app, _) = App::from_application(
         application,
@@ -179,7 +178,6 @@ per_slot = 1"#,
             Endpoints::default(),
             "llmfit".into(),
         ),
-        || 1_798_761_600,
     ));
     let (mut app, _) = App::from_application(
         application,
@@ -216,7 +214,10 @@ async fn pick_dispatch_persists_candidate_before_refreshing_phase() {
     std::fs::copy(path, &candidate_path).unwrap();
     let candidates = pick::search_candidates(&store, 25, &["images".into()]).unwrap();
     assert_eq!(candidates.len(), 1);
-    let _ = app.update(Message::SearchFinished(Ok(candidates.clone())));
+    let _ = app.update(Message::SearchFinished {
+        request_id: 0,
+        result: Ok(candidates.clone()),
+    });
     let task = app.update(Message::Pick(candidates[0].clone()));
     let completion = run_task(task).await;
     assert!(matches!(&completion, Message::PickFinished(Ok(()))));
@@ -239,8 +240,14 @@ fn empty_search_replaces_pick_authorization_for_previous_candidates() {
     let old = pick::search_candidates(&store, 25, &["images".into()])
         .unwrap()
         .remove(0);
-    let _ = app.update(Message::SearchFinished(Ok(vec![old.clone()])));
-    let _ = app.update(Message::SearchFinished(Ok(Vec::new())));
+    let _ = app.update(Message::SearchFinished {
+        request_id: 0,
+        result: Ok(vec![old.clone()]),
+    });
+    let _ = app.update(Message::SearchFinished {
+        request_id: 0,
+        result: Ok(Vec::new()),
+    });
     let _ = app.update(Message::Pick(old));
     assert!(store.read().unwrap().is_empty());
     assert!(path.exists());

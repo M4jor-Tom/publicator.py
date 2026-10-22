@@ -43,7 +43,6 @@ fn app_with_timezone(f: &Fixture, timezone: Option<&str>) -> Application {
             },
             "llmfit".into(),
         ),
-        || 0,
     )
 }
 #[tokio::test]

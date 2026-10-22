@@ -6,19 +6,30 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 
-def validate_profiles(source: Path, work: Path) -> None:
+def validate_profiles(data_root: Path, source: Path, work: Path) -> tuple[Path, Path]:
+    data_root = Path(data_root).resolve()
+    source, work = Path(source), Path(work)
+    if not data_root.is_dir():
+        raise ValueError("trusted data root must be a directory")
+    if source.is_symlink() or work.is_symlink():
+        raise ValueError("login and work profiles cannot be symlinks")
     source, work = source.resolve(), work.resolve()
+    if source != data_root / ".deviantart-login" or work != data_root / ".deviantart-session":
+        raise ValueError("profiles must be the designated children of the trusted data root")
     if source == work or source in work.parents or work in source.parents:
         raise ValueError("login and work profiles must be disjoint trees")
+    return source, work
 
 
 class BrowserSession:
-    def __init__(self, open_command):
-        from playwright.sync_api import sync_playwright
+    def __init__(self, open_command, data_root):
         self.command = open_command
-        self.source = Path(open_command["login_profile"])
-        self.work = Path(open_command["work_profile"])
-        validate_profiles(self.source, self.work)
+        self.source, self.work = validate_profiles(
+            data_root,
+            Path(open_command["login_profile"]),
+            Path(open_command["work_profile"]),
+        )
+        from playwright.sync_api import sync_playwright
         if not self.source.is_dir() or not any(self.source.iterdir()):
             raise RuntimeError("no valid DeviantArt session; run the real Firefox login first")
         if self.work.exists():
@@ -95,11 +106,26 @@ def _pick_schedule(page, s):
     page.locator('[role="menuitem"][label="Schedule"]').first.click(force=True)
     page.locator('#schedule-draft-date-picker [role="button"]').click(); page.wait_for_timeout(500)
     import calendar
-    day_label = f"{calendar.month_name[m]} {d}"
+    import re
+    month = re.escape(calendar.month_name[m])
+    date_label = re.compile(rf"(?<![A-Za-z]){month}\s+0?{d}(?:st|nd|rd|th)?[,]?\s+{y}(?!\d)")
+    selected = None
     for _ in range(24):
-        if page.locator(f'button[aria-label*="{day_label}"]').count(): break
+        buttons = page.locator('#schedule-draft-date-picker button[aria-label]')
+        matches = [
+            buttons.nth(index)
+            for index in range(buttons.count())
+            if date_label.search(buttons.nth(index).get_attribute("aria-label") or "")
+        ]
+        if len(matches) > 1:
+            raise RuntimeError(f"calendar exposes an ambiguous full requested date {y}-{m:02}-{d:02}")
+        if matches:
+            selected = matches[0]
+            break
         page.locator('button[aria-label="Go to the Next Month"]').click(); page.wait_for_timeout(200)
-    page.locator(f'button[aria-label*="{day_label}"]').first.click()
+    if selected is None:
+        raise RuntimeError(f"calendar did not expose the full requested date {y}-{m:02}-{d:02}")
+    selected.click()
     page.select_option('#schedule-draft-time-picker', value=str(hour)); page.wait_for_timeout(300)
     page.get_by_text("Confirm Schedule", exact=True).click(); page.wait_for_timeout(1500)
 

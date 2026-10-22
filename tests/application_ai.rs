@@ -93,11 +93,7 @@ async fn marked_batch_uses_configuration_from_data_dir_for_external_json() {
         "/chat/completions",
         json!({"choices":[{"message":{"content":content("Allowed title")}}]}),
     )]);
-    let allowed_app = Application::new(
-        Arc::new(allowed_store),
-        client(server.url().to_owned()),
-        || 1_700_000_000,
-    );
+    let allowed_app = Application::new(Arc::new(allowed_store), client(server.url().to_owned()));
     let report = allowed_app
         .generate_marked(&request(Source::OpenRouter))
         .await
@@ -113,11 +109,8 @@ async fn marked_batch_uses_configuration_from_data_dir_for_external_json() {
     std::fs::write(&json_path, json!([make_row("Not allowed")]).to_string()).unwrap();
     let invalid_paths = Paths::resolve(Some(f.root.path()), Some(&json_path)).unwrap();
     let invalid_store = Store::new(invalid_paths, config).unwrap();
-    let invalid_app = Application::new(
-        Arc::new(invalid_store),
-        client("http://127.0.0.1:1".into()),
-        || 1_700_000_000,
-    );
+    let invalid_app =
+        Application::new(Arc::new(invalid_store), client("http://127.0.0.1:1".into()));
     let before = std::fs::read(&json_path).unwrap();
     let error = invalid_app
         .generate_marked(&request(Source::OpenRouter))
@@ -146,7 +139,6 @@ async fn empty_local_marked_batch_is_noop_without_model_or_service_setup() {
     let app = Application::new(
         Arc::new(f.store.clone()),
         local_client("http://127.0.0.1:1".into(), &tool),
-        || 1_700_000_000,
     );
     let report = app.generate_marked(&request(Source::Local)).await.unwrap();
     assert_eq!(
@@ -168,7 +160,6 @@ async fn marked_batch_admission_uses_eligibility_after_a_waiting_edit() {
     let app = Arc::new(Application::new(
         Arc::new(f.store.clone()),
         client("http://127.0.0.1:1".into()),
-        || 1_700_000_000,
     ));
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
@@ -238,7 +229,6 @@ async fn generation_lease_excludes_duplicate_and_same_uuid_edits_but_not_other_w
     let app = Arc::new(Application::new(
         Arc::new(f.store.clone()),
         client(endpoint),
-        || 1_700_000_000,
     ));
     let task = {
         let app = Arc::clone(&app);
@@ -287,11 +277,7 @@ async fn openrouter_batch_continues_after_failure_and_ignores_inexact_marker() {
             json!({"choices":[{"message":{"content":content("Generated")}}]}),
         ),
     ]);
-    let app = Application::new(
-        Arc::new(f.store.clone()),
-        client(server.url().to_owned()),
-        || 1_700_000_000,
-    );
+    let app = Application::new(Arc::new(f.store.clone()), client(server.url().to_owned()));
 
     let report = app
         .generate_marked(&request(Source::OpenRouter))
@@ -379,9 +365,7 @@ async fn batch_persists_each_success_before_continuing_after_failure() {
             json!({"choices":[{"message":{"content":content("title-1")}}]}).to_string(),
         );
     });
-    let app = Application::new(Arc::new(f.store.clone()), client(endpoint), || {
-        1_700_000_000
-    });
+    let app = Application::new(Arc::new(f.store.clone()), client(endpoint));
     let report = app
         .generate_marked(&request(Source::OpenRouter))
         .await
@@ -462,7 +446,7 @@ async fn successful_batches_save_in_provider_order() {
             }
             local_client(server.url().to_owned(), &tool)
         };
-        let app = Application::new(Arc::new(f.store.clone()), metadata, || 1_700_000_000);
+        let app = Application::new(Arc::new(f.store.clone()), metadata);
         let report = app.generate_marked(&request(source)).await.unwrap();
         assert_eq!((report.succeeded, report.failed), (3, 0));
         assert_eq!(
@@ -487,7 +471,6 @@ async fn publishing_lease_blocks_edits_until_dropped() {
     let app = Application::new(
         Arc::new(f.store.clone()),
         client("http://127.0.0.1:1".into()),
-        || 1_700_000_000,
     );
     let lease = app.begin_publishing().unwrap();
     assert!(app.mutate(Some(&id(1)), |_| Ok(())).is_err());
@@ -521,9 +504,7 @@ async fn invalid_phase_model_and_database_do_not_write_or_call_provider() {
             }
         }
     });
-    let app = Application::new(Arc::new(f.store.clone()), client(endpoint), || {
-        1_700_000_000
-    });
+    let app = Application::new(Arc::new(f.store.clone()), client(endpoint));
     let before_phase = std::fs::read(&f.store.paths().json).unwrap();
     assert!(
         app.generate_one(&id(1), request(Source::OpenRouter))
@@ -580,7 +561,6 @@ async fn accepted_provider_failure_saves_both_markers() {
     let app = Application::new(
         Arc::new(f.store.clone()),
         client("http://127.0.0.1:1".into()),
-        || 1_700_000_000,
     );
     let result = app.generate_one(&id(1), request(Source::OpenRouter)).await;
     assert!(result.is_err());
@@ -602,7 +582,6 @@ async fn openrouter_batch_reverses_persisted_order_and_keeps_marker_on_failure()
     let app = Application::new(
         Arc::new(f.store.clone()),
         client("http://127.0.0.1:1".into()),
-        || 1_700_000_000,
     );
     let report = app
         .generate_marked(&request(Source::OpenRouter))
@@ -661,11 +640,7 @@ async fn batch_keeps_first_successful_safe_model_as_preference() {
         success("two"),
         success("three"),
     ]);
-    let app = Application::new(
-        Arc::new(f.store.clone()),
-        client(server.url().to_owned()),
-        || 1_700_000_000,
-    );
+    let app = Application::new(Arc::new(f.store.clone()), client(server.url().to_owned()));
     let report = app
         .generate_marked(&request(Source::OpenRouter))
         .await

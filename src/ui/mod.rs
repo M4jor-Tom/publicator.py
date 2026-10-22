@@ -129,8 +129,14 @@ pub enum Message {
     SearchPath(String),
     PromptQueryChanged(String),
     PromptLineageChanged(String),
-    SearchFinished(Result<Vec<Candidate>, String>),
-    PromptSearchFinished(Result<SearchMatches, String>),
+    SearchFinished {
+        request_id: u64,
+        result: Result<Vec<Candidate>, String>,
+    },
+    PromptSearchFinished {
+        request_id: u64,
+        result: Result<SearchMatches, String>,
+    },
     PreviewFinished {
         source: std::path::PathBuf,
         result: Result<std::path::PathBuf, String>,
@@ -291,6 +297,7 @@ pub struct App {
     pending_jump: Option<String>,
     revealed_publication: Option<String>,
     started: Instant,
+    search_request_id: u64,
     search_limit: usize,
     search_paths: Vec<String>,
     prompt_query: String,
@@ -376,6 +383,7 @@ impl App {
             pending_jump: None,
             revealed_publication: None,
             started: Instant::now(),
+            search_request_id: 0,
             search_limit: 25,
             search_paths: application.store().config().publicable.clone(),
             prompt_query: String::new(),
@@ -569,6 +577,16 @@ impl App {
         ])
     }
 
+    fn next_search_request(&mut self) -> u64 {
+        self.search_request_id = self.search_request_id.wrapping_add(1);
+        self.search_request_id
+    }
+
+    fn reload_task(&mut self) -> Task<Message> {
+        self.next_search_request();
+        Self::load_task(self.application.clone())
+    }
+
     fn publish_locks_task(application: Arc<CoreApplication>) -> Task<Message> {
         Task::perform(
             async move {
@@ -629,6 +647,7 @@ impl App {
                 }
             }
             Message::LoadFinished(Err(error)) => {
+                self.next_search_request();
                 self.publications = None;
                 self.load_error = Some(error);
                 self.search_authorized = false;
@@ -873,7 +892,7 @@ impl App {
                     Ok(message) => message,
                     Err(error) => format!("Generation failed: {error}"),
                 });
-                return Self::load_task(self.application.clone());
+                return self.reload_task();
             }
             Message::DescriptionAction { uuid, action } => {
                 if self.busy_uuids.contains(&uuid) {
@@ -1067,7 +1086,7 @@ impl App {
                 }
                 self.publish_locks = None;
                 self.publish_lock_error = Some("Refreshing publication and receipt state".into());
-                return Self::load_task(self.application.clone());
+                return self.reload_task();
             }
             Message::OptionPriceChanged { uuid, value } => {
                 self.publish_keyboard_mode = false;
@@ -1156,7 +1175,7 @@ impl App {
                     self.pending_close = false;
                     return iced::exit();
                 }
-                return Self::load_task(self.application.clone());
+                return self.reload_task();
             }
             Message::ReconcileUrlChanged { attempt_id, value } => {
                 self.publish_keyboard_mode = false;
@@ -1210,7 +1229,7 @@ impl App {
                     Ok(()) => format!("Reconciled publish attempt {attempt_id}"),
                     Err(error) => format!("Reconciliation refused; receipt retained: {error}"),
                 });
-                return Self::load_task(self.application.clone());
+                return self.reload_task();
             }
             Message::OpenActualUrl(url) => {
                 let opener = self.url_opener;
@@ -1272,36 +1291,53 @@ impl App {
                 if self.any_dirty() || self.publish_options.values().any(|options| options.dirty) {
                     self.result = Some("Save or explicitly discard drafts before refresh.".into());
                 } else {
-                    return Self::load_task(self.application.clone());
+                    return self.reload_task();
                 }
             }
             Message::RetrySave => return self.save_next_dirty(),
             Message::SearchLimit(limit) => {
-                if [0, 25, 50, 75, 100].contains(&limit) {
+                if [0, 25, 50, 75, 100].contains(&limit) && self.search_limit != limit {
+                    self.next_search_request();
                     self.search_limit = limit;
                 }
             }
             Message::SearchPath(path) => {
                 if self.search_paths.contains(&path) {
+                    self.next_search_request();
                     self.search_paths.retain(|p| p != &path);
                 } else if self.application.store().config().publicable.contains(&path) {
+                    self.next_search_request();
                     self.search_paths.push(path);
                 }
             }
-            Message::PromptQueryChanged(query) => self.prompt_query = query,
-            Message::PromptLineageChanged(lineage) => self.prompt_lineage = lineage,
+            Message::PromptQueryChanged(query) => {
+                if self.prompt_query != query {
+                    self.next_search_request();
+                    self.prompt_query = query;
+                }
+            }
+            Message::PromptLineageChanged(lineage) => {
+                if self.prompt_lineage != lineage {
+                    self.next_search_request();
+                    self.prompt_lineage = lineage;
+                }
+            }
             Message::Search => {
                 if self.search_authorized {
+                    let request_id = self.next_search_request();
                     if self.prompt_archive.is_some()
                         && (!self.prompt_query.trim().is_empty()
                             || !self.prompt_lineage.trim().is_empty())
                     {
-                        return pick::prompt_search_task(self);
+                        return pick::prompt_search_task(self, request_id);
                     }
-                    return pick::search_task(self);
+                    return pick::search_task(self, request_id);
                 }
             }
-            Message::SearchFinished(Ok(candidates)) => {
+            Message::SearchFinished {
+                request_id,
+                result: Ok(candidates),
+            } if request_id == self.search_request_id && self.search_authorized => {
                 self.prompt_search = None;
                 self.set_candidates(candidates);
                 self.result = Some(
@@ -1316,7 +1352,10 @@ impl App {
                 );
                 return Task::batch([pick::preview_tasks(self, 0, 4), prompt_tasks(self)]);
             }
-            Message::PromptSearchFinished(Ok(matches)) => {
+            Message::PromptSearchFinished {
+                request_id,
+                result: Ok(matches),
+            } if request_id == self.search_request_id && self.search_authorized => {
                 let candidates = matches
                     .exact
                     .iter()
@@ -1377,18 +1416,27 @@ impl App {
             Message::DescribePreviewFinished { uuid, result } => {
                 self.describe_previews.insert(uuid, Some(result));
             }
-            Message::SearchFinished(Err(error)) => {
+            Message::SearchFinished {
+                request_id,
+                result: Err(error),
+            } if request_id == self.search_request_id && self.search_authorized => {
                 self.result = Some(format!("Search failed: {error}"))
             }
-            Message::PromptSearchFinished(Err(error)) => {
+            Message::PromptSearchFinished {
+                request_id,
+                result: Err(error),
+            } if request_id == self.search_request_id && self.search_authorized => {
                 self.result = Some(format!("Prompt search failed: {error}"))
+            }
+            Message::SearchFinished { .. } | Message::PromptSearchFinished { .. } => {
+                return Task::none();
             }
             Message::Pick(candidate) => return pick::pick_task(self, candidate),
             Message::PickFinished(Ok(())) => {
                 self.busy = false;
                 self.active_tab = Tab::Schedule;
                 self.result = Some("Picked candidate".into());
-                return Self::load_task(self.application.clone());
+                return self.reload_task();
             }
             Message::PickFinished(Err(error)) => {
                 self.busy = false;
@@ -1410,7 +1458,7 @@ impl App {
                 match result {
                     Ok(()) => {
                         self.result = Some(message);
-                        return Self::load_task(self.application.clone());
+                        return self.reload_task();
                     }
                     Err(error) => self.result = Some(format!("{message}: {error}")),
                 }
@@ -2005,6 +2053,12 @@ impl App {
             return Task::none();
         }
         let ids = self.marked_generation_ids();
+        if ids.is_empty() {
+            return Task::none();
+        }
+        if self.source == Source::Local {
+            return self.local_fit_task(None, Some(ids), true);
+        }
         if ids
             .iter()
             .any(|id| self.drafts.get(id).is_some_and(Draft::is_dirty))
@@ -2012,12 +2066,6 @@ impl App {
             self.pending_generation_install = false;
             self.pending_generation = Some(String::new());
             return self.save_next_dirty();
-        }
-        if ids.is_empty() {
-            return Task::none();
-        }
-        if self.source == Source::Local {
-            return self.local_fit_task(None, Some(ids), true);
         }
         self.start_generation(None, false, None)
     }
@@ -2359,7 +2407,7 @@ mod tests {
             Endpoints::default(),
             "llmfit".into(),
         );
-        let application = Arc::new(CoreApplication::new(store, metadata, || 0));
+        let application = Arc::new(CoreApplication::new(store, metadata));
         (
             App {
                 application,
@@ -2379,6 +2427,7 @@ mod tests {
                 pending_jump: None,
                 revealed_publication: None,
                 started: Instant::now(),
+                search_request_id: 0,
                 search_limit: 25,
                 search_paths: Vec::new(),
                 prompt_query: String::new(),
@@ -2635,13 +2684,74 @@ mod tests {
     }
 
     #[test]
+    fn reverse_search_completions_cannot_restore_stale_candidates_or_errors() {
+        let (mut app, root) = app();
+        let prompt_config = PromptConfig {
+            repo: "missing-prompts".into(),
+            filename: r"(?P<version>.+)".into(),
+            version_hash: "sha256".into(),
+        };
+        app.prompt_archive = Some(Arc::new(
+            crate::prompts::PromptArchive::new(root.path(), &prompt_config).unwrap(),
+        ));
+        let stale = Candidate {
+            path: root.path().join("stale.png"),
+            sha512: "a".repeat(128),
+        };
+
+        let _ = app.update(Message::PromptQueryChanged("old prompt".into()));
+        let _old_prompt_search = app.update(Message::Search);
+        let old_request = app.search_request_id;
+        let _ = app.update(Message::PromptQueryChanged(String::new()));
+        let _new_regular_search = app.update(Message::Search);
+        let current_request = app.search_request_id;
+        assert!(current_request > old_request);
+
+        let _ = app.update(Message::SearchFinished {
+            request_id: current_request,
+            result: Ok(Vec::new()),
+        });
+        let current_result = app.result.clone();
+        let _ = app.update(Message::PromptSearchFinished {
+            request_id: old_request,
+            result: Ok(SearchMatches {
+                exact: vec![stale.clone()],
+                ..SearchMatches::default()
+            }),
+        });
+        let _ = app.update(Message::SearchFinished {
+            request_id: old_request,
+            result: Err("stale regular-search error".into()),
+        });
+        assert!(app.candidates.is_empty());
+        assert!(app.prompt_search.is_none());
+        assert_eq!(app.result, current_result);
+
+        let _ = app.update(Message::LoadFinished(Err(
+            "search authorization revoked".into()
+        )));
+        let _ = app.update(Message::SearchFinished {
+            request_id: current_request,
+            result: Ok(vec![stale]),
+        });
+        assert!(app.candidates.is_empty());
+        assert_eq!(
+            app.load_error.as_deref(),
+            Some("search authorization revoked")
+        );
+    }
+
+    #[test]
     fn prompt_search_summary_explains_when_results_are_capped() {
         let (mut app, _root) = app();
-        let _ = app.update(Message::PromptSearchFinished(Ok(SearchMatches {
-            skipped: 3,
-            truncated: true,
-            ..SearchMatches::default()
-        })));
+        let _ = app.update(Message::PromptSearchFinished {
+            request_id: app.search_request_id,
+            result: Ok(SearchMatches {
+                skipped: 3,
+                truncated: true,
+                ..SearchMatches::default()
+            }),
+        });
         assert_eq!(
             app.result.as_deref(),
             Some(
@@ -2668,7 +2778,7 @@ mod tests {
             Endpoints::default(),
             "llmfit".into(),
         );
-        let application = Arc::new(CoreApplication::new(store, metadata, || 0));
+        let application = Arc::new(CoreApplication::new(store, metadata));
         let (app, _) = App::from_application(
             application,
             UiOptions {
@@ -2763,7 +2873,6 @@ mod tests {
                 Endpoints::default(),
                 "llmfit".into(),
             ),
-            || 0,
         ));
         let (mut app, _) = App::from_application(
             application,
@@ -2775,14 +2884,21 @@ mod tests {
         let _ = app.update(Message::LoadFinished(Ok(Vec::new())));
         let _ = app.update(Message::PromptQueryChanged("MOONLIT".into()));
         let result = completion(app.update(Message::Search)).await;
-        let Message::PromptSearchFinished(Ok(matches)) = result else {
+        let Message::PromptSearchFinished {
+            result: Ok(matches),
+            ..
+        } = result
+        else {
             panic!("exact query should complete as prompt search");
         };
         assert_eq!(matches.exact.len(), 1);
         assert_eq!(matches.exact[0].path, exact_path);
         assert!(matches.maybe.is_empty());
         assert_eq!(matches.skipped, 1);
-        let _ = app.update(Message::PromptSearchFinished(Ok(matches)));
+        let _ = app.update(Message::PromptSearchFinished {
+            request_id: app.search_request_id,
+            result: Ok(matches),
+        });
         assert_eq!(app.prompt_query, "MOONLIT");
         assert_eq!(
             app.candidates,
@@ -2792,14 +2908,21 @@ mod tests {
         let _ = app.update(Message::PromptQueryChanged(String::new()));
         let _ = app.update(Message::PromptLineageChanged("lineage/prompt.txt".into()));
         let result = completion(app.update(Message::Search)).await;
-        let Message::PromptSearchFinished(Ok(matches)) = result else {
+        let Message::PromptSearchFinished {
+            result: Ok(matches),
+            ..
+        } = result
+        else {
             panic!("lineage query should complete as prompt search");
         };
         assert_eq!(matches.exact.len(), 1);
         assert_eq!(matches.maybe.len(), 1);
         assert_eq!(matches.maybe[0].path, hinted_path);
         assert_eq!(matches.skipped, 0);
-        let _ = app.update(Message::PromptSearchFinished(Ok(matches)));
+        let _ = app.update(Message::PromptSearchFinished {
+            request_id: app.search_request_id,
+            result: Ok(matches),
+        });
         assert_eq!(
             app.candidates
                 .iter()
@@ -3009,7 +3132,6 @@ done
                     Endpoints::default(),
                     "llmfit".into(),
                 ),
-                || 0,
             )
             .with_publisher(crate::publishing::Publisher::new(
                 worker,

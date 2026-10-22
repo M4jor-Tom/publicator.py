@@ -226,7 +226,7 @@ impl Publisher {
                 batch.push((approved, job));
             }
             self.check_steps().await?;
-            let mut child = start_worker(&self.worker)?;
+            let mut child = start_worker(&self.worker, &store.paths().data_dir)?;
             let process_group = child.id();
             let diagnostics = child.stderr.take().map(|mut stderr| {
                 tokio::spawn(async move {
@@ -618,9 +618,11 @@ fn job_command_valid(job: &PublishJob) -> Result<()> {
     command.validate().map_err(Error::Validation)?;
     encode_line(&command).map(|_| ())
 }
-fn start_worker(path: &Path) -> Result<Child> {
+fn start_worker(path: &Path, data_root: &Path) -> Result<Child> {
     let mut c = Command::new(path);
-    c.stdin(Stdio::piped())
+    c.arg("--data-root")
+        .arg(data_root)
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     #[cfg(unix)]
@@ -714,6 +716,27 @@ mod timeout_tests {
     use std::{os::unix::fs::PermissionsExt, sync::Arc};
 
     #[tokio::test]
+    async fn worker_launch_binds_store_data_root_outside_ndjson() {
+        let root = tempfile::tempdir().unwrap();
+        let worker = root.path().join("worker.sh");
+        std::fs::write(&worker, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").unwrap();
+        let mut permissions = std::fs::metadata(&worker).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&worker, permissions).unwrap();
+
+        let output = start_worker(&worker, root.path())
+            .unwrap()
+            .wait_with_output()
+            .await
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            format!("--data-root\n{}\n", root.path().display())
+        );
+    }
+
+    #[tokio::test]
     async fn cleanup_force_kills_worker_that_ignores_termination() {
         let root = tempfile::tempdir().unwrap();
         let image = root.path().join("art.png");
@@ -754,7 +777,6 @@ mod timeout_tests {
                 },
                 "llmfit".into(),
             ),
-            || 0,
         );
         let worker = root.path().join("worker.sh");
         let pid_file = root.path().join("pid");
@@ -833,7 +855,6 @@ done"#, pid_file.display())).unwrap();
                 },
                 "llmfit".into(),
             ),
-            || 0,
         );
         let worker = root.path().join("worker.sh");
         std::fs::write(&worker, "#!/bin/sh\n[ \"$1\" = \"--check-steps\" ] && exit 0\nIFS= read -r open || exit 1\nsleep 10\n").unwrap();
@@ -901,7 +922,6 @@ done"#, pid_file.display())).unwrap();
                 },
                 "llmfit".into(),
             ),
-            || 0,
         );
         let worker = root.path().join("worker.sh");
         std::fs::write(&worker, "#!/bin/sh\n[ \"$1\" = \"--check-steps\" ] && exit 0\nIFS= read -r open || exit 1\necho '{\"protocol\":1,\"type\":\"ready\"}'\nIFS= read -r submit || exit 1\nsleep 10\n").unwrap();
@@ -983,7 +1003,6 @@ done"#, pid_file.display())).unwrap();
                 },
                 "llmfit".into(),
             ),
-            || 0,
         );
         let worker = root.path().join("worker.sh");
         std::fs::write(&worker, "#!/bin/sh\n[ \"$1\" = \"--check-steps\" ] && exit 0\nIFS= read -r open || exit 1\necho '{\"protocol\":1,\"type\":\"ready\"}'\nsleep 10\n").unwrap();
@@ -1068,7 +1087,6 @@ done"#, pid_file.display())).unwrap();
                 },
                 "llmfit".into(),
             ),
-            || 0,
         );
         let calls = root.path().join("calls.log");
         let worker = root.path().join("worker.sh");

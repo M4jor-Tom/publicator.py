@@ -22,25 +22,28 @@ struct Args {
     ai_timeout: u64,
 }
 
+fn gui_metadata_endpoints() -> Endpoints {
+    Endpoints::default()
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let paths = Paths::resolve(args.data_dir.as_deref(), args.json.as_deref())?;
     let config = Config::load(&paths.data_dir)?;
     let store = Arc::new(Store::new(paths, config)?);
-    let mut endpoints = Endpoints::default();
-    if let Some(ollama) = std::env::var_os("PUBLICATOR_OLLAMA_URL") {
-        endpoints.ollama = ollama.to_string_lossy().into_owned();
-    }
-    let metadata = MetadataClient::new(reqwest::Client::new(), endpoints, PathBuf::from("llmfit"));
+    let metadata = MetadataClient::new(
+        reqwest::Client::new(),
+        gui_metadata_endpoints(),
+        PathBuf::from("llmfit"),
+    );
     let worker = std::env::var_os("PUBLICATOR_WORKER")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("python/publicator_da/worker.py"));
     let skill = std::env::var_os("PUBLICATOR_SKILL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(".claude/skills/publish-deviantart/SKILL.md"));
-    let application = Arc::new(
-        Application::new(store, metadata, unix_now).with_publisher(Publisher::new(worker, skill)),
-    );
+    let application =
+        Arc::new(Application::new(store, metadata).with_publisher(Publisher::new(worker, skill)));
     Ok(publicator::ui::run(
         application,
         UiOptions {
@@ -50,9 +53,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?)
 }
 
-fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
+#[cfg(test)]
+mod tests {
+    use super::gui_metadata_endpoints;
+
+    #[test]
+    fn gui_ignores_inherited_cli_ollama_endpoint_override() {
+        let previous = std::env::var_os("PUBLICATOR_OLLAMA_URL");
+        unsafe {
+            std::env::set_var("PUBLICATOR_OLLAMA_URL", "http://127.0.0.1:1");
+        }
+        let ollama = gui_metadata_endpoints().ollama;
+        unsafe {
+            if let Some(previous) = previous {
+                std::env::set_var("PUBLICATOR_OLLAMA_URL", previous);
+            } else {
+                std::env::remove_var("PUBLICATOR_OLLAMA_URL");
+            }
+        }
+        assert_eq!(ollama, "http://localhost:11434");
+    }
 }

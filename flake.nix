@@ -71,7 +71,7 @@
       rustDesktop = wrapRustProgram {
         package = rustDesktopUnwrapped;
         binary = "publicator-ui";
-        runtime = rustRuntime ++ [ pkgs.ollama ];
+        runtime = rustRuntime;
         libraries = desktopRuntime;
       };
       rustCommand = name: subcommand: extra: {
@@ -135,7 +135,7 @@
             '';
           }}/bin/pw-daemon";
         };
-        generate-meta = rustCommand "generate-meta" "generate-meta" [ pkgs.ollama pkgs.llmfit pkgs.imagemagick ];
+        generate-meta = rustCommand "generate-meta" "generate-meta" [ pkgs.llmfit pkgs.imagemagick ];
         vision-models = rustCommand "vision-models" "vision-models" [ pkgs.llmfit ];
         validate = rustCommand "validate" "validate" [ ];
         echo-first = rustCommand "echo-first" "echo-first" [ ];

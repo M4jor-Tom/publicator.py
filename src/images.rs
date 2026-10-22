@@ -6,10 +6,11 @@ use openssl::hash::{Hasher, MessageDigest};
 use serde_json::Value;
 use std::{
     collections::HashSet,
-    fs::{self, File},
+    fs::{self, File, Metadata},
     io::Read,
     path::{Path, PathBuf},
     process::Command,
+    time::SystemTime,
 };
 use tempfile::Builder;
 
@@ -29,6 +30,39 @@ pub struct Candidate {
 pub struct PreparedImage {
     pub path: PathBuf,
     pub mime: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FileIdentity {
+    len: u64,
+    modified: Option<SystemTime>,
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+}
+
+pub(crate) fn file_identity(path: &Path) -> Result<FileIdentity> {
+    let metadata = fs::metadata(path)?;
+    if !metadata.is_file() {
+        return Err(Error::InvalidState(
+            "candidate is not a regular file".into(),
+        ));
+    }
+    Ok(file_identity_from_metadata(&metadata))
+}
+
+fn file_identity_from_metadata(metadata: &Metadata) -> FileIdentity {
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+    FileIdentity {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+        #[cfg(unix)]
+        dev: metadata.dev(),
+        #[cfg(unix)]
+        ino: metadata.ino(),
+    }
 }
 
 pub fn file_sha512(path: &Path) -> Result<String> {
@@ -330,6 +364,16 @@ pub fn prepare_upload(source: &Path, attempt_dir: &Path) -> Result<PathBuf> {
 }
 
 pub fn delete_candidate(store: &Store, authorized: &[Candidate], path: &Path) -> Result<()> {
+    delete_candidate_with_hooks(store, authorized, path, || {}, || {})
+}
+
+pub(crate) fn delete_candidate_with_hooks(
+    store: &Store,
+    authorized: &[Candidate],
+    path: &Path,
+    after_hash: impl FnOnce(),
+    before_unlink: impl FnOnce(),
+) -> Result<()> {
     let candidate = authorized
         .iter()
         .find(|candidate| candidate.path == path)
@@ -357,40 +401,35 @@ pub fn delete_candidate(store: &Store, authorized: &[Candidate], path: &Path) ->
             path.display()
         )));
     }
+    let identity = file_identity(path)?;
     let current_sha = file_sha512(path)?;
-    if current_sha != candidate.sha512 {
+    if current_sha != candidate.sha512 || file_identity(path)? != identity {
         return Err(Error::InvalidState(
             "candidate changed since authorization".into(),
         ));
     }
+    after_hash();
     let basename = path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or_default();
-    let rows = store.read()?;
-    if published_hashes(&rows).contains(&current_sha) {
-        return Err(Error::InvalidState(format!(
-            "referenced artwork cannot be deleted: {basename}"
-        )));
-    }
-    for row in rows {
-        for key in ["files", "previewFilesIfNotFree"] {
-            if let Some(files) = row.get(key).and_then(Value::as_array) {
-                for file in files {
-                    let referenced_name = file.get("basename").and_then(Value::as_str);
-                    if referenced_name == Some(basename)
-                        || file.get("fileName").and_then(Value::as_str) == Some(basename)
-                    {
-                        return Err(Error::InvalidState(format!(
-                            "referenced artwork cannot be deleted: {basename}"
-                        )));
-                    }
-                }
-            }
+    store.with_exclusive_read(|rows| {
+        if file_identity(path)? != identity {
+            return Err(Error::InvalidState(
+                "candidate changed since authorization".into(),
+            ));
         }
-    }
-    fs::remove_file(path)?;
-    Ok(())
+        if published_hashes(rows).contains(&current_sha)
+            || published_basenames(rows).contains(basename)
+        {
+            return Err(Error::InvalidState(format!(
+                "referenced artwork cannot be deleted: {basename}"
+            )));
+        }
+        before_unlink();
+        fs::remove_file(path)?;
+        Ok(())
+    })
 }
 
 pub fn index_by_basename(root: &Path) -> Result<std::collections::HashMap<String, PathBuf>> {

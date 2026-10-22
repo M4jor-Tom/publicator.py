@@ -165,9 +165,7 @@ impl MetadataClient {
                     .lock()
                     .unwrap()
                     .insert(model.to_owned());
-                let mut retry = json!({"model":model,"messages":[{"role":"user","content":[{"type":"text","text":format!("{} Return JSON matching this shape: {}",metadata_prompt(),title_description_schema())},{"type":"image_url","image_url":{"url":data_url}}]}]});
-                // Deliberately no response_format for the one schema recovery attempt.
-                retry.as_object_mut().unwrap().remove("response_format");
+                let retry = json!({"model":model,"messages":[{"role":"user","content":[{"type":"text","text":format!("{} Return JSON matching this shape: {}",metadata_prompt(),title_description_schema())},{"type":"image_url","image_url":{"url":data_url}}]}]});
                 self.bounded(send(retry), deadline, &[key.as_str(), data_url.as_str()])
                     .await?
             }

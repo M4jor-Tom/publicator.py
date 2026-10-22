@@ -42,7 +42,6 @@ async fn publish_checkbox_persists_registered_target_through_ui_task() {
             Endpoints::default(),
             "llmfit".into(),
         ),
-        || 0,
     ));
     let (mut app, _) = App::from_application(
         application,
@@ -114,7 +113,6 @@ async fn publish_dispatch_rejects_a_stale_saved_cell_set_before_worker_start() {
                 Endpoints::default(),
                 "llmfit".into(),
             ),
-            || 0,
         )
         .with_publisher(Publisher::new(
             root.path().join("no-worker"),
@@ -296,7 +294,6 @@ fn publishing_ui_app(
                 },
                 "llmfit".into(),
             ),
-            || 0,
         )
         .with_publisher(Publisher::new(worker.to_owned(), f.path("skill.md"))),
     );
@@ -369,7 +366,6 @@ fn options_app() -> (
             Endpoints::default(),
             "llmfit".into(),
         ),
-        || 0,
     ));
     let (mut app, _) = App::from_application(
         application,
@@ -760,7 +756,23 @@ async fn publish_options_ui_persists_plural_allow_lists_zero_and_clear() {
         value: "Featured".into(),
         selected: true,
     });
-    dispatch_options_message(&mut app, Message::SaveOptions(uuid.clone())).await;
+    let first_save_messages =
+        dispatch_options_message(&mut app, Message::SaveOptions(uuid.clone())).await;
+    assert!(
+        first_save_messages
+            .iter()
+            .any(|message| matches!(message, Message::OptionsSaved { result: Ok(()), .. }))
+    );
+    assert!(
+        first_save_messages
+            .iter()
+            .any(|message| matches!(message, Message::LoadFinished(Ok(_))))
+    );
+    assert!(
+        first_save_messages
+            .iter()
+            .any(|message| matches!(message, Message::PublishStatusesFinished(Ok(_))))
+    );
     let saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&store.paths().json).unwrap()).unwrap();
     assert_eq!(saved[0]["apparitions"][0]["priceIfNotFree"], 0.0);
@@ -777,10 +789,20 @@ async fn publish_options_ui_persists_plural_allow_lists_zero_and_clear() {
         uuid: uuid.clone(),
         value: String::new(),
     });
-    dispatch_options_message(&mut app, Message::SaveOptions(uuid)).await;
-    let cleared: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&store.paths().json).unwrap()).unwrap();
-    assert!(cleared[0]["apparitions"][0].get("priceIfNotFree").is_none());
+    let clear_messages = dispatch_options_message(&mut app, Message::SaveOptions(uuid)).await;
+    assert!(
+        clear_messages
+            .iter()
+            .any(|message| matches!(message, Message::OptionsSaved { result: Ok(()), .. })),
+        "cleared option edit was not admitted; task messages: {clear_messages:?}"
+    );
+    let cleared_bytes = std::fs::read(&store.paths().json).unwrap();
+    let cleared: serde_json::Value = serde_json::from_slice(&cleared_bytes).unwrap();
+    assert!(
+        cleared[0]["apparitions"][0].get("priceIfNotFree").is_none(),
+        "clear task messages: {clear_messages:?}; persisted bytes: {}",
+        String::from_utf8_lossy(&cleared_bytes)
+    );
     let _ = app.update(Message::LoadFinished(Ok(store.read().unwrap())));
     let _: iced::Element<'_, Message> = publicator::ui::publish::view(&app);
 }
@@ -1555,7 +1577,6 @@ async fn actual_url_message_dispatches_valid_http_url_and_refuses_invalid_full_u
             Endpoints::default(),
             "llmfit".into(),
         ),
-        || 0,
     ));
     let (mut app, init) = App::from_application_with_url_opener(
         application,
@@ -1659,7 +1680,6 @@ async fn configured_prompt_archive_resolves_pick_and_calendar_off_thread_and_mis
             Endpoints::default(),
             "llmfit".into(),
         ),
-        || 0,
     ));
     let (mut app, init) = App::from_application(
         application,
@@ -1676,7 +1696,14 @@ async fn configured_prompt_archive_resolves_pick_and_calendar_off_thread_and_mis
             sha512: publicator::images::file_sha512(path).unwrap(),
         })
         .collect();
-    dispatch_ui_message(&mut app, Message::SearchFinished(Ok(candidates))).await;
+    dispatch_ui_message(
+        &mut app,
+        Message::SearchFinished {
+            request_id: 0,
+            result: Ok(candidates),
+        },
+    )
+    .await;
     assert!(
         matches!(app.prompt_match(&exact_path), Some(PromptMatch::Exact(version)) if version.text == "exact <prompt>\nline two")
     );

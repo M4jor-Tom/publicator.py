@@ -1,10 +1,11 @@
+import argparse
 import json
 import logging
 import re
 import sys
 from pathlib import Path
 
-from .browser import BrowserSession
+from .browser import BrowserSession, validate_profiles
 
 MAX_LINE = 1024 * 1024
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -17,7 +18,7 @@ def _read_line(stream):
     return line
 
 
-def _validate(command):
+def _validate(command, data_root):
     if not isinstance(command, dict) or type(command.get("protocol")) is not int or command.get("protocol") != 1:
         raise ValueError("unsupported protocol")
     kind = command.get("type")
@@ -31,6 +32,7 @@ def _validate(command):
     if kind == "open":
         if not all(isinstance(command[k], str) and command[k] for k in ("login_profile", "work_profile", "timezone")) or not isinstance(command["headless"], bool):
             raise ValueError("invalid open command types")
+        validate_profiles(data_root, Path(command["login_profile"]), Path(command["work_profile"]))
     if kind == "submit":
         if not all(isinstance(command[k], str) for k in ("attempt_id", "uuid", "title", "description", "image_path")):
             raise ValueError("invalid submit command types")
@@ -63,23 +65,30 @@ def _emit(stream, event):
     stream.flush()
 
 
-def serve(stdin, stdout, session_factory=BrowserSession):
+def serve(stdin, stdout, data_root, session_factory=None):
     session = None
     try:
+        if session_factory is None:
+            session_factory = BrowserSession
+        if data_root is None:
+            raise ValueError("worker startup requires a trusted data root")
+        data_root = Path(data_root).resolve()
+        if not data_root.is_dir():
+            raise ValueError("trusted data root must be a directory")
         line = _read_line(stdin)
         if not line:
             return 1
         command = json.loads(line)
-        if _validate(command) != "open":
+        if _validate(command, data_root) != "open":
             raise ValueError("first command must open session")
-        session = session_factory(command)
+        session = session_factory(command, data_root)
         _emit(stdout, {"protocol": 1, "type": "ready"})
         while True:
             line = _read_line(stdin)
             if not line:
                 raise ValueError("unexpected end of protocol stream")
             command = json.loads(line)
-            kind = _validate(command)
+            kind = _validate(command, data_root)
             if kind == "close":
                 return 0
             if kind != "submit":
@@ -107,7 +116,6 @@ def serve(stdin, stdout, session_factory=BrowserSession):
 
 def main():
     if sys.argv[1:] and sys.argv[1] == "--check-steps":
-        import argparse
         parser = argparse.ArgumentParser()
         parser.add_argument("--check-steps", action="store_true")
         parser.add_argument("--skill", required=True)
@@ -118,7 +126,10 @@ def main():
             return 1
         from publicator_da.browser import STEPS, check_steps
         return 0 if check_steps(skill, STEPS) else 1
-    return serve(sys.stdin, sys.stdout)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data-root", required=True, type=Path)
+    args = parser.parse_args()
+    return serve(sys.stdin, sys.stdout, args.data_root)
 
 
 if __name__ == "__main__":
