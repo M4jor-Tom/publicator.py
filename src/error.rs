@@ -22,6 +22,8 @@ pub enum Error {
     Provider(String),
     #[error("protocol error: {0}")]
     Protocol(String),
+    #[error("prompt archive unavailable: {0}")]
+    PromptArchiveUnavailable(String),
     #[error(
         "publication database commit at {path} may be visible but is not confirmed durable; refresh before retrying: {source}"
     )]

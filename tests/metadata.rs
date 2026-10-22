@@ -23,6 +23,13 @@ fn parses_fenced_pair_but_not_partial_metadata() {
 }
 
 #[test]
+fn metadata_parser_accepts_short_literal_description_markup() {
+    let parsed = parse_metadata(r#"{"title":"T","description":"x {literal} ```"}"#).unwrap();
+    assert_eq!(parsed.title, "T");
+    assert_eq!(parsed.description, "x {literal} ```");
+}
+
+#[test]
 fn metadata_requires_string_pair_and_valid_title() {
     for input in [
         r#"{"title":7,"description":"D"}"#,

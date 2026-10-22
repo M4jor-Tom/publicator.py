@@ -25,6 +25,7 @@ fn registry_and_select_all_add_only_deviantart_in_one_mutation() {
     f.write(json!([row(1, "DESCRIBED"), row(2, "SCHEDULED")]));
     assert_eq!(REGISTERED_PLATFORMS, &["deviantart"]);
     select(&f.store, None, None, true).unwrap();
+    select(&f.store, Some(&id(1)), Some("deviantart"), true).unwrap();
     let saved = f.read();
     assert_eq!(
         saved[0]["apparitions"],
@@ -64,12 +65,45 @@ fn selection_reopens_appeared_and_successful_cell_is_immutable() {
 fn new_pending_target_reopens_appeared() {
     let f = Fixture::new();
     let mut p = row(1, "APPEARED");
-    p["apparitions"] = json!([
-        {"platformName":"pixiv","state":"published_or_scheduled"}
-    ]);
+    let historical = json!({
+        "platformName":"pixiv",
+        "state":"published_or_scheduled",
+        "url":"https://pixiv.example/art/old",
+        "priceIfNotFree":4.0
+    });
+    p["apparitions"] = json!([historical.clone()]);
     f.write(json!([p]));
     select(&f.store, Some(&id(1)), Some("deviantart"), true).unwrap();
-    assert_eq!(f.read()[0]["state"], "DESCRIBED");
+    let saved = f.read();
+    assert_eq!(saved[0]["state"], "DESCRIBED");
+    assert_eq!(
+        saved[0]["apparitions"],
+        json!([
+            historical,
+            {"platformName":"deviantart","state":"unpublished"}
+        ])
+    );
+}
+
+#[test]
+fn deselect_all_removes_only_the_pending_target_and_restores_appeared() {
+    let f = Fixture::new();
+    let mut p = row(1, "DESCRIBED");
+    let historical = json!({
+        "platformName":"pixiv",
+        "state":"published_or_scheduled",
+        "url":"https://pixiv.example/art/old",
+        "options":"preserved"
+    });
+    p["apparitions"] = json!([
+        historical.clone(),
+        {"platformName":"deviantart","state":"unpublished"}
+    ]);
+    f.write(json!([p]));
+    select(&f.store, None, None, false).unwrap();
+    let saved = f.read();
+    assert_eq!(saved[0]["state"], "APPEARED");
+    assert_eq!(saved[0]["apparitions"], json!([historical]));
 }
 
 #[test]

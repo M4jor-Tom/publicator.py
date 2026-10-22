@@ -110,6 +110,13 @@ fn preset_and_suggested_edits_clear_manual_pin_and_reallocate() {
     publication["apparitionTimestampIfDifferentThanSubmission"] = json!(1_800_000_000);
     publication["scheduleIsManual"] = json!(true);
     publication["scheduleProfile"] = json!("removed-profile");
+    let historical = json!({
+        "platformName":"pixiv",
+        "state":"unpublished",
+        "url":"https://pixiv.example/art/old",
+        "extra":"preserved"
+    });
+    publication["apparitions"] = json!([historical.clone()]);
     f.write(json!([publication]));
     edit_date(
         &f.store,
@@ -125,10 +132,12 @@ fn preset_and_suggested_edits_clear_manual_pin_and_reallocate() {
         preset["apparitionTimestampIfDifferentThanSubmission"],
         1_800_000_000
     );
+    assert_eq!(preset["apparitions"], json!([historical.clone()]));
     edit_date(&f.store, &common::id(1), DateEdit::Suggested, 1_700_000_000).unwrap();
     let suggested = &f.store.read().unwrap()[0];
     assert_eq!(suggested["scheduleProfile"], "default");
     assert_eq!(suggested["scheduleIsManual"], false);
+    assert_eq!(suggested["apparitions"], json!([historical]));
 }
 
 #[test]

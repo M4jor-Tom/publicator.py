@@ -47,6 +47,49 @@ def test_work_profile_copy_dereferences_symlinks(tmp_path, monkeypatch):
         session.close()
 
 
+def test_browser_without_cookie_database_passes_no_cookies(tmp_path, monkeypatch):
+    import sys
+    from types import ModuleType
+
+    source, work = tmp_path / "login", tmp_path / "work"
+    source.mkdir()
+    (source / "prefs.js").write_text("disposable profile")
+    calls = {}
+
+    class Page:
+        url = "https://www.deviantart.com/studio?new=1"
+        def goto(self, *args, **kwargs): pass
+        def wait_for_timeout(self, ms): pass
+
+    class Context:
+        pages = [Page()]
+        def add_cookies(self, cookies): calls["cookies"] = cookies
+        def close(self): pass
+
+    context = Context()
+    playwright = SimpleNamespace(
+        firefox=SimpleNamespace(
+            launch_persistent_context=lambda *args, **kwargs: context
+        ),
+        stop=lambda: None,
+    )
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", ModuleType("playwright.sync_api"))
+    sys.modules["playwright.sync_api"].sync_playwright = lambda: SimpleNamespace(
+        start=lambda: playwright
+    )
+
+    session = browser.BrowserSession({
+        "login_profile": str(source),
+        "work_profile": str(work),
+        "headless": True,
+        "timezone": "Europe/Paris",
+    })
+    try:
+        assert calls["cookies"] == []
+    finally:
+        session.close()
+
+
 def test_browser_setup_passes_headless_timezone_and_reinjects_cookies(tmp_path, monkeypatch):
     source, work = tmp_path / "login", tmp_path / "work"
     source.mkdir()
@@ -116,6 +159,56 @@ def test_steps_parser_detects_skill_drift(tmp_path):
     skill.write_text("### Steps\n1. Connect to site\n2. Submit\n\n### Other\n")
     assert browser.check_steps(skill, ["Connect to site", "Submit"])
     assert not browser.check_steps(skill, ["Connect to site"])
+
+
+def test_submit_selects_every_requested_tier(monkeypatch, tmp_path):
+    selected = []
+
+    class Locator:
+        first = last = None
+
+        def __init__(self): self.first = self.last = self
+        def click(self, *args, **kwargs): pass
+        def fill(self, value): pass
+        def type(self, value, delay=0): pass
+        def count(self): return 0
+        def locator(self, selector): return self
+        def scroll_into_view_if_needed(self): pass
+
+    class Chooser:
+        value = SimpleNamespace(set_files=lambda path: None)
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+
+    class Page:
+        keyboard = SimpleNamespace(press=lambda key: None)
+        def goto(self, *args, **kwargs): pass
+        def get_by_role(self, role, **kwargs): return Locator()
+        def get_by_text(self, text, **kwargs): return Locator()
+        def get_by_label(self, label, **kwargs): return Locator()
+        def locator(self, selector): return Locator()
+        def expect_file_chooser(self, **kwargs): return Chooser()
+        def wait_for_load_state(self, *args, **kwargs): pass
+        def wait_for_timeout(self, ms): pass
+
+    monkeypatch.setattr(browser, "set_checkbox", lambda *args, **kwargs: None)
+    monkeypatch.setattr(browser, "_tag_input", lambda page: Locator())
+    monkeypatch.setattr(browser, "_pick_schedule", lambda *args: None)
+    monkeypatch.setattr(browser, "_pick_combo", lambda _page, _combo, tier: selected.append(tier))
+    browser._submit_entry(
+        Page(),
+        {
+            "image_path": str(tmp_path / "art.png"),
+            "title": "Title",
+            "description": "Description",
+            "tags": [],
+            "schedule": {},
+            "tiers": ["gold", "silver"],
+            "galleries": [],
+        },
+        lambda: None,
+    )
+    assert selected == ["gold", "silver"]
 
 
 def test_submit_skips_unset_premium_tiers_and_galleries(monkeypatch, tmp_path):

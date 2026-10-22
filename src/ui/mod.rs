@@ -12,13 +12,14 @@ use crate::{
     images::Candidate,
     metadata::{GenerationRequest, LocalStatus, ModelOption, Source, VISION_MODELS},
     model::{Phase, phase},
-    prompts::{PromptArchive, PromptMatch},
+    prompts::{PromptArchive, PromptMatch, SearchMatches},
     publish_journal::{AttemptState, AttemptStatus, ReconcileOutcome},
     publishing::{PublishCell, PublishCellOutcome, PublishCellState, PublishCompletion},
     workflow::{self, MetadataPatch},
 };
 use iced::{
     Element, Subscription, Task, Theme,
+    keyboard::{Key, key::Named},
     widget::{button, column, container, row, text},
 };
 use serde_json::Value;
@@ -48,6 +49,35 @@ impl Tab {
         (Self::Publish, "Publish"),
         (Self::Calendar, "Calendar"),
     ];
+}
+
+fn publish_keyboard_event(
+    event: iced::Event,
+    status: iced::event::Status,
+    _window: iced::window::Id,
+) -> Option<Message> {
+    let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+        key: Key::Named(key),
+        modifiers,
+        repeat: false,
+        ..
+    }) = event
+    else {
+        return None;
+    };
+    if status == iced::event::Status::Captured {
+        return Some(Message::PublishKeyboardExit);
+    }
+    match key {
+        Named::F6 if modifiers.is_empty() => Some(Message::PublishKeyboardToggle),
+        Named::Tab if modifiers.is_empty() => Some(Message::PublishKeyboardNext { reverse: false }),
+        Named::Tab if modifiers == iced::keyboard::Modifiers::SHIFT => {
+            Some(Message::PublishKeyboardNext { reverse: true })
+        }
+        Named::Space if modifiers.is_empty() => Some(Message::PublishKeyboardToggleCell),
+        Named::Escape if modifiers.is_empty() => Some(Message::PublishKeyboardExit),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -97,7 +127,10 @@ pub enum Message {
     Search,
     SearchLimit(usize),
     SearchPath(String),
+    PromptQueryChanged(String),
+    PromptLineageChanged(String),
     SearchFinished(Result<Vec<Candidate>, String>),
+    PromptSearchFinished(Result<SearchMatches, String>),
     PreviewFinished {
         source: std::path::PathBuf,
         result: Result<std::path::PathBuf, String>,
@@ -165,6 +198,12 @@ pub enum Message {
         selected: bool,
     },
     SelectAll(bool),
+    PublishKeyboardToggle,
+    PublishKeyboardNext {
+        reverse: bool,
+    },
+    PublishKeyboardToggleCell,
+    PublishKeyboardExit,
     OptionPriceChanged {
         uuid: String,
         value: String,
@@ -254,6 +293,9 @@ pub struct App {
     started: Instant,
     search_limit: usize,
     search_paths: Vec<String>,
+    prompt_query: String,
+    prompt_lineage: String,
+    prompt_search: Option<SearchMatches>,
     candidates: Vec<Candidate>,
     previews: HashMap<std::path::PathBuf, Option<Result<std::path::PathBuf, String>>>,
     describe_previews: HashMap<String, Option<Result<std::path::PathBuf, String>>>,
@@ -278,6 +320,8 @@ pub struct App {
     publish_active: bool,
     pending_publish: bool,
     publish_options: HashMap<String, PublishOptionsDraft>,
+    publish_keyboard_mode: bool,
+    publish_keyboard_focus: Option<String>,
     publish_locks: Option<HashSet<String>>,
     publish_lock_error: Option<String>,
     publish_attempts: Vec<AttemptStatus>,
@@ -308,8 +352,10 @@ impl App {
         let (prompt_archive, prompt_archive_error) =
             match application.store().config().prompts.as_ref() {
                 Some(config) => {
-                    match PromptArchive::new(&application.store().paths().data_dir, config) {
-                        Ok(archive) => (Some(Arc::new(archive)), None),
+                    match PromptArchive::from_config(&application.store().paths().data_dir, config)
+                    {
+                        Ok(Some(archive)) => (Some(Arc::new(archive)), None),
+                        Ok(None) => (None, None),
                         Err(error) => (None, Some(error.to_string())),
                     }
                 }
@@ -332,6 +378,9 @@ impl App {
             started: Instant::now(),
             search_limit: 25,
             search_paths: application.store().config().publicable.clone(),
+            prompt_query: String::new(),
+            prompt_lineage: String::new(),
+            prompt_search: None,
             candidates: Vec::new(),
             previews: HashMap::new(),
             describe_previews: HashMap::new(),
@@ -355,6 +404,8 @@ impl App {
             publish_active: false,
             pending_publish: false,
             publish_options: HashMap::new(),
+            publish_keyboard_mode: false,
+            publish_keyboard_focus: None,
             publish_locks: None,
             publish_lock_error: None,
             publish_attempts: Vec::new(),
@@ -568,6 +619,7 @@ impl App {
                     }
                 }
                 self.publications = Some(rows);
+                self.refresh_keyboard_publish_focus();
                 self.load_error = None;
                 self.search_authorized = true;
                 self.calendar_preparing = false;
@@ -590,10 +642,12 @@ impl App {
             Message::PublishLocksFinished(Ok(uuids)) => {
                 self.publish_locks = Some(uuids);
                 self.publish_lock_error = None;
+                self.refresh_keyboard_publish_focus();
             }
             Message::PublishLocksFinished(Err(error)) => {
                 self.publish_locks = None;
                 self.publish_lock_error = Some(error);
+                self.refresh_keyboard_publish_focus();
             }
             Message::PublishStatusesFinished(Ok(attempts)) => {
                 self.publish_locks = Some(
@@ -605,6 +659,7 @@ impl App {
                 );
                 self.publish_lock_error = None;
                 self.publish_attempts = attempts;
+                self.refresh_keyboard_publish_focus();
                 if self.pending_close {
                     if self.any_dirty() {
                         return self.save_next_dirty();
@@ -620,6 +675,7 @@ impl App {
                 self.publish_locks = None;
                 self.publish_lock_error = Some(error);
                 self.publish_attempts.clear();
+                self.refresh_keyboard_publish_focus();
                 if self.pending_close {
                     if self.any_dirty() {
                         return self.save_next_dirty();
@@ -632,9 +688,95 @@ impl App {
                 }
             }
             Message::Navigate(tab) => {
+                self.publish_keyboard_mode = false;
+                self.publish_keyboard_focus = None;
                 self.revealed_publication = None;
                 self.pending_jump = None;
                 return self.navigate(tab);
+            }
+            Message::PublishKeyboardToggle => {
+                if self.active_tab != Tab::Publish {
+                    return Task::none();
+                }
+                if self.publish_keyboard_mode {
+                    self.publish_keyboard_mode = false;
+                    self.publish_keyboard_focus = None;
+                } else {
+                    self.publish_keyboard_mode = true;
+                    self.publish_keyboard_focus = self.keyboard_publish_cells().first().cloned();
+                }
+            }
+            Message::PublishKeyboardNext { reverse } => {
+                if !self.publish_keyboard_mode {
+                    return Task::none();
+                }
+                let cells = self.keyboard_publish_cells();
+                if cells.is_empty() {
+                    self.publish_keyboard_focus = None;
+                    return Task::none();
+                }
+                let current = self
+                    .publish_keyboard_focus
+                    .as_ref()
+                    .and_then(|uuid| cells.iter().position(|cell| cell == uuid));
+                let next = match (current, reverse) {
+                    (Some(index), false) => (index + 1) % cells.len(),
+                    (Some(index), true) => (index + cells.len() - 1) % cells.len(),
+                    (None, false) => 0,
+                    (None, true) => cells.len() - 1,
+                };
+                self.publish_keyboard_focus = Some(cells[next].clone());
+            }
+            Message::PublishKeyboardToggleCell => {
+                if !self.publish_keyboard_mode || self.active_tab != Tab::Publish {
+                    return Task::none();
+                }
+                let Some(uuid) = self.publish_keyboard_focus.clone() else {
+                    return Task::none();
+                };
+                if self.busy || self.publish_active || self.selection_locked(Some(&uuid)) {
+                    self.publish_result = Some(format!(
+                        "Cannot change {uuid} — DeviantArt while publishing state is locked"
+                    ));
+                    return Task::none();
+                }
+                let Some(publication) = self.publication(&uuid) else {
+                    self.publish_keyboard_focus = None;
+                    return Task::none();
+                };
+                if !matches!(phase(publication), Ok(Phase::Described | Phase::Appeared)) {
+                    return Task::none();
+                }
+                let apparition = publication
+                    .get("apparitions")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .find(|apparition| {
+                        apparition.get("platformName").and_then(Value::as_str) == Some("deviantart")
+                    });
+                let selected = match apparition
+                    .and_then(|apparition| apparition.get("state"))
+                    .and_then(Value::as_str)
+                {
+                    None => true,
+                    Some("unpublished") => false,
+                    Some("published_or_scheduled") => {
+                        self.publish_result = Some(format!(
+                            "{uuid} — DeviantArt is already successful and locked"
+                        ));
+                        return Task::none();
+                    }
+                    Some(_) => return Task::none(),
+                };
+                return self.update(Message::SelectCell {
+                    key: format!("{uuid}:deviantart"),
+                    selected,
+                });
+            }
+            Message::PublishKeyboardExit => {
+                self.publish_keyboard_mode = false;
+                self.publish_keyboard_focus = None;
             }
             Message::SelectSource(source)
                 if self.pending_local_consent.is_none() && self.pending_generation.is_none() =>
@@ -934,6 +1076,8 @@ impl App {
                 return Self::load_task(self.application.clone());
             }
             Message::OptionPriceChanged { uuid, value } => {
+                self.publish_keyboard_mode = false;
+                self.publish_keyboard_focus = None;
                 if self.options_locked(&uuid) {
                     return Task::none();
                 }
@@ -949,6 +1093,8 @@ impl App {
                 value,
                 selected,
             } => {
+                self.publish_keyboard_mode = false;
+                self.publish_keyboard_focus = None;
                 if self.options_locked(&uuid)
                     || !self.application.store().config().tiers.contains(&value)
                 {
@@ -966,6 +1112,8 @@ impl App {
                 value,
                 selected,
             } => {
+                self.publish_keyboard_mode = false;
+                self.publish_keyboard_focus = None;
                 if self.options_locked(&uuid)
                     || !self.application.store().config().galleries.contains(&value)
                 {
@@ -1017,6 +1165,8 @@ impl App {
                 return Self::load_task(self.application.clone());
             }
             Message::ReconcileUrlChanged { attempt_id, value } => {
+                self.publish_keyboard_mode = false;
+                self.publish_keyboard_focus = None;
                 self.reconcile_urls.insert(attempt_id, value);
             }
             Message::ReconcileAttempt {
@@ -1144,15 +1294,22 @@ impl App {
                     self.search_paths.push(path);
                 }
             }
+            Message::PromptQueryChanged(query) => self.prompt_query = query,
+            Message::PromptLineageChanged(lineage) => self.prompt_lineage = lineage,
             Message::Search => {
                 if self.search_authorized {
+                    if self.prompt_archive.is_some()
+                        && (!self.prompt_query.trim().is_empty()
+                            || !self.prompt_lineage.trim().is_empty())
+                    {
+                        return pick::prompt_search_task(self);
+                    }
                     return pick::search_task(self);
                 }
             }
             Message::SearchFinished(Ok(candidates)) => {
-                self.candidates = candidates;
-                self.pending_delete = None;
-                self.previews.clear();
+                self.prompt_search = None;
+                self.set_candidates(candidates);
                 self.result = Some(
                     if self.candidates.len() == self.search_limit && self.search_limit > 0 {
                         format!(
@@ -1163,6 +1320,29 @@ impl App {
                         format!("Found {} candidates", self.candidates.len())
                     },
                 );
+                return Task::batch([pick::preview_tasks(self, 0, 4), prompt_tasks(self)]);
+            }
+            Message::PromptSearchFinished(Ok(matches)) => {
+                let candidates = matches
+                    .exact
+                    .iter()
+                    .chain(&matches.maybe)
+                    .cloned()
+                    .collect();
+                let summary = format!(
+                    "Prompt search: {} exact, {} lineage hints; {} nearest prompts skipped{}",
+                    matches.exact.len(),
+                    matches.maybe.len(),
+                    matches.skipped,
+                    if matches.truncated {
+                        "; results capped, narrow the query or lineage"
+                    } else {
+                        ""
+                    }
+                );
+                self.prompt_search = Some(matches);
+                self.set_candidates(candidates);
+                self.result = Some(summary);
                 return Task::batch([pick::preview_tasks(self, 0, 4), prompt_tasks(self)]);
             }
             Message::PromptMatchesFinished(matches) => {
@@ -1205,6 +1385,9 @@ impl App {
             }
             Message::SearchFinished(Err(error)) => {
                 self.result = Some(format!("Search failed: {error}"))
+            }
+            Message::PromptSearchFinished(Err(error)) => {
+                self.result = Some(format!("Prompt search failed: {error}"))
             }
             Message::Pick(candidate) => return pick::pick_task(self, candidate),
             Message::PickFinished(Ok(())) => {
@@ -1267,6 +1450,12 @@ impl App {
         Task::none()
     }
 
+    fn set_candidates(&mut self, candidates: Vec<Candidate>) {
+        self.candidates = candidates;
+        self.pending_delete = None;
+        self.previews.clear();
+    }
+
     fn navigate(&mut self, tab: Tab) -> Task<Message> {
         if tab == self.active_tab {
             return Task::none();
@@ -1283,6 +1472,10 @@ impl App {
     }
 
     fn activate_tab(&mut self, tab: Tab, reveal: Option<String>) -> Task<Message> {
+        if tab != Tab::Publish {
+            self.publish_keyboard_mode = false;
+            self.publish_keyboard_focus = None;
+        }
         self.active_tab = tab;
         self.revealed_publication = reveal.clone();
         let mut tasks = vec![match tab {
@@ -1372,6 +1565,55 @@ impl App {
                 Some(uuid) => locks.contains(uuid),
                 None => !locks.is_empty(),
             })
+    }
+
+    fn refresh_keyboard_publish_focus(&mut self) {
+        if !self.publish_keyboard_mode {
+            return;
+        }
+        let cells = self.keyboard_publish_cells();
+        if !self
+            .publish_keyboard_focus
+            .as_ref()
+            .is_some_and(|focus| cells.contains(focus))
+        {
+            self.publish_keyboard_focus = cells.first().cloned();
+        }
+    }
+
+    fn keyboard_publish_cells(&self) -> Vec<String> {
+        if self.busy || self.publish_active {
+            return Vec::new();
+        }
+        publish::ordered_rows(
+            self.publications.as_deref().unwrap_or_default(),
+            self.revealed_publication(),
+        )
+        .into_iter()
+        .filter_map(|publication| {
+            let uuid = publication.get("uuid")?.as_str()?;
+            if !matches!(phase(publication), Ok(Phase::Described | Phase::Appeared))
+                || self.selection_locked(Some(uuid))
+            {
+                return None;
+            }
+            let apparition = publication
+                .get("apparitions")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .find(|apparition| {
+                    apparition.get("platformName").and_then(Value::as_str) == Some("deviantart")
+                });
+            match apparition
+                .and_then(|apparition| apparition.get("state"))
+                .and_then(Value::as_str)
+            {
+                None | Some("unpublished") => Some(uuid.to_owned()),
+                _ => None,
+            }
+        })
+        .collect()
     }
 
     fn options_locked(&self, uuid: &str) -> bool {
@@ -1932,6 +2174,7 @@ impl App {
         Subscription::batch([
             iced::time::every(Duration::from_millis(50)).map(|_| Message::Tick),
             iced::window::close_requests().map(|_| Message::CloseRequested),
+            iced::event::listen_with(publish_keyboard_event),
         ])
     }
 
@@ -2006,6 +2249,9 @@ impl App {
 }
 
 pub(super) fn prompt_tasks(state: &App) -> Task<Message> {
+    if state.prompt_archive.is_none() && state.prompt_archive_error.is_none() {
+        return Task::none();
+    }
     let paths = state
         .candidates
         .iter()
@@ -2105,7 +2351,7 @@ fn tab_name(tab: Tab) -> &'static str {
 mod tests {
     use super::*;
     use crate::{
-        config::{Config, Paths},
+        config::{Config, Paths, PromptConfig, PromptGrammar},
         metadata::{Endpoints, MetadataClient},
         store::Store,
     };
@@ -2141,6 +2387,9 @@ mod tests {
                 started: Instant::now(),
                 search_limit: 25,
                 search_paths: Vec::new(),
+                prompt_query: String::new(),
+                prompt_lineage: String::new(),
+                prompt_search: None,
                 candidates: Vec::new(),
                 previews: HashMap::new(),
                 describe_previews: HashMap::new(),
@@ -2164,6 +2413,8 @@ mod tests {
                 publish_active: false,
                 pending_publish: false,
                 publish_options: HashMap::new(),
+                publish_keyboard_mode: false,
+                publish_keyboard_focus: None,
                 publish_locks: Some(HashSet::new()),
                 publish_lock_error: None,
                 publish_attempts: Vec::new(),
@@ -2182,6 +2433,393 @@ mod tests {
             },
             root,
         )
+    }
+
+    fn key_event(key: Named, modifiers: iced::keyboard::Modifiers) -> iced::Event {
+        iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+            key: Key::Named(key),
+            modified_key: Key::Named(key),
+            physical_key: iced::keyboard::key::Physical::Code(iced::keyboard::key::Code::Tab),
+            location: iced::keyboard::Location::Standard,
+            modifiers,
+            text: None,
+            repeat: false,
+        })
+    }
+
+    #[test]
+    fn publish_keyboard_listener_keeps_captured_editor_keys_and_maps_cell_navigation() {
+        let window = iced::window::Id::unique();
+        assert!(matches!(
+            publish_keyboard_event(
+                key_event(Named::Tab, iced::keyboard::Modifiers::NONE),
+                iced::event::Status::Ignored,
+                window,
+            ),
+            Some(Message::PublishKeyboardNext { reverse: false })
+        ));
+        assert!(matches!(
+            publish_keyboard_event(
+                key_event(Named::Tab, iced::keyboard::Modifiers::SHIFT),
+                iced::event::Status::Ignored,
+                window,
+            ),
+            Some(Message::PublishKeyboardNext { reverse: true })
+        ));
+        assert!(matches!(
+            publish_keyboard_event(
+                key_event(Named::Space, iced::keyboard::Modifiers::NONE),
+                iced::event::Status::Captured,
+                window,
+            ),
+            Some(Message::PublishKeyboardExit)
+        ));
+        assert!(matches!(
+            publish_keyboard_event(
+                key_event(Named::Space, iced::keyboard::Modifiers::NONE),
+                iced::event::Status::Ignored,
+                window,
+            ),
+            Some(Message::PublishKeyboardToggleCell)
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn publish_keyboard_navigation_uses_stable_cells_and_respects_locks() {
+        use iced_runtime::{Action, futures::futures::StreamExt};
+        use serde_json::{Value, json};
+
+        async fn outputs(task: Task<Message>) -> Vec<Message> {
+            let Some(mut actions) = iced_runtime::task::into_stream(task) else {
+                return Vec::new();
+            };
+            let mut messages = Vec::new();
+            while let Some(action) = actions.next().await {
+                if let Action::Output(message) = action {
+                    messages.push(message);
+                }
+            }
+            messages
+        }
+
+        async fn dispatch(app: &mut App, task: Task<Message>) {
+            let mut pending = outputs(task).await;
+            while !pending.is_empty() {
+                let mut next = Vec::new();
+                for message in pending {
+                    next.extend(outputs(app.update(message)).await);
+                }
+                pending = next;
+            }
+        }
+
+        let (mut app, _root) = app();
+        let id = |suffix: u8| format!("00000000-0000-4000-8000-{suffix:012}");
+        let publication = |uuid: String, state: &str, apparitions: Value| {
+            json!({
+                "uuid": uuid,
+                "state": state,
+                "title": "Title",
+                "description": "Description",
+                "submissionTimestamp": 1700000000,
+                "files": [],
+                "apparitions": apparitions,
+            })
+        };
+        let rows = vec![
+            publication(
+                id(1),
+                "DESCRIBED",
+                json!([{"platformName":"deviantart","state":"unpublished"}]),
+            ),
+            publication(id(2), "DESCRIBED", json!([])),
+            publication(
+                id(3),
+                "APPEARED",
+                json!([{"platformName":"deviantart","state":"published_or_scheduled","url":"https://example.test/locked"}]),
+            ),
+            publication(
+                id(4),
+                "DESCRIBED",
+                json!([{"platformName":"deviantart","state":"unpublished"}]),
+            ),
+        ];
+        app.application
+            .store()
+            .mutate(|saved| {
+                *saved = rows.clone();
+                Ok(())
+            })
+            .unwrap();
+        app.publications = Some(rows);
+        app.active_tab = Tab::Publish;
+        app.publish_locks = Some(HashSet::from([id(4)]));
+
+        let _ = app.update(Message::PublishKeyboardToggle);
+        assert!(app.publish_keyboard_mode);
+        assert_eq!(app.publish_keyboard_focus.as_deref(), Some(id(1).as_str()));
+        let _ = app.update(Message::PublishKeyboardNext { reverse: false });
+        assert_eq!(app.publish_keyboard_focus.as_deref(), Some(id(2).as_str()));
+        let _ = app.update(Message::PublishKeyboardNext { reverse: true });
+        assert_eq!(app.publish_keyboard_focus.as_deref(), Some(id(1).as_str()));
+        let _ = app.update(Message::PublishKeyboardNext { reverse: false });
+        assert_eq!(app.publish_keyboard_focus.as_deref(), Some(id(2).as_str()));
+
+        let task = app.update(Message::PublishKeyboardToggleCell);
+        dispatch(&mut app, task).await;
+        let saved = app.application.store().read().unwrap();
+        assert_eq!(saved[1]["apparitions"][0]["state"], "unpublished");
+        assert_eq!(saved[0]["apparitions"][0]["state"], "unpublished");
+        assert_eq!(
+            saved[2]["apparitions"][0]["state"],
+            "published_or_scheduled"
+        );
+        assert_eq!(saved[3]["apparitions"][0]["state"], "unpublished");
+
+        app.publish_locks = Some(HashSet::from([id(1), id(2), id(4)]));
+        let before = std::fs::read(&app.application.store().paths().json).unwrap();
+        let task = app.update(Message::PublishKeyboardToggleCell);
+        assert!(iced_runtime::task::into_stream(task).is_none());
+        assert!(app.publish_result.as_deref().unwrap().contains("locked"));
+        assert_eq!(
+            std::fs::read(&app.application.store().paths().json).unwrap(),
+            before
+        );
+        let _ = app.update(Message::PublishLocksFinished(Ok(HashSet::from([
+            id(1),
+            id(2),
+            id(4),
+        ]))));
+        assert!(app.keyboard_publish_cells().is_empty());
+        assert!(app.publish_keyboard_focus.is_none());
+
+        let _ = app.update(Message::PublishKeyboardExit);
+        assert!(!app.publish_keyboard_mode);
+        assert!(app.publish_keyboard_focus.is_none());
+    }
+
+    #[test]
+    fn disabled_prompt_feature_does_not_resolve_cards_as_unknown() {
+        let (mut app, root) = app();
+        app.candidates.push(Candidate {
+            path: root.path().join("plain.png"),
+            sha512: "0".repeat(128),
+        });
+        assert!(iced_runtime::task::into_stream(prompt_tasks(&app)).is_none());
+        assert!(app.prompt_matches.is_empty());
+    }
+
+    #[test]
+    fn calendar_renders_a_shared_prompt_for_each_apparition_event() {
+        use crate::prompts::PromptVersion;
+
+        let (mut app, _root) = app();
+        let artwork = app.application.store().paths().data_dir.join("shared.png");
+        app.prompt_matches.insert(
+            artwork,
+            PromptMatch::Exact(PromptVersion {
+                digest: "shared-digest".into(),
+                text: "Shared historical prompt".into(),
+                paths: vec!["lineage/prompt.txt".into()],
+                committed: 1,
+            }),
+        );
+        let publication = serde_json::json!({
+            "uuid":"shared-prompt", "state":"APPEARED", "title":"Shared title",
+            "description":"Description", "submissionTimestamp":1,
+            "files":[{"basename":"shared.png"}],
+            "apparitions":[
+                {"platformName":"deviantart","state":"published_or_scheduled"},
+                {"platformName":"pixiv","state":"published_or_scheduled"}
+            ]
+        });
+        let events = crate::calendar::timeline(&[publication]).unwrap();
+        assert_eq!(events.len(), 2);
+        for event in &events {
+            assert!(calendar::event_prompt_view(&app, event).is_some());
+        }
+    }
+
+    #[test]
+    fn prompt_search_summary_explains_when_results_are_capped() {
+        let (mut app, _root) = app();
+        let _ = app.update(Message::PromptSearchFinished(Ok(SearchMatches {
+            skipped: 3,
+            truncated: true,
+            ..SearchMatches::default()
+        })));
+        assert_eq!(
+            app.result.as_deref(),
+            Some(
+                "Prompt search: 0 exact, 0 lineage hints; 3 nearest prompts skipped; results capped, narrow the query or lineage"
+            )
+        );
+    }
+
+    #[test]
+    fn missing_configured_prompt_repo_disables_archive_without_config_error() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::resolve(Some(root.path()), None).unwrap();
+        let config = Config {
+            prompts: Some(PromptConfig {
+                repo: "missing/archive".into(),
+                filename: r"(?P<lineage>.+)_(?P<version>[a-f0-9]+)\.png".into(),
+                version_hash: "sha1".into(),
+            }),
+            ..Config::default()
+        };
+        let store = Arc::new(Store::new(paths, config).unwrap());
+        let metadata = MetadataClient::new(
+            reqwest::Client::new(),
+            Endpoints::default(),
+            "llmfit".into(),
+        );
+        let application = Arc::new(CoreApplication::new(store, metadata, || 0));
+        let (app, _) = App::from_application(
+            application,
+            UiOptions {
+                openrouter_model: None,
+                ai_timeout: Duration::from_secs(300),
+            },
+        );
+        assert!(app.prompt_archive.is_none());
+        assert!(app.prompt_archive_error.is_none());
+        assert!(app.prompt_query.is_empty());
+        assert!(app.prompt_lineage.is_empty());
+        assert!(!root.path().join("missing/archive").exists());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pick_prompt_search_filters_exact_text_and_orders_lineage_hints() {
+        use iced_runtime::{Action, futures::futures::StreamExt};
+
+        async fn completion(task: Task<Message>) -> Message {
+            let mut actions = iced_runtime::task::into_stream(task).expect("search task");
+            while let Some(action) = actions.next().await {
+                if let Action::Output(message) = action {
+                    return message;
+                }
+            }
+            panic!("search task produced no result");
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let archive_dir = root.path().join("archive");
+        let images_dir = root.path().join("picked");
+        std::fs::create_dir_all(&archive_dir).unwrap();
+        std::fs::create_dir_all(&images_dir).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.name", "Test"],
+            vec!["config", "user.email", "test@example.invalid"],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&archive_dir)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        std::fs::create_dir_all(archive_dir.join("lineage")).unwrap();
+        std::fs::write(
+            archive_dir.join("lineage/prompt.txt"),
+            "An archived moonlit garden",
+        )
+        .unwrap();
+        for args in [vec!["add", "."], vec!["commit", "-qm", "fixture"]] {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&archive_dir)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let prompt_config = PromptConfig {
+            repo: "archive".into(),
+            filename: r"(?P<lineage>[^_]+)_(?P<version>[a-f0-9]{40})\.png".into(),
+            version_hash: "sha1".into(),
+        };
+        let digest = PromptGrammar::compile(&prompt_config)
+            .unwrap()
+            .digest(b"An archived moonlit garden")
+            .unwrap();
+        let exact_path = images_dir.join(format!("prompt.txt_{digest}.png"));
+        let hinted_path = images_dir.join(format!("prompt.txt_{}.png", "f".repeat(40)));
+        std::fs::write(&exact_path, b"exact image").unwrap();
+        std::fs::write(&hinted_path, b"unarchived image").unwrap();
+        std::fs::write(images_dir.join("plain.png"), b"unknown image").unwrap();
+
+        let config = Config {
+            publicable: vec!["picked".into()],
+            prompts: Some(prompt_config),
+            ..Config::default()
+        };
+        let store =
+            Arc::new(Store::new(Paths::resolve(Some(root.path()), None).unwrap(), config).unwrap());
+        let application = Arc::new(CoreApplication::new(
+            store,
+            MetadataClient::new(
+                reqwest::Client::new(),
+                Endpoints::default(),
+                "llmfit".into(),
+            ),
+            || 0,
+        ));
+        let (mut app, _) = App::from_application(
+            application,
+            UiOptions {
+                openrouter_model: None,
+                ai_timeout: Duration::from_secs(300),
+            },
+        );
+        let _ = app.update(Message::LoadFinished(Ok(Vec::new())));
+        let _ = app.update(Message::PromptQueryChanged("MOONLIT".into()));
+        let result = completion(app.update(Message::Search)).await;
+        let Message::PromptSearchFinished(Ok(matches)) = result else {
+            panic!("exact query should complete as prompt search");
+        };
+        assert_eq!(matches.exact.len(), 1);
+        assert_eq!(matches.exact[0].path, exact_path);
+        assert!(matches.maybe.is_empty());
+        assert_eq!(matches.skipped, 1);
+        let _ = app.update(Message::PromptSearchFinished(Ok(matches)));
+        assert_eq!(app.prompt_query, "MOONLIT");
+        assert_eq!(
+            app.candidates,
+            vec![app.prompt_search.as_ref().unwrap().exact[0].clone()]
+        );
+
+        let _ = app.update(Message::PromptQueryChanged(String::new()));
+        let _ = app.update(Message::PromptLineageChanged("lineage/prompt.txt".into()));
+        let result = completion(app.update(Message::Search)).await;
+        let Message::PromptSearchFinished(Ok(matches)) = result else {
+            panic!("lineage query should complete as prompt search");
+        };
+        assert_eq!(matches.exact.len(), 1);
+        assert_eq!(matches.maybe.len(), 1);
+        assert_eq!(matches.maybe[0].path, hinted_path);
+        assert_eq!(matches.skipped, 0);
+        let _ = app.update(Message::PromptSearchFinished(Ok(matches)));
+        assert_eq!(
+            app.candidates
+                .iter()
+                .map(|candidate| candidate.path.clone())
+                .collect::<Vec<_>>(),
+            [exact_path, hinted_path]
+        );
+        assert!(
+            app.result
+                .as_deref()
+                .unwrap()
+                .contains("1 exact, 1 lineage hints")
+        );
+        let _: Element<'_, Message> = pick::view(&app);
     }
 
     #[test]

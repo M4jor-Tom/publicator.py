@@ -881,6 +881,94 @@ async fn describe_previews_share_lazy_scroll_boundary() {
 }
 
 #[tokio::test]
+async fn delayed_title_save_preserves_newer_same_and_other_field_edits() {
+    use fs2::FileExt;
+    use iced_runtime::{Action, futures::futures::StreamExt};
+
+    async fn run_case(
+        newer_field: publicator::ui::drafts::Field,
+        newer_text: &str,
+        expected_title: &str,
+        expected_description: &str,
+    ) {
+        let f = Fixture::new();
+        let mut publication = row(1, "SCHEDULED");
+        publication["title"] = json!("Stored title");
+        publication["description"] = json!("Stored description");
+        f.write(json!([publication]));
+        let (mut app, _) = fixture_app(&f, "http://127.0.0.1:1".into());
+        let _ = app.update(Message::Edited {
+            uuid: id(1),
+            field: publicator::ui::drafts::Field::Title,
+            text: "First edit".into(),
+        });
+
+        let mut lock_path = f.store.paths().json.clone();
+        lock_path.as_mut_os_string().push(".lock");
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(lock_path)
+            .unwrap();
+        lock.lock_exclusive().unwrap();
+        let task = app.update(Message::SaveDraft(id(1)));
+        let mut actions = iced_runtime::task::into_stream(task).expect("save task stream");
+        let first_save = tokio::spawn(async move {
+            loop {
+                match actions.next().await {
+                    Some(Action::Output(message)) => break message,
+                    Some(_) => {}
+                    None => panic!("first save task ended without completion"),
+                }
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!first_save.is_finished());
+        let _ = app.update(Message::Edited {
+            uuid: id(1),
+            field: newer_field,
+            text: newer_text.into(),
+        });
+        lock.unlock().unwrap();
+
+        let first = first_save.await.unwrap();
+        assert!(matches!(
+            first,
+            Message::SaveFinished { result: Ok(()), .. }
+        ));
+        let intermediate = f.read();
+        assert_eq!(intermediate[0]["title"], "First edit");
+        assert_eq!(intermediate[0]["description"], "Stored description");
+        let second_task = app.update(first);
+        let second = run_task(second_task).await;
+        assert!(matches!(
+            second,
+            Message::SaveFinished { result: Ok(()), .. }
+        ));
+        let _ = app.update(second);
+        let saved = f.read();
+        assert_eq!(saved[0]["title"], expected_title);
+        assert_eq!(saved[0]["description"], expected_description);
+    }
+
+    run_case(
+        publicator::ui::drafts::Field::Description,
+        "Newer description",
+        "First edit",
+        "Newer description",
+    )
+    .await;
+    run_case(
+        publicator::ui::drafts::Field::Title,
+        "Newer title",
+        "Newer title",
+        "Stored description",
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn dirty_draft_is_saved_before_single_generation_starts() {
     let f = Fixture::new();
     f.image("1.png", 4, 4);
@@ -919,6 +1007,61 @@ async fn dirty_draft_is_saved_before_single_generation_starts() {
     let _ = app.update(completed);
     server.join().unwrap();
     assert_eq!(f.read()[0]["title"], "Generated");
+}
+
+#[tokio::test]
+async fn failed_single_generation_can_be_retried_from_describe() {
+    use common::http::{Reply, Server};
+
+    let f = Fixture::new();
+    f.image("1.png", 4, 4);
+    f.write(json!([marker_row(1)]));
+    let server = Server::start(vec![
+        Reply {
+            path: "/chat/completions".into(),
+            status: 500,
+            body: json!({"error":{"message":"fixture failure"}}).to_string(),
+        },
+        common::http::Reply {
+            path: "/models".into(),
+            status: 200,
+            body: json!({"data":[]}).to_string(),
+        },
+        common::http::Reply {
+            path: "/chat/completions".into(),
+            status: 200,
+            body: json!({"choices":[{"message":{"content":json!({"title":"Generated","description":"Generated description."}).to_string()}}]}).to_string(),
+        },
+    ]);
+    let (mut app, _) = fixture_app(&f, server.url().to_owned());
+
+    let failed = run_task(app.update(Message::GenerateOne(id(1)))).await;
+    assert!(matches!(
+        failed,
+        Message::GenerationFinished { result: Err(_), .. }
+    ));
+    let _ = app.update(failed);
+    assert_eq!(f.read()[0]["state"], "SCHEDULED");
+    assert_eq!(f.read()[0]["title"], "[[PUBLICATOR:TODO_GENERATE]]");
+    assert_eq!(f.read()[0]["description"], "[[PUBLICATOR:TODO_GENERATE]]");
+
+    let retried = run_task(app.update(Message::GenerateOne(id(1)))).await;
+    assert!(matches!(
+        retried,
+        Message::GenerationFinished { result: Ok(_), .. }
+    ));
+    let _ = app.update(retried);
+    assert_eq!(f.read()[0]["title"], "Generated");
+    assert_eq!(f.read()[0]["description"], "Generated description.");
+    assert_eq!(f.read()[0]["state"], "DESCRIBED");
+    assert_eq!(
+        server
+            .requests()
+            .iter()
+            .filter(|request| request["path"] == "/chat/completions")
+            .count(),
+        2
+    );
 }
 
 #[tokio::test]

@@ -154,6 +154,76 @@ fn fixture_rows(scenario: &str, dir: &Path) -> Vec<Value> {
     }
 }
 
+fn prompt_search_fixture(dir: &Path) -> (Vec<Value>, Config) {
+    let archive = dir.join("prompt-archive");
+    let picked = dir.join("pick");
+    fs::create_dir_all(archive.join("lineage")).unwrap();
+    fs::create_dir_all(&picked).unwrap();
+    let prompt = "MOONLIT EXACT PROMPT — <literal> 雪";
+    fs::write(archive.join("lineage/prompt.txt"), prompt).unwrap();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&archive)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "fixture git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.name", "Prompt Search Fixture"]);
+    git(&["config", "user.email", "prompt-search@example.invalid"]);
+    git(&["add", "--all"]);
+    commit_prompt_archive_if_changed(&archive).expect("commit disposable prompt archive");
+    let prompt_config = PromptConfig {
+        repo: "prompt-archive".into(),
+        filename: r"(?P<lineage>[^_]+)_(?P<version>[0-9a-f]{40})\.png".into(),
+        version_hash: "sha1".into(),
+    };
+    let digest = PromptGrammar::compile(&prompt_config)
+        .unwrap()
+        .digest(prompt.as_bytes())
+        .unwrap();
+    for (name, color) in [
+        (format!("prompt.txt_{digest}.png"), [50, 160, 210]),
+        (format!("prompt.txt_{}.png", "f".repeat(40)), [210, 110, 50]),
+        ("plain.png".into(), [100, 120, 180]),
+    ] {
+        image(&picked.join(name), color);
+    }
+    (
+        Vec::new(),
+        Config {
+            publicable: vec!["pick".into()],
+            prompts: Some(prompt_config),
+            ..Config::default()
+        },
+    )
+}
+
+fn prompt_search_missing_archive_fixture(dir: &Path) -> (Vec<Value>, Config) {
+    let picked = dir.join("pick");
+    fs::create_dir_all(&picked).unwrap();
+    image(&picked.join("plain.png"), [100, 120, 180]);
+    (
+        Vec::new(),
+        Config {
+            publicable: vec!["pick".into()],
+            prompts: Some(PromptConfig {
+                repo: "missing-prompt-archive".into(),
+                filename: r"(?P<lineage>[^_]+)_(?P<version>[0-9a-f]{40})\.png".into(),
+                version_hash: "sha1".into(),
+            }),
+            ..Config::default()
+        },
+    )
+}
+
 fn calendar_fixture(dir: &Path) -> (Vec<Value>, Config) {
     let history = dir.join("history-art");
     let pick = dir.join("pick");
@@ -727,6 +797,15 @@ mod tests {
     use publicator::metadata::VISION_MODELS;
 
     #[test]
+    fn missing_archive_pick_fixture_keeps_valid_prompt_config_without_creating_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, config) = prompt_search_missing_archive_fixture(dir.path());
+        let prompt = config.prompts.as_ref().unwrap();
+        assert!(PromptGrammar::compile(prompt).is_ok());
+        assert!(!dir.path().join(&prompt.repo).exists());
+    }
+
+    #[test]
     fn calendar_fixture_is_schema_valid_and_shares_exact_nearest_unknown_prompts_with_pick() {
         let dir = tempfile::tempdir().unwrap();
         let (rows, config) = calendar_fixture(dir.path());
@@ -1143,6 +1222,10 @@ fn main() -> iced::Result {
     fs::write(dir.join("tags.txt"), "fixture-tag\n").unwrap();
     let (rows, mut config) = if scenario == "calendar" {
         calendar_fixture(&dir)
+    } else if scenario == "prompt-search" {
+        prompt_search_fixture(&dir)
+    } else if scenario == "prompt-search-missing-archive" {
+        prompt_search_missing_archive_fixture(&dir)
     } else {
         let seed_scenario = if scenario == "reopen" {
             "mixed"

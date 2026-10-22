@@ -10,7 +10,9 @@ fn missing_config_uses_defaults_and_bad_toml_names_the_file() {
     assert!(config.tiers.is_empty());
     assert!(config.galleries.is_empty());
     assert!(config.publicable.is_empty());
+    assert!(config.tags.is_none());
     assert_eq!(config.schedule.len(), 0);
+    assert!(config.prompts.is_none());
     fs::write(dir.path().join("publicator.toml"), "[broken\n").unwrap();
     assert!(
         Config::load(dir.path())
@@ -18,6 +20,92 @@ fn missing_config_uses_defaults_and_bad_toml_names_the_file() {
             .to_string()
             .contains("publicator.toml")
     );
+}
+
+#[test]
+fn config_loads_paths_flat_schedule_and_prompt_grammar_from_the_data_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("publicator.toml"),
+        r#"
+publicable = ["picked"]
+tags = "sub/tags.txt"
+[deviantart]
+tiers = ["T"]
+galleries = ["G"]
+[schedule]
+frequency = "weekly"
+day = "tuesday"
+hour = 20
+per_slot = 2
+[prompts]
+repo = "huggingface_prompts"
+filename = '(?P<lineage>.+)_(?P<version>[0-9a-f]{40})\.png'
+version_hash = "sha1"
+"#,
+    )
+    .unwrap();
+    let config = Config::load(dir.path()).unwrap();
+    assert_eq!(config.tiers, ["T"]);
+    assert_eq!(config.galleries, ["G"]);
+    assert_eq!(config.publicable, ["picked"]);
+    assert_eq!(config.tags.as_deref(), Some("sub/tags.txt"));
+    assert_eq!(config.schedule["frequency"].as_str(), Some("weekly"));
+    assert_eq!(config.schedule["day"].as_str(), Some("tuesday"));
+    assert_eq!(config.schedule["hour"].as_integer(), Some(20));
+    assert_eq!(config.schedule["per_slot"].as_integer(), Some(2));
+    let prompt = config.prompts.unwrap();
+    assert_eq!(prompt.repo, "huggingface_prompts");
+    assert_eq!(prompt.version_hash, "sha1");
+    let identity = PromptGrammar::compile(&prompt)
+        .unwrap()
+        .identity("hot_warrior.json_0e2d420dcabd86c88cacdf55224f6e3d0e52b615.png")
+        .unwrap()
+        .unwrap();
+    assert_eq!(identity.lineage.as_deref(), Some("hot_warrior.json"));
+    assert_eq!(identity.version, "0e2d420dcabd86c88cacdf55224f6e3d0e52b615");
+}
+
+#[test]
+fn config_prompt_grammar_does_not_require_a_lineage_capture() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("publicator.toml"),
+        r#"[prompts]
+repo = 'archive'
+filename = '(?P<version>[0-9a-f]+)\.png'
+version_hash = 'sha1'
+"#,
+    )
+    .unwrap();
+    let prompt = Config::load(dir.path()).unwrap().prompts.unwrap();
+    let identity = PromptGrammar::compile(&prompt)
+        .unwrap()
+        .identity("abc123.png")
+        .unwrap()
+        .unwrap();
+    assert_eq!(identity.version, "abc123");
+    assert!(identity.lineage.is_none());
+}
+
+#[test]
+fn config_load_preserves_schedule_profiles() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("publicator.toml"),
+        "[[schedule.profiles]]\nname = 'free'\nday = 'tuesday'\nhour = 20\nper_slot = 2\n[[schedule.profiles]]\nname = 'paid'\nday = 'friday'\nhour = 20\nper_slot = 1\n",
+    )
+    .unwrap();
+    let config = Config::load(dir.path()).unwrap();
+    let profiles = config.schedule["profiles"].as_array().unwrap();
+    assert_eq!(profiles.len(), 2);
+    assert_eq!(profiles[0]["name"].as_str(), Some("free"));
+    assert_eq!(profiles[0]["day"].as_str(), Some("tuesday"));
+    assert_eq!(profiles[0]["hour"].as_integer(), Some(20));
+    assert_eq!(profiles[0]["per_slot"].as_integer(), Some(2));
+    assert_eq!(profiles[1]["name"].as_str(), Some("paid"));
+    assert_eq!(profiles[1]["day"].as_str(), Some("friday"));
+    assert_eq!(profiles[1]["per_slot"].as_integer(), Some(1));
 }
 
 #[test]
@@ -104,6 +192,73 @@ fn empty_prompts_disable_prompt_grammar_and_incomplete_prompts_name_field() {
 }
 
 #[test]
+fn config_rejects_missing_prompt_repo_or_version_capture_and_invalid_pattern() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("publicator.toml"),
+        r#"[prompts]
+filename = '(?P<other>.+)'
+version_hash = 'sha1'
+"#,
+    )
+    .unwrap();
+    assert!(
+        Config::load(dir.path())
+            .unwrap_err()
+            .to_string()
+            .contains("repo")
+    );
+
+    fs::write(
+        dir.path().join("publicator.toml"),
+        r#"[prompts]
+repo = 'archive'
+filename = '(?P<other>.+)'
+version_hash = 'sha1'
+"#,
+    )
+    .unwrap();
+    assert!(
+        Config::load(dir.path())
+            .unwrap_err()
+            .to_string()
+            .contains("version")
+    );
+
+    fs::write(
+        dir.path().join("publicator.toml"),
+        r#"[prompts]
+repo = 'archive'
+filename = '('
+version_hash = 'sha1'
+"#,
+    )
+    .unwrap();
+    assert!(
+        Config::load(dir.path())
+            .unwrap_err()
+            .to_string()
+            .contains("filename")
+    );
+
+    fs::write(
+        dir.path().join("publicator.toml"),
+        r#"[prompts]
+repo = 'archive'
+filename = '(?P<version>.+)'
+version_hash = 'unsupported'
+"#,
+    )
+    .unwrap();
+    assert!(
+        Config::load(dir.path())
+            .unwrap_err()
+            .to_string()
+            .contains("version_hash")
+    );
+}
+
+#[test]
 fn missing_publications_file_validates_as_empty_but_malformed_json_fails() {
     let dir = tempfile::tempdir().unwrap();
     let binary = env!("CARGO_BIN_EXE_publicator");
@@ -128,23 +283,78 @@ fn missing_publications_file_validates_as_empty_but_malformed_json_fails() {
 
 #[test]
 fn publication_validation_retains_extensions_zero_price_and_rejects_bad_url_or_tier() {
-    let make = |url: &str, tier: &str| json!([{"uuid":"00000000-0000-4000-8000-000000000001", "state":"PICKED", "title":"t", "description":"d", "submissionTimestamp":1, "files":[], "unknown":{"kept":true}, "apparitions":[{"platformName":"deviantart","state":"unpublished","url":url,"priceIfNotFree":0,"tiers":[tier]}]}]);
-    let good = make("https://example.com", "allowed");
+    let make = |url: &str, tier: &str, gallery: &str| json!([{"uuid":"00000000-0000-4000-8000-000000000001", "state":"PICKED", "title":"t", "description":"d", "submissionTimestamp":1, "files":[], "unknown":{"kept":true}, "apparitions":[{"platformName":"deviantart","state":"unpublished","url":url,"priceIfNotFree":0,"tiers":[tier],"galleries":[gallery]}]}]);
+    let good = make("https://example.com", "allowed", "gallery");
     let rows: Publications = serde_json::from_value(good.clone()).unwrap();
     let cfg = Config {
         tiers: vec!["allowed".into()],
+        galleries: vec!["gallery".into()],
         ..Config::default()
     };
     validate_publications(&rows, &cfg).unwrap();
     assert_eq!(rows[0]["unknown"]["kept"], true);
     assert_eq!(rows[0]["apparitions"][0]["priceIfNotFree"], 0);
-    let bad_url: Publications = serde_json::from_value(make("file:///tmp/x", "allowed")).unwrap();
-    assert!(validate_publications(&bad_url, &cfg).is_err());
-    let obsolete: Publications = serde_json::from_value(json!([{"uuid":"00000000-0000-4000-8000-000000000001","state":"PICKED","title":"t","description":"d","submissionTimestamp":1,"files":[],"apparitions":[{"platformName":"deviantart","state":"unpublished","tier":"x"}]}])).unwrap();
-    assert!(validate_publications(&obsolete, &cfg).is_err());
+    for url in [
+        "HTTPS://example.com/art/1",
+        "http://example.com/art/1",
+        "https://example.com/art/1",
+    ] {
+        let accepted: Publications =
+            serde_json::from_value(make(url, "allowed", "gallery")).unwrap();
+        validate_publications(&accepted, &cfg).unwrap();
+    }
+    for url in [
+        "A title",
+        "",
+        "ftp://example.com/art",
+        "http://:80/art",
+        "http://",
+        "https:///art",
+        "javascript:alert(1)",
+        "file:///tmp/x",
+    ] {
+        let bad_url: Publications =
+            serde_json::from_value(make(url, "allowed", "gallery")).unwrap();
+        let validation = validate_publications(&bad_url, &cfg);
+        assert!(validation.is_err(), "accepted invalid URL {url}");
+        let url_error = validation.unwrap_err().to_string();
+        assert!(
+            url_error.to_ascii_lowercase().contains("url")
+                || url_error.to_ascii_lowercase().contains("http"),
+            "{url_error}"
+        );
+    }
+    let obsolete: Publications = serde_json::from_value(json!([{"uuid":"00000000-0000-4000-8000-000000000001","state":"PICKED","title":"t","description":"d","submissionTimestamp":1,"files":[],"apparitions":[{"platformName":"deviantart","state":"unpublished","tier":"allowed"}]}])).unwrap();
+    assert!(
+        validate_publications(&obsolete, &cfg)
+            .unwrap_err()
+            .to_string()
+            .contains("obsolete tier")
+    );
+    for key in [
+        "urlElsePublicationName",
+        "apparitionTimestampIfDifferentThanSubmission",
+    ] {
+        let obsolete: Publications = serde_json::from_value(json!([{"uuid":"00000000-0000-4000-8000-000000000001","state":"PICKED","title":"t","description":"d","submissionTimestamp":1,"files":[],"apparitions":[{"platformName":"deviantart","state":"unpublished",(key):"legacy"}]}])).unwrap();
+        assert!(
+            validate_publications(&obsolete, &cfg)
+                .unwrap_err()
+                .to_string()
+                .contains(key),
+            "accepted {key}"
+        );
+    }
     let bad_tier: Publications =
-        serde_json::from_value(make("https://example.com", "other")).unwrap();
+        serde_json::from_value(make("https://example.com", "other", "gallery")).unwrap();
     assert!(validate_publications(&bad_tier, &cfg).is_err());
+    let bad_gallery: Publications =
+        serde_json::from_value(make("https://example.com", "allowed", "other")).unwrap();
+    assert!(
+        validate_publications(&bad_gallery, &cfg)
+            .unwrap_err()
+            .to_string()
+            .contains("gallery")
+    );
 }
 
 #[test]

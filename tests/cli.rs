@@ -265,6 +265,16 @@ fn validation_reports_missing_or_malformed_data_as_failure() {
 }
 
 #[test]
+fn ui_rejects_unknown_legacy_limit_flag() {
+    let output = Command::new(env!("CARGO_BIN_EXE_publicator-ui"))
+        .args(["-n", "10"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unexpected argument"));
+}
+
+#[test]
 fn da_selection_flags_are_mutually_exclusive() {
     let root = tempdir().unwrap();
     let result = cli(root.path(), &["da-publish", "--uuid", "abc", "--all"]);
@@ -337,6 +347,60 @@ fn default_publish_is_first_pending_and_all_uuid_remain_explicit_batches() {
                 .contains(&format!("published: {},", expected.len()))
         );
     }
+}
+
+#[test]
+fn headless_flag_reaches_the_publish_worker_open_command() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempdir().unwrap();
+    publication_batch(root.path());
+    let worker = root.path().join("headless-worker.sh");
+    let open = root.path().join("open.json");
+    fs::write(
+        &worker,
+        format!(
+            r#"#!/bin/sh
+if [ "$1" = "--check-steps" ]; then exit 0; fi
+while IFS= read -r line; do
+case "$line" in
+*'"type":"open"'*) printf '%s' "$line" > '{}'; echo '{{"protocol":1,"type":"ready"}}' ;;
+*'"type":"submit"'*)
+  attempt=$(printf '%s' "$line" | jq -r .attempt_id)
+  uuid=$(printf '%s' "$line" | jq -r .uuid)
+  printf '{{"protocol":1,"type":"scheduled","attempt_id":"%s","uuid":"%s"}}\n' "$attempt" "$uuid" ;;
+*'"type":"close"'*) exit 0 ;;
+esac
+done
+"#,
+            open.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&worker, fs::Permissions::from_mode(0o755)).unwrap();
+    let skill = root.path().join("skill.md");
+    fs::write(&skill, "fixture").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_publicator"))
+        .current_dir(root.path())
+        .env("PUBLICATOR_WORKER", &worker)
+        .env("PUBLICATOR_SKILL", &skill)
+        .args([
+            "da-publish",
+            "--uuid",
+            "00000000-0000-4000-8000-000000000003",
+            "--headless",
+            "--data-dir",
+        ])
+        .arg(root.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let open: Value = serde_json::from_slice(&fs::read(open).unwrap()).unwrap();
+    assert_eq!(open["headless"], true);
 }
 
 #[test]

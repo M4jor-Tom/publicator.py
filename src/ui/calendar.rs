@@ -130,6 +130,21 @@ fn days_in_month(month: NaiveDate) -> u32 {
     (next - month).num_days() as u32
 }
 
+pub(super) fn event_prompt_view<'a>(state: &'a App, event: &Event) -> Option<Element<'a, Message>> {
+    let prompt_path = event.basename.as_deref().map(|basename| {
+        state
+            .calendar_artwork
+            .get(basename)
+            .and_then(Option::as_ref)
+            .cloned()
+            .unwrap_or_else(|| state.application.store().paths().data_dir.join(basename))
+    });
+    prompt_path
+        .as_deref()
+        .and_then(|path| state.prompt_matches.get(path))
+        .map(super::prompt::view)
+}
+
 fn event_date(event: &Event, zone: chrono_tz::Tz) -> Option<NaiveDate> {
     DateTime::<Utc>::from_timestamp(event.timestamp, 0)
         .map(|instant| instant.with_timezone(&zone).date_naive())
@@ -145,19 +160,8 @@ fn event_view<'a>(state: &'a App, event: &Event, zone: chrono_tz::Tz) -> Element
     ))]
     .spacing(4);
     item = item.push(artwork_view(state, event));
-    let prompt_path = event.basename.as_deref().map(|basename| {
-        state
-            .calendar_artwork
-            .get(basename)
-            .and_then(Option::as_ref)
-            .cloned()
-            .unwrap_or_else(|| state.application.store().paths().data_dir.join(basename))
-    });
-    if let Some(match_) = prompt_path
-        .as_deref()
-        .and_then(|path| state.prompt_matches.get(path))
-    {
-        item = item.push(super::prompt::view(match_));
+    if let Some(prompt) = event_prompt_view(state, event) {
+        item = item.push(prompt);
     }
     if let Some(url) = event
         .url
@@ -356,4 +360,37 @@ pub(super) fn system_open_url(value: &str) -> Result<(), String> {
     result
         .map(|_| ())
         .map_err(|error| format!("could not open actual URL: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::event_date;
+    use crate::calendar::timeline;
+    use chrono::{NaiveDate, TimeZone, Utc};
+    use chrono_tz::Europe::Paris;
+    use serde_json::json;
+
+    #[test]
+    fn event_cell_date_uses_configured_timezone_instead_of_utc_date() {
+        let timestamp = Utc
+            .with_ymd_and_hms(2026, 1, 5, 23, 30, 0)
+            .unwrap()
+            .timestamp();
+        let row = json!({
+            "uuid":"time-zone-fixture", "state":"DESCRIBED", "title":"Local day",
+            "description":"d", "submissionTimestamp":timestamp,
+            "files":[{"basename":"art.png","sha512sum":"a".repeat(128)}],
+            "apparitions":[{"platformName":"deviantart","state":"unpublished"}]
+        });
+        let event = timeline(&[row]).unwrap().remove(0);
+        let cell_date = event_date(&event, Paris);
+        assert_eq!(
+            cell_date,
+            Some(NaiveDate::from_ymd_opt(2026, 1, 6).unwrap())
+        );
+        assert_ne!(
+            cell_date,
+            Some(Utc.timestamp_opt(timestamp, 0).unwrap().date_naive())
+        );
+    }
 }

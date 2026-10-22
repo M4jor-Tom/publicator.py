@@ -147,7 +147,9 @@ fn legacy_metadata_markers_keep_publication_scheduled() {
             row[field] = json!(marker);
             row["apparitions"][0]["urlElsePublicationName"] = row["title"].clone();
             let original = vec![row];
+            let before = original.clone();
             let out = migrate_rows(&original, &[]).unwrap();
+            assert_eq!(original, before);
             assert_eq!(out[0]["state"], "SCHEDULED");
             assert_eq!(out[0][field], marker);
             assert!(

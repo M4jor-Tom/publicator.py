@@ -282,12 +282,19 @@ async fn run() -> Result<()> {
             let archive = config
                 .prompts
                 .as_ref()
-                .map(|p| PromptArchive::new(&paths.data_dir, p))
-                .transpose()?;
+                .map(|p| PromptArchive::from_config(&paths.data_dir, p))
+                .transpose()?
+                .flatten();
             let counts = audit(&paths.data_dir, &config, archive.as_ref())?;
             println!(
-                "files: {}\nparsed: {}\nexact: {}\nnearest: {}\nunknown: {}",
-                counts.files, counts.parsed, counts.exact, counts.nearest, counts.unknown
+                "parsed: {} of {} files\nexact: {} images / {} versions\nnearest: {} images / {} versions\nunknown: {}",
+                counts.parsed,
+                counts.files,
+                counts.exact,
+                counts.exact_versions,
+                counts.nearest,
+                counts.nearest_versions,
+                counts.unknown
             );
         }
         Command::DaPublish {
@@ -398,7 +405,18 @@ fn parse_install_consent(answer: &str, bytes_read: usize) -> bool {
 
 #[cfg(test)]
 mod consent_tests {
-    use super::parse_install_consent;
+    use super::{choose_model, parse_install_consent};
+    use publicator::metadata::Source;
+
+    #[test]
+    fn default_openrouter_model_remains_configured() {
+        assert_eq!(
+            choose_model(Source::OpenRouter, None)
+                .unwrap()
+                .openrouter_name,
+            "openrouter/google/gemma-4-26b-a4b-it:free"
+        );
+    }
 
     #[test]
     fn only_enter_yes_or_y_authorize_model_installation() {

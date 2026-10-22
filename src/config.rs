@@ -206,12 +206,6 @@ pub(crate) fn validate_publications_with(
     config: &Config,
     validator: &jsonschema::Validator,
 ) -> Result<()> {
-    if let Some(e) = validator
-        .iter_errors(&serde_json::Value::Array(rows.clone()))
-        .next()
-    {
-        return Err(Error::Validation(e.to_string()));
-    }
     for row in rows {
         let uuid = row
             .get("uuid")
@@ -229,9 +223,15 @@ pub(crate) fn validate_publications_with(
                     }
                 }
                 if let Some(url) = a.get("url").and_then(serde_json::Value::as_str) {
-                    let valid = url::Url::parse(url)
-                        .map(|u| matches!(u.scheme(), "http" | "https") && u.host_str().is_some())
-                        .unwrap_or(false);
+                    let valid_authority = url.split_once("://").is_some_and(|(_, authority)| {
+                        !authority.starts_with('/') && !authority.starts_with('\\')
+                    });
+                    let valid = valid_authority
+                        && url::Url::parse(url)
+                            .map(|u| {
+                                matches!(u.scheme(), "http" | "https") && u.host_str().is_some()
+                            })
+                            .unwrap_or(false);
                     if !valid {
                         return Err(Error::Validation(format!(
                             "{uuid}: apparition url must be an HTTP(S) URL with a host"
@@ -247,8 +247,13 @@ pub(crate) fn validate_publications_with(
                                 if let Some(v) = v.as_str()
                                     && !allowed.iter().any(|x| x == v)
                                 {
+                                    let label = if key == "galleries" {
+                                        "gallery"
+                                    } else {
+                                        "tier"
+                                    };
                                     return Err(Error::Validation(format!(
-                                        "{uuid}: {key} {v:?} not in publicator.toml"
+                                        "{uuid}: {label} {v:?} not in publicator.toml"
                                     )));
                                 }
                             }
@@ -257,6 +262,12 @@ pub(crate) fn validate_publications_with(
                 }
             }
         }
+    }
+    if let Some(e) = validator
+        .iter_errors(&serde_json::Value::Array(rows.clone()))
+        .next()
+    {
+        return Err(Error::Validation(e.to_string()));
     }
     Ok(())
 }

@@ -31,7 +31,19 @@ pub fn selection_state(selected: &[bool]) -> SelectionState {
 }
 
 pub fn view(state: &App) -> Element<'_, Message> {
-    let mut content = column![text("Publish")].spacing(10);
+    let mut content = column![
+        text("Publish"),
+        text("Cell keyboard: F6 enter/exit · Tab/Shift+Tab move · Space toggle · Esc exit"),
+    ]
+    .spacing(10);
+    if state.publish_keyboard_mode {
+        let focus = state
+            .publish_keyboard_focus
+            .as_deref()
+            .map(|uuid| format!("Keyboard focus: {uuid} — DeviantArt"))
+            .unwrap_or_else(|| "No unlocked pending DeviantArt cell to focus".into());
+        content = content.push(text(focus));
+    }
     if let Some(error) = &state.publish_lock_error {
         content = content.push(text(format!("Publish status unavailable: {error}")));
     }
@@ -52,6 +64,10 @@ pub fn view(state: &App) -> Element<'_, Message> {
                 apparition.get("platformName").and_then(Value::as_str) == Some("deviantart")
             });
             let label = format!("{uuid} — DeviantArt");
+            if state.publish_keyboard_mode && state.publish_keyboard_focus.as_deref() == Some(uuid)
+            {
+                content = content.push(text(format!("Keyboard focus → {label}")));
+            }
             if state.revealed_publication() == Some(uuid) {
                 content = content.push(text(format!("Opened from Calendar — {label}")));
             }
@@ -139,7 +155,7 @@ pub fn view(state: &App) -> Element<'_, Message> {
         .into()
 }
 
-fn ordered_rows<'a>(rows: &'a [Value], target: Option<&str>) -> Vec<&'a Value> {
+pub(super) fn ordered_rows<'a>(rows: &'a [Value], target: Option<&str>) -> Vec<&'a Value> {
     let mut rows = rows
         .iter()
         .filter(|row| matches!(phase(row), Ok(Phase::Described | Phase::Appeared)))

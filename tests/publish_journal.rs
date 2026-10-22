@@ -60,6 +60,29 @@ fn scheduled(job: &PublishJob) -> WorkerEvent {
 }
 
 #[test]
+fn snapshot_resolves_tag_file_under_data_dir_for_external_json() {
+    let f = Fixture::new();
+    std::fs::create_dir(f.path("sub")).unwrap();
+    std::fs::write(f.path("sub/tags.txt"), " first \n\nsecond\n").unwrap();
+    std::fs::write(f.path("publicator.toml"), "tags='sub/tags.txt'\n").unwrap();
+    let config = publicator::config::Config::load(f.root.path()).unwrap();
+    let external = tempfile::tempdir().unwrap();
+    let json_path = external.path().join("rows.json");
+    let image = f.image("art.png", 4, 4);
+    let mut publication = row(1, "DESCRIBED");
+    publication["files"][0]["basename"] = json!("art.png");
+    publication["files"][0]["sha512sum"] = json!(publicator::images::file_sha512(&image).unwrap());
+    publication["apparitionTimestampIfDifferentThanSubmission"] = json!(1_700_002_800);
+    publication["apparitions"] = json!([{
+        "platformName":"deviantart", "state":"unpublished", "tiers":[], "galleries":[]
+    }]);
+    std::fs::write(&json_path, json!([publication]).to_string()).unwrap();
+    let paths = publicator::config::Paths::resolve(Some(f.root.path()), Some(&json_path)).unwrap();
+    let store = publicator::store::Store::new(paths, config).unwrap();
+    assert_eq!(snapshot(&store, &id(1)).unwrap().tags, ["first", "second"]);
+}
+
+#[test]
 fn success_receipt_replay_does_not_need_a_browser() {
     let f = publish_fixture();
     let (job, snap) = job_for(&f);

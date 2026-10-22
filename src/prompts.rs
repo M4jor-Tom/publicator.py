@@ -79,30 +79,73 @@ impl PromptArchive {
         })
     }
 
-    fn git(&self, args: &[&str]) -> Option<Vec<u8>> {
-        match Command::new("git")
+    pub fn from_config(data_dir: &Path, config: &PromptConfig) -> Result<Option<Self>> {
+        let archive = Self::new(data_dir, config)?;
+        match fs::metadata(&archive.repo) {
+            Ok(metadata) if metadata.is_dir() => Ok(Some(archive)),
+            Ok(_) => Err(Error::Config(format!(
+                "prompt archive is not a directory: {}",
+                archive.repo.display()
+            ))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn git(&self, args: &[&str]) -> Result<Vec<u8>> {
+        let output = Command::new("git")
             .arg("-C")
             .arg(&self.repo)
             .args(args)
             .output()
-        {
-            Ok(output) if output.status.success() => Some(output.stdout),
-            Ok(output) => {
-                eprintln!(
-                    "prompt archive git command failed in {}: {}",
-                    self.repo.display(),
-                    String::from_utf8_lossy(&output.stderr).trim()
-                );
-                None
-            }
-            Err(error) => {
-                eprintln!(
-                    "prompt archive git unavailable in {}: {error}",
+            .map_err(|error| {
+                Error::PromptArchiveUnavailable(format!(
+                    "git unavailable in {}: {error}",
                     self.repo.display()
-                );
-                None
-            }
+                ))
+            })?;
+        if output.status.success() && output.stderr.is_empty() {
+            Ok(output.stdout)
+        } else {
+            Err(Error::PromptArchiveUnavailable(format!(
+                "git {} returned {} in {}: {}",
+                args.join(" "),
+                output.status,
+                self.repo.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            )))
         }
+    }
+
+    fn head(&self) -> Result<Option<String>> {
+        let args = ["rev-parse", "--verify", "--quiet", "HEAD"];
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&self.repo)
+            .args(args)
+            .output()
+            .map_err(|error| {
+                Error::PromptArchiveUnavailable(format!(
+                    "git unavailable in {}: {error}",
+                    self.repo.display()
+                ))
+            })?;
+        if output.status.success() && output.stderr.is_empty() {
+            return Ok(Some(
+                String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+            ));
+        }
+        // A valid, freshly initialized archive may not have a HEAD yet.
+        if output.status.code() == Some(1) && output.stderr.is_empty() {
+            return Ok(None);
+        }
+        Err(Error::PromptArchiveUnavailable(format!(
+            "git {} returned {} in {}: {}",
+            args.join(" "),
+            output.status,
+            self.repo.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )))
     }
 
     fn refresh(&self) -> Result<()> {
@@ -121,11 +164,8 @@ impl PromptArchive {
         if probed.is_some_and(|at| now.duration_since(at) < HEAD_PROBE_TTL) {
             return Ok(());
         }
-        let head = self
-            .git(&["rev-parse", "HEAD"])
-            .map(|v| String::from_utf8_lossy(&v).trim().to_owned())
-            .unwrap_or_default();
-        if initialized && head == previous_head {
+        let head = self.head()?;
+        if initialized && head.as_deref().is_some_and(|head| head == previous_head) {
             let mut index = self
                 .index
                 .write()
@@ -134,18 +174,17 @@ impl PromptArchive {
             return Ok(());
         }
 
-        let (by_oid, blobs) = self
-            .git(&["cat-file", "--batch-all-objects", "--batch"])
-            .and_then(|stream| match self.read_blobs(&stream) {
-                Ok(index) => Some(index),
-                Err(error) => {
-                    eprintln!("prompt archive blob protocol failed: {error}");
-                    None
-                }
-            })
-            .unwrap_or_default();
-        let (paths, times) = self
-            .git(&[
+        let stream = self.git(&["cat-file", "--batch-all-objects", "--batch"])?;
+        let (by_oid, blobs) = self.read_blobs(&stream).map_err(|error| match error {
+            Error::Protocol(reason) => Error::PromptArchiveUnavailable(reason),
+            other => other,
+        })?;
+        let (paths, times) = if head.is_some()
+            || !self
+                .git(&["for-each-ref", "--format=%(refname)"])?
+                .is_empty()
+        {
+            let log = self.git(&[
                 "-c",
                 "core.quotePath=false",
                 "log",
@@ -154,9 +193,11 @@ impl PromptArchive {
                 "--no-abbrev",
                 "--no-renames",
                 "--format=%ct",
-            ])
-            .map(|log| history(&log, &by_oid))
-            .unwrap_or_default();
+            ])?;
+            history(&log, &by_oid)
+        } else {
+            (BTreeMap::new(), BTreeMap::new())
+        };
         let mut versions = BTreeMap::new();
         for (digest, body) in blobs {
             versions.insert(
@@ -196,7 +237,7 @@ impl PromptArchive {
             .write()
             .map_err(|_| Error::Busy("prompt archive index lock poisoned".into()))?;
         *index = Index {
-            head,
+            head: head.unwrap_or_default(),
             probed: Some(Instant::now()),
             versions,
             by_path,
@@ -243,13 +284,9 @@ impl PromptArchive {
                 return Err(Error::Protocol("missing blob payload terminator".into()));
             }
             if kind == b"blob" {
-                match self.grammar.digest(body) {
-                    Ok(digest) => {
-                        by_oid.insert(String::from_utf8_lossy(oid).into_owned(), digest.clone());
-                        blobs.insert(digest, body.to_vec());
-                    }
-                    Err(error) => eprintln!("prompt archive digest failed: {error}"),
-                }
+                let digest = self.grammar.digest(body)?;
+                by_oid.insert(String::from_utf8_lossy(oid).into_owned(), digest.clone());
+                blobs.insert(digest, body.to_vec());
             }
             cursor = next;
         }
@@ -270,7 +307,15 @@ impl PromptArchive {
     }
 
     fn resolve(&self, identity: &ImageIdentity, near: &Path) -> Result<PromptMatch> {
-        self.refresh()?;
+        match self.refresh() {
+            Ok(()) => {}
+            Err(Error::PromptArchiveUnavailable(reason)) => {
+                let diagnostic = format!("prompt archive unavailable: {reason}");
+                eprintln!("{diagnostic}");
+                return Ok(PromptMatch::Unknown(diagnostic));
+            }
+            Err(error) => return Err(error),
+        }
         let index = self
             .index
             .read()
@@ -551,6 +596,9 @@ pub fn search(
                 } else {
                     skipped += 1;
                 }
+            }
+            PromptMatch::Unknown(reason) if reason.starts_with("prompt archive unavailable:") => {
+                return Err(Error::PromptArchiveUnavailable(reason));
             }
             PromptMatch::Unknown(_) => {}
         }

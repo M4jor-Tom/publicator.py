@@ -95,6 +95,8 @@ async fn http_429_walks_other_vendor_before_sibling_and_reports_answerer() {
         .await
         .unwrap();
     assert_eq!(got.model_used, "other/model:free");
+    assert_eq!(got.metadata.title, "T");
+    assert_eq!(got.metadata.description, "D");
     let requests = server.requests();
     assert_eq!(requests.len(), 3);
     assert_eq!(requests[0]["body"]["model"], "vendor/selected:free");

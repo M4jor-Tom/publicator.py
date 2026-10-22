@@ -28,6 +28,24 @@ fn malformed_json_is_not_treated_as_an_empty_queue() {
 }
 
 #[test]
+fn malformed_json_mutation_preserves_original_bytes_without_running_callback() {
+    let f = Fixture::new();
+    std::fs::write(&f.store.paths().json, b"{broken").unwrap();
+    let before = std::fs::read(&f.store.paths().json).unwrap();
+    let called = std::cell::Cell::new(false);
+    assert!(
+        f.store
+            .mutate(|_| {
+                called.set(true);
+                Ok(())
+            })
+            .is_err()
+    );
+    assert!(!called.get());
+    assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), before);
+}
+
+#[test]
 fn invalid_edit_does_not_replace_original() {
     let f = Fixture::new();
     f.write(json!([row(1, "PICKED")]));
@@ -37,6 +55,34 @@ fn invalid_edit_does_not_replace_original() {
         Ok(())
     });
     assert!(result.is_err());
+    assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), before);
+}
+
+#[test]
+fn mutation_returns_callback_value_and_persists_successful_edit() {
+    let f = Fixture::new();
+    f.write(json!([row(1, "PICKED")]));
+    let result = f
+        .store
+        .mutate(|rows| {
+            rows[0]["title"] = "Updated".into();
+            Ok(None::<()>)
+        })
+        .unwrap();
+    assert_eq!(result, None);
+    assert_eq!(f.store.read().unwrap()[0]["title"], "Updated");
+}
+
+#[test]
+fn rejected_mutation_callback_preserves_original_bytes() {
+    let f = Fixture::new();
+    f.write(json!([row(1, "PICKED")]));
+    let before = std::fs::read(&f.store.paths().json).unwrap();
+    let result: Result<(), Error> = f.store.mutate(|rows| {
+        rows[0]["title"] = "uncommitted change".into();
+        Err(Error::Validation("rejected".into()))
+    });
+    assert!(matches!(result, Err(Error::Validation(message)) if message == "rejected"));
     assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), before);
 }
 

@@ -47,7 +47,17 @@ fn app_with_timezone(f: &Fixture, timezone: Option<&str>) -> Application {
 #[tokio::test]
 async fn historical_only_publications_do_not_start_worker() {
     let f = Fixture::new();
-    f.write(json!([row(1, "APPEARED")]));
+    let mut publication = row(1, "APPEARED");
+    publication["apparitions"] = json!([
+        {
+            "platformName":"pixiv",
+            "state":"published_or_scheduled",
+            "url":"https://pixiv.example/art/old"
+        },
+        {"platformName":"historic","state":"unpublished"}
+    ]);
+    f.write(json!([publication]));
+    let before = std::fs::read(&f.store.paths().json).unwrap();
     let app = app(&f);
     let publisher = Publisher::new(
         PathBuf::from("/does/not/exist"),
@@ -68,7 +78,216 @@ async fn historical_only_publications_do_not_start_worker() {
     assert_eq!(report.failed, 0);
     assert_eq!(report.unknown, 0);
     assert_eq!(report.unattempted, 0);
+    assert_eq!(report.error, None);
+    assert!(report.outcomes.is_empty());
+    assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), before);
 }
+#[tokio::test]
+async fn historical_pending_cells_do_not_block_registered_publish_targets() {
+    let f = Fixture::new();
+    let mut rows = Vec::new();
+    for n in [1, 2] {
+        let image = f.image(&format!("{n}.png"), 4, 3);
+        let mut publication = row(n, "DESCRIBED");
+        publication["files"][0]["sha512sum"] =
+            json!(publicator::images::file_sha512(&image).unwrap());
+        publication["apparitionTimestampIfDifferentThanSubmission"] = json!(1_700_002_800);
+        publication["apparitions"] = json!([
+            {"platformName":"deviantart","state":"unpublished","tiers":[],"galleries":[]},
+            {"platformName":"historical-pixiv","state":"unpublished","url":"https://pixiv.example/art"}
+        ]);
+        rows.push(publication);
+    }
+    let mut historical_only = row(99, "DESCRIBED");
+    historical_only["title"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
+    historical_only["apparitions"] =
+        json!([{"platformName":"historical-pixiv","state":"unpublished"}]);
+    rows.push(historical_only.clone());
+    f.write(json!(rows));
+
+    let log = f.path("submitted.txt");
+    let worker = fake_worker(
+        &f,
+        &format!(
+            r#"while IFS= read -r line; do
+kind=$(printf '%s' "$line" | jq -r .type)
+case "$kind" in
+open) echo '{{"protocol":1,"type":"ready"}}' ;;
+submit)
+  uuid=$(printf '%s' "$line" | jq -r .uuid)
+  attempt=$(printf '%s' "$line" | jq -r .attempt_id)
+  echo "$uuid" >> '{}'
+  printf '{{"protocol":1,"type":"scheduled","attempt_id":"%s","uuid":"%s"}}\n' "$attempt" "$uuid" ;;
+close) exit 0 ;;
+esac
+done"#,
+            log.display()
+        ),
+    );
+    let report = app(&f)
+        .with_publisher(Publisher::new(worker, PathBuf::from("unused")))
+        .publish(
+            PublishRequest {
+                uuids: None,
+                headless: true,
+            },
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        (report.published, report.failed, report.unattempted),
+        (2, 0, 0)
+    );
+    assert_eq!(
+        std::fs::read_to_string(log)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        [common::id(1), common::id(2)]
+    );
+    assert_eq!(f.read()[2], historical_only);
+    assert!(f.read()[0]["apparitions"][1]["state"] == "unpublished");
+    assert!(f.read()[1]["apparitions"][1]["state"] == "unpublished");
+}
+
+#[tokio::test]
+async fn marked_historical_only_publication_is_an_unchanged_noop() {
+    let f = Fixture::new();
+    let mut publication = row(1, "SCHEDULED");
+    publication["title"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
+    publication["apparitions"] = json!([{
+        "platformName":"pixiv",
+        "state":"unpublished",
+        "url":"https://pixiv.example/art/old"
+    }]);
+    f.write(json!([publication]));
+    let before = std::fs::read(&f.store.paths().json).unwrap();
+    let publisher = Publisher::new(
+        PathBuf::from("/does/not/exist"),
+        PathBuf::from("/does/not/exist"),
+    );
+    let report = publisher
+        .publish(
+            &app(&f),
+            PublishRequest {
+                uuids: None,
+                headless: true,
+            },
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            report.published,
+            report.failed,
+            report.unknown,
+            report.unattempted
+        ),
+        (0, 0, 0, 0)
+    );
+    assert_eq!(report.error, None);
+    assert!(report.outcomes.is_empty());
+    assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), before);
+}
+
+#[tokio::test]
+async fn marked_or_unphased_pending_targets_never_start_the_worker() {
+    let f = Fixture::new();
+    let mut marked = row(1, "SCHEDULED");
+    marked["title"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
+    marked["apparitions"] = json!([{"platformName":"deviantart","state":"unpublished"}]);
+    let mut unphased = row(2, "PICKED");
+    unphased["apparitions"] = json!([{"platformName":"deviantart","state":"unpublished"}]);
+    f.write(json!([marked, unphased]));
+    let before = std::fs::read(&f.store.paths().json).unwrap();
+    let publisher = Publisher::new(
+        PathBuf::from("/does/not/exist"),
+        PathBuf::from("/does/not/exist"),
+    );
+    let report = publisher
+        .publish(
+            &app(&f),
+            PublishRequest {
+                uuids: None,
+                headless: true,
+            },
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            report.published,
+            report.failed,
+            report.unknown,
+            report.unattempted
+        ),
+        (0, 0, 0, 0)
+    );
+    assert_eq!(report.error, None);
+    assert!(report.outcomes.is_empty());
+    assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), before);
+}
+
+#[tokio::test]
+async fn second_publish_after_success_is_a_zero_work_noop() {
+    let f = configured_fixture();
+    let log = f.path("publish-worker.log");
+    let worker = fake_worker(
+        &f,
+        &format!(
+            r#"while IFS= read -r line; do
+kind=$(printf '%s' "$line" | jq -r .type)
+case "$kind" in
+open) echo open >> '{}'; echo '{{"protocol":1,"type":"ready"}}' ;;
+submit)
+  uuid=$(printf '%s' "$line" | jq -r .uuid)
+  attempt=$(printf '%s' "$line" | jq -r .attempt_id)
+  echo "$uuid" >> '{}'
+  printf '{{"protocol":1,"type":"scheduled","attempt_id":"%s","uuid":"%s"}}\n' "$attempt" "$uuid" ;;
+close) echo close >> '{}'; exit 0 ;;
+esac
+done"#,
+            log.display(),
+            log.display(),
+            log.display()
+        ),
+    );
+    let app = app(&f).with_publisher(Publisher::new(worker, PathBuf::from("unused")));
+    let publish = || PublishRequest {
+        uuids: None,
+        headless: true,
+    };
+    let first = app
+        .publish(publish(), Arc::new(AtomicBool::new(false)))
+        .await
+        .unwrap();
+    assert_eq!((first.published, first.failed), (1, 0));
+    let before_second = std::fs::read(&f.store.paths().json).unwrap();
+    let calls_before = std::fs::read(&log).unwrap();
+
+    let second = app
+        .publish(publish(), Arc::new(AtomicBool::new(false)))
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            second.published,
+            second.failed,
+            second.unknown,
+            second.unattempted
+        ),
+        (0, 0, 0, 0)
+    );
+    assert_eq!(second.error, None);
+    assert!(second.outcomes.is_empty());
+    assert_eq!(std::fs::read(&log).unwrap(), calls_before);
+    assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), before_second);
+}
+
 fn configured_fixture() -> Fixture {
     let f = Fixture::new();
     let image = f.image("1.png", 4, 3);

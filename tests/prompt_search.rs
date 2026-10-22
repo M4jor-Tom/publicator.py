@@ -67,6 +67,10 @@ fn prompt_text_search_returns_only_exact_text_matches() {
     )
     .unwrap();
     assert_eq!(result.exact.len(), 1);
+    assert_eq!(
+        result.exact[0].path,
+        art.join(format!("prompt.txt_{digest}.png"))
+    );
     assert!(result.maybe.is_empty());
     assert_eq!(result.skipped, 0);
     assert!(!result.truncated);
@@ -160,16 +164,84 @@ fn feature_off_search_is_inert_and_audit_counts_files_only() {
 }
 
 #[test]
-fn audit_counts_parsed_exact_and_distinct_versions() {
+fn prompt_audit_counts_each_resolution_and_prints_parsed_rate_first() {
     let (dir, cfg) = setup();
     let digest = cfg::digest(b"A Moonlit Garden");
+    let art = dir.path().join("art");
+    image(&art, b"one", &format!("prompt.txt_{digest}.png"));
+    image(&art, b"two", &format!("prompt.txt_{}.png", "f".repeat(64)));
     image(
-        &dir.path().join("art"),
-        b"one",
-        &format!("prompt.txt_{digest}.png"),
+        &art,
+        b"three",
+        &format!("unknown.txt_{}.png", "e".repeat(64)),
     );
-    image(&dir.path().join("art"), b"two", "plain.png");
+    image(&art, b"four", "plain.png");
     let counts = audit(dir.path(), &cfg, Some(&archive(dir.path(), &cfg))).unwrap();
+    assert_eq!(
+        (
+            counts.files,
+            counts.parsed,
+            counts.exact,
+            counts.exact_versions,
+            counts.nearest,
+            counts.nearest_versions,
+            counts.unknown
+        ),
+        (4, 3, 1, 1, 1, 1, 1)
+    );
+    std::fs::write(
+        dir.path().join("publicator.toml"),
+        r#"
+publicable = ["art"]
+[prompts]
+repo = "prompts"
+filename = '(?P<lineage>[^_]+)_(?P<version>[a-f0-9]+)\.png'
+version_hash = "sha256"
+"#,
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_publicator"))
+        .args(["prompt-audit", "--data-dir", dir.path().to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = String::from_utf8(output.stdout).unwrap();
+    assert!(report.lines().next().unwrap().starts_with("parsed: 3 of 4"));
+    assert!(report.contains("exact: 1 images / 1 versions"));
+    assert!(report.contains("nearest: 1 images / 1 versions"));
+    assert!(report.contains("unknown: 1"));
+}
+
+#[test]
+fn broken_optional_git_archive_is_unknown_for_audit_and_visible_for_prompt_search() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("prompts")).unwrap();
+    let art = dir.path().join("art");
+    std::fs::create_dir(&art).unwrap();
+    let prompt_config = PromptConfig {
+        repo: "prompts".into(),
+        filename: r"(?P<lineage>[^_]+)_(?P<version>[a-f0-9]+)\.png".into(),
+        version_hash: "sha256".into(),
+    };
+    let cfg = Config {
+        publicable: vec!["art".into()],
+        prompts: Some(prompt_config.clone()),
+        ..Config::default()
+    };
+    image(
+        &art,
+        b"no archive available",
+        &format!("prompt.txt_{}.png", cfg::digest(b"not archived")),
+    );
+    let archive = PromptArchive::from_config(dir.path(), &prompt_config)
+        .unwrap()
+        .unwrap();
+
+    let counts = audit(dir.path(), &cfg, Some(&archive)).unwrap();
     assert_eq!(
         (
             counts.files,
@@ -178,9 +250,45 @@ fn audit_counts_parsed_exact_and_distinct_versions() {
             counts.nearest,
             counts.unknown
         ),
-        (2, 1, 1, 0, 0)
+        (1, 1, 0, 0, 1)
     );
-    assert_eq!((counts.exact_versions, counts.nearest_versions), (1, 0));
+
+    let store = store(&dir, cfg);
+    let error = search(
+        &store,
+        &Search {
+            limit: 25,
+            paths: vec!["art".into()],
+        },
+        Some(&archive),
+        Some("moonlit"),
+        None,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("prompt archive unavailable"));
+}
+
+#[test]
+fn audit_without_prompt_config_counts_no_files_as_all_zeroes() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("art")).unwrap();
+    let config = Config {
+        publicable: vec!["art".into()],
+        ..Config::default()
+    };
+    let counts = audit(dir.path(), &config, None).unwrap();
+    assert_eq!(
+        (
+            counts.files,
+            counts.parsed,
+            counts.exact,
+            counts.exact_versions,
+            counts.nearest,
+            counts.nearest_versions,
+            counts.unknown
+        ),
+        (0, 0, 0, 0, 0, 0, 0)
+    );
 }
 
 fn store(dir: &tempfile::TempDir, config: Config) -> publicator::store::Store {

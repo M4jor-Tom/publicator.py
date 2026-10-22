@@ -181,7 +181,7 @@ fn calendar_timeline_keeps_each_apparition_and_its_actual_url() {
     let events = publicator::calendar::timeline(&rows).unwrap();
     assert_eq!(events.len(), 2);
     assert_eq!(events[1].url.as_deref(), Some("https://example.test/item"));
-    assert_eq!(events[0].title, "<literal>");
+    assert!(events.iter().all(|event| event.title == "<literal>"));
 }
 
 #[cfg(feature = "desktop")]
@@ -490,6 +490,120 @@ done"#,
         "published_or_scheduled"
     );
     assert_eq!(saved[1]["apparitions"][0]["state"], "unpublished");
+}
+
+#[cfg(feature = "desktop")]
+#[tokio::test]
+async fn duplicate_publish_during_a_held_delivery_never_starts_a_second_worker() {
+    use iced_runtime::{Action, futures::futures::StreamExt};
+    use publicator::ui::Message;
+    use std::time::Duration;
+
+    let f = publishing_fixture();
+    f.write(serde_json::json!([
+        pending_publication(&f, 32),
+        pending_publication(&f, 33)
+    ]));
+    let started = f.path("duplicate-worker-started");
+    let release = f.path("duplicate-worker-release");
+    let calls = f.path("duplicate-worker-calls");
+    let body = format!(
+        r#"while IFS= read -r line; do
+kind=$(printf '%s' "$line" | jq -r .type)
+case "$kind" in
+open) echo '{{"protocol":1,"type":"ready"}}' ;;
+submit)
+  uuid=$(printf '%s' "$line" | jq -r .uuid)
+  attempt=$(printf '%s' "$line" | jq -r .attempt_id)
+  echo "$uuid" >> '{}'
+  if [ ! -e '{}' ]; then touch '{}'; while [ ! -e '{}' ]; do sleep 0.01; done; fi
+  printf '{{"protocol":1,"type":"scheduled","attempt_id":"%s","uuid":"%s","url":"https://example.test/%s"}}\n' "$attempt" "$uuid" "$uuid" ;;
+close) exit 0 ;;
+esac
+done"#,
+        calls.display(),
+        started.display(),
+        started.display(),
+        release.display()
+    );
+    let worker = fake_publisher_worker(&f, &body);
+    let (mut app, store, init) = publishing_ui_app(&f, &worker);
+    dispatch_ui_task(&mut app, init).await;
+    let first = app.update(Message::PublishSelected);
+    let mut first_actions = iced_runtime::task::into_stream(first).expect("first publish task");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            tokio::select! {
+                _ = async {
+                    while !started.exists() {
+                        tokio::task::yield_now().await;
+                    }
+                } => break,
+                action = first_actions.next() => match action {
+                    Some(Action::Output(message)) => panic!("first publish ended before the gate: {message:?}"),
+                    Some(_) => {},
+                    None => panic!("first publish task ended before the worker gate"),
+                }
+            }
+        }
+    })
+    .await
+    .expect("first worker reached gate");
+
+    let duplicate = app.update(Message::PublishSelected);
+    let mut duplicate_actions =
+        iced_runtime::task::into_stream(duplicate).expect("duplicate publish task");
+    let duplicate = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(Action::Output(message)) = duplicate_actions.next().await {
+                break message;
+            }
+        }
+    })
+    .await
+    .expect("duplicate publish was rejected without waiting for first delivery");
+    assert!(matches!(
+        duplicate,
+        Message::PublishFinished(ref completion)
+            if completion.result.as_ref().is_err_and(|error| error.contains("already active"))
+    ));
+    assert_eq!(
+        std::fs::read_to_string(&calls)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        [common::id(32)]
+    );
+
+    std::fs::write(&release, "continue").unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(Action::Output(message)) = first_actions.next().await {
+                break message;
+            }
+        }
+    })
+    .await
+    .expect("first publish completes after release");
+    assert!(matches!(first, Message::PublishFinished(_)));
+    let _ = app.update(first);
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&store.paths().json).unwrap()).unwrap();
+    assert_eq!(
+        saved[0]["apparitions"][0]["state"],
+        "published_or_scheduled"
+    );
+    assert_eq!(
+        saved[1]["apparitions"][0]["state"],
+        "published_or_scheduled"
+    );
+    assert_eq!(
+        std::fs::read_to_string(calls)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        [common::id(32), common::id(33)]
+    );
 }
 
 #[cfg(feature = "desktop")]

@@ -89,6 +89,43 @@ fn title_limit_counts_unicode_characters_not_utf8_bytes() {
     f.write(json!([publication]));
     assert!(approve_metadata(&f.store, &id(1)).is_err());
     assert_eq!(f.store.read().unwrap()[0]["state"], "SCHEDULED");
+    let before = std::fs::read(&f.store.paths().json).unwrap();
+    assert!(
+        save_metadata(
+            &f.store,
+            &id(1),
+            &MetadataPatch {
+                title: Some("é".repeat(51)),
+                description: None,
+            },
+        )
+        .is_err()
+    );
+    assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), before);
+}
+
+#[test]
+fn saving_an_embedded_marker_keeps_a_draft_that_cannot_be_approved() {
+    let f = Fixture::new();
+    f.write(json!([row(1, "SCHEDULED")]));
+    save_metadata(
+        &f.store,
+        &id(1),
+        &MetadataPatch {
+            title: Some("[[PUBLICATOR:TODO_GENERATE]] embedded".into()),
+            description: None,
+        },
+    )
+    .unwrap();
+    let saved = &f.store.read().unwrap()[0];
+    assert_eq!(saved["title"], "[[PUBLICATOR:TODO_GENERATE]] embedded");
+    assert_eq!(saved["state"], "SCHEDULED");
+    let before_approval = std::fs::read(&f.store.paths().json).unwrap();
+    assert!(approve_metadata(&f.store, &id(1)).is_err());
+    assert_eq!(
+        std::fs::read(&f.store.paths().json).unwrap(),
+        before_approval
+    );
 }
 
 #[test]
@@ -109,6 +146,28 @@ fn merge_does_not_overwrite_a_manual_field() {
     .unwrap();
     assert_eq!(f.read()[0]["title"], "Manual");
     assert_eq!(f.read()[0]["state"], "DESCRIBED");
+}
+
+#[test]
+fn generated_title_preserves_a_manual_description() {
+    let f = Fixture::new();
+    let mut publication = row(1, "SCHEDULED");
+    publication["title"] = json!(GENERATE_MARKER);
+    publication["description"] = json!("Manual description");
+    f.write(json!([publication]));
+    merge_generated_markers(
+        &f.store,
+        &id(1),
+        &Metadata {
+            title: "Generated".into(),
+            description: "Ignored stale description".into(),
+        },
+    )
+    .unwrap();
+    let saved = f.read();
+    assert_eq!(saved[0]["title"], "Generated");
+    assert_eq!(saved[0]["description"], "Manual description");
+    assert_eq!(saved[0]["state"], "DESCRIBED");
 }
 
 #[test]
@@ -222,6 +281,12 @@ fn merging_both_markers_with_valid_pair_advances_to_described() {
     assert_eq!(saved[0]["title"], "AI title");
     assert_eq!(saved[0]["description"], "AI description");
     assert_eq!(saved[0]["state"], "DESCRIBED");
+    let before_reapproval = std::fs::read(&f.store.paths().json).unwrap();
+    assert!(approve_metadata(&f.store, &id(1)).is_err());
+    assert_eq!(
+        std::fs::read(&f.store.paths().json).unwrap(),
+        before_reapproval
+    );
 }
 
 #[test]
@@ -264,6 +329,49 @@ fn provider_result_merges_only_fields_still_marked_after_concurrent_edit() {
     let saved = f.store.read().unwrap();
     assert_eq!(saved[0]["title"], "New manual title");
     assert_eq!(saved[0]["description"], "AI description");
+    assert_eq!(saved[0]["state"], "DESCRIBED");
+}
+
+#[test]
+fn provider_result_preserves_a_newer_manual_description_and_generates_title() {
+    let f = Arc::new(Fixture::new());
+    let mut publication = row(1, "SCHEDULED");
+    publication["title"] = json!(GENERATE_MARKER);
+    publication["description"] = json!(GENERATE_MARKER);
+    f.write(json!([publication]));
+    let started = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let worker = {
+        let (f, started, release) = (Arc::clone(&f), Arc::clone(&started), Arc::clone(&release));
+        std::thread::spawn(move || {
+            started.wait();
+            release.wait();
+            merge_generated_markers(
+                &f.store,
+                &id(1),
+                &Metadata {
+                    title: "AI title".into(),
+                    description: "Stale AI description".into(),
+                },
+            )
+            .unwrap();
+        })
+    };
+    started.wait();
+    save_metadata(
+        &f.store,
+        &id(1),
+        &MetadataPatch {
+            title: None,
+            description: Some("Concurrent draft".into()),
+        },
+    )
+    .unwrap();
+    release.wait();
+    worker.join().unwrap();
+    let saved = f.store.read().unwrap();
+    assert_eq!(saved[0]["title"], "AI title");
+    assert_eq!(saved[0]["description"], "Concurrent draft");
     assert_eq!(saved[0]["state"], "DESCRIBED");
 }
 

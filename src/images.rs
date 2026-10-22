@@ -91,10 +91,23 @@ pub fn find_candidates(store: &Store, search: &Search) -> Result<Vec<Candidate>>
         }
         collect_images(&root, &mut paths)?;
     }
-    paths.sort_by_key(|_| uuid::Uuid::new_v4());
-    let references = published_hashes(&store.read()?);
+    let mut paths = paths
+        .into_iter()
+        .map(|path| (uuid::Uuid::new_v4(), path))
+        .collect::<Vec<_>>();
+    paths.sort_unstable_by_key(|(key, _)| *key);
+    let rows = store.read()?;
+    let references = published_hashes(&rows);
+    let referenced_basenames = published_basenames(&rows);
     let mut candidates = Vec::new();
-    for path in paths {
+    for (_, path) in paths {
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| referenced_basenames.contains(name))
+        {
+            continue;
+        }
         match file_sha512(&path) {
             Ok(sha512) if !references.contains(&sha512) => {
                 candidates.push(Candidate { path, sha512 })
@@ -130,6 +143,24 @@ fn collect_images(root: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn published_basenames(rows: &[Value]) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for row in rows {
+        for key in ["files", "previewFilesIfNotFree"] {
+            if let Some(files) = row.get(key).and_then(Value::as_array) {
+                for file in files {
+                    for key in ["basename", "fileName"] {
+                        if let Some(name) = file.get(key).and_then(Value::as_str) {
+                            names.insert(name.to_owned());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    names
 }
 
 fn published_hashes(rows: &[Value]) -> HashSet<String> {

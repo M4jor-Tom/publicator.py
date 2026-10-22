@@ -2,10 +2,11 @@ use super::{App, Message};
 use crate::{
     application::Application,
     images::{self, Candidate, Search},
+    prompts,
 };
 use iced::{
     Element, Length, Task,
-    widget::{button, checkbox, column, row, scrollable, text},
+    widget::{button, checkbox, column, row, scrollable, text, text_input},
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -39,6 +40,38 @@ pub(super) fn search_task(app: &App) -> Task<Message> {
             .map_err(|error| error.to_string())
         },
         Message::SearchFinished,
+    )
+}
+
+pub(super) fn prompt_search_task(app: &App) -> Task<Message> {
+    let Some(archive) = app.prompt_archive.clone() else {
+        return Task::done(Message::PromptSearchFinished(Err(
+            "prompt archive is not configured".into(),
+        )));
+    };
+    let store = app.application.store().clone();
+    let search = Search {
+        limit: app.search_limit,
+        paths: app.search_paths.clone(),
+    };
+    let needle = (!app.prompt_query.trim().is_empty()).then(|| app.prompt_query.clone());
+    let lineage = (!app.prompt_lineage.trim().is_empty()).then(|| app.prompt_lineage.clone());
+    Task::perform(
+        async move {
+            tokio::task::spawn_blocking(move || {
+                prompts::search(
+                    &store,
+                    &search,
+                    Some(&archive),
+                    needle.as_deref(),
+                    lineage.as_deref(),
+                )
+            })
+            .await
+            .unwrap_or_else(|error| Err(crate::error::Error::Config(error.to_string())))
+            .map_err(|error| error.to_string())
+        },
+        Message::PromptSearchFinished,
     )
 }
 
@@ -151,6 +184,10 @@ pub(super) fn delete_task(app: &mut App) -> Task<Message> {
     )
 }
 
+fn exact_prompt_heading_visible(lineage: &str, exact: &[Candidate]) -> bool {
+    !lineage.trim().is_empty() && !exact.is_empty()
+}
+
 pub fn view(state: &App) -> Element<'_, Message> {
     let mut controls = row![
         text("Limit"),
@@ -171,42 +208,30 @@ pub fn view(state: &App) -> Element<'_, Message> {
         );
     }
     let mut cards = column![].spacing(10);
-    for candidate in &state.candidates {
-        let candidate_pick = candidate.clone();
-        let candidate_delete = candidate.clone();
-        let preview: Element<'_, Message> = match state.previews.get(&candidate.path) {
-            None | Some(None) => text("Loading preview…").into(),
-            Some(Some(Ok(path))) => {
-                iced::widget::image(iced::widget::image::Handle::from_path(path))
-                    .width(Length::Fixed(180.0))
-                    .height(Length::Fixed(180.0))
-                    .into()
+    if let Some(matches) = &state.prompt_search {
+        if exact_prompt_heading_visible(&state.prompt_lineage, &matches.exact) {
+            cards = cards.push(text("Exact archived prompt matches"));
+        }
+        for candidate in &matches.exact {
+            cards = cards.push(candidate_card(state, candidate));
+        }
+        if !matches.maybe.is_empty() {
+            cards = cards.push(text(
+                "Possible lineage matches — prompt may be from this archive",
+            ));
+            for candidate in &matches.maybe {
+                cards = cards.push(candidate_card(state, candidate));
             }
-            Some(Some(Err(_error))) if !candidate.path.exists() => text("Artwork missing").into(),
-            Some(Some(Err(error))) => text(format!("Preview unavailable: {error}")).into(),
-        };
-        cards = cards.push(
-            row![
-                preview,
-                column![
-                    text(
-                        candidate
-                            .path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("Artwork")
-                    ),
-                    button("Pick").on_press(Message::Pick(candidate_pick)),
-                    button("Delete…").on_press(Message::AskDelete(candidate_delete)),
-                ]
-                .spacing(6),
-            ]
-            .spacing(10),
-        );
-        cards = cards.push(match state.prompt_match(&candidate.path) {
-            Some(match_) => super::prompt::view(match_),
-            None => text("Resolving prompt…").into(),
-        });
+        }
+        if matches.truncated {
+            cards = cards.push(text(
+                "More matches exist; narrow the prompt text or lineage",
+            ));
+        }
+    } else {
+        for candidate in &state.candidates {
+            cards = cards.push(candidate_card(state, candidate));
+        }
     }
     if let Some(candidate) = &state.pending_delete {
         cards = cards.push(
@@ -218,16 +243,88 @@ pub fn view(state: &App) -> Element<'_, Message> {
             .spacing(8),
         );
     }
-    column![
-        controls,
-        button("Search").on_press(Message::Search),
-        scrollable(cards)
-            .height(Length::Fill)
-            .on_scroll(|viewport| Message::PreviewViewport {
-                offset: viewport.absolute_offset().y,
-                height: viewport.bounds().height,
-            })
+    let mut content = column![controls].spacing(12);
+    if state.prompt_archive.is_some() {
+        content = content
+            .push(text("Exact prompt text (optional)"))
+            .push(
+                text_input("Search archived prompt text", &state.prompt_query)
+                    .on_input(Message::PromptQueryChanged),
+            )
+            .push(text(
+                "Prompt lineage path (optional; includes possible matches)",
+            ))
+            .push(
+                text_input("e.g. prompts/lineage.txt", &state.prompt_lineage)
+                    .on_input(Message::PromptLineageChanged),
+            );
+    }
+    content
+        .push(button("Search").on_press(Message::Search))
+        .push(
+            scrollable(cards)
+                .height(Length::Fill)
+                .on_scroll(|viewport| Message::PreviewViewport {
+                    offset: viewport.absolute_offset().y,
+                    height: viewport.bounds().height,
+                }),
+        )
+        .into()
+}
+
+fn candidate_card<'a>(state: &'a App, candidate: &'a Candidate) -> Element<'a, Message> {
+    let candidate_pick = candidate.clone();
+    let candidate_delete = candidate.clone();
+    let preview: Element<'_, Message> = match state.previews.get(&candidate.path) {
+        None | Some(None) => text("Loading preview…").into(),
+        Some(Some(Ok(path))) => iced::widget::image(iced::widget::image::Handle::from_path(path))
+            .width(Length::Fixed(180.0))
+            .height(Length::Fixed(180.0))
+            .into(),
+        Some(Some(Err(_error))) if !candidate.path.exists() => text("Artwork missing").into(),
+        Some(Some(Err(error))) => text(format!("Preview unavailable: {error}")).into(),
+    };
+    let mut content = column![
+        row![
+            preview,
+            column![
+                text(
+                    candidate
+                        .path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("Artwork")
+                ),
+                button("Pick").on_press(Message::Pick(candidate_pick)),
+                button("Delete…").on_press(Message::AskDelete(candidate_delete)),
+            ]
+            .spacing(6),
+        ]
+        .spacing(10)
     ]
-    .spacing(12)
-    .into()
+    .spacing(6);
+    if state.prompt_archive.is_some() || state.prompt_archive_error.is_some() {
+        content = content.push(match state.prompt_match(&candidate.path) {
+            Some(match_) => super::prompt::view(match_),
+            None => text("Resolving prompt…").into(),
+        });
+    }
+    content.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn exact_prompt_heading_requires_lineage_filter_and_exact_results() {
+        let exact = [Candidate {
+            path: PathBuf::from("picked/art.png"),
+            sha512: "digest".into(),
+        }];
+        assert!(exact_prompt_heading_visible("lineage/prompt.txt", &exact));
+        assert!(!exact_prompt_heading_visible("", &exact));
+        assert!(!exact_prompt_heading_visible("lineage/prompt.txt", &[]));
+    }
 }
