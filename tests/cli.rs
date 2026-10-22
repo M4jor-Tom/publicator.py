@@ -264,6 +264,7 @@ fn validation_reports_missing_or_malformed_data_as_failure() {
     assert!(!malformed.status.success());
 }
 
+#[cfg(feature = "desktop")]
 #[test]
 fn ui_rejects_unknown_legacy_limit_flag() {
     let output = Command::new(env!("CARGO_BIN_EXE_publicator-ui"))

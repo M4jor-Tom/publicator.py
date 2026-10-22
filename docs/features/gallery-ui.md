@@ -27,4 +27,5 @@ Publish selection is separate from submission. Only registered platform cells ar
 ## Gotchas
 
 - The native UI is a local trusted-human application, not a network service.
+- The GUI binary and its CLI smoke test require `--features desktop`; default headless tests must not launch that optional binary.
 - Keep test fixtures disposable and publishers/providers stubbed. Never use the UI acceptance harness to submit real art.
