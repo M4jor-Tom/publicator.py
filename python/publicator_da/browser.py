@@ -112,15 +112,14 @@ def _pick_schedule(page, s):
     selected = None
     for _ in range(24):
         buttons = page.locator('#schedule-draft-date-picker button[aria-label]')
-        matches = [
-            buttons.nth(index)
-            for index in range(buttons.count())
-            if date_label.search(buttons.nth(index).get_attribute("aria-label") or "")
-        ]
+        labels = buttons.evaluate_all(
+            "buttons => buttons.map(button => button.getAttribute('aria-label') || '')"
+        )
+        matches = [index for index, label in enumerate(labels) if date_label.search(label)]
         if len(matches) > 1:
             raise RuntimeError(f"calendar exposes an ambiguous full requested date {y}-{m:02}-{d:02}")
         if matches:
-            selected = matches[0]
+            selected = buttons.nth(matches[0])
             break
         page.locator('button[aria-label="Go to the Next Month"]').click(); page.wait_for_timeout(200)
     if selected is None:

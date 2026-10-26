@@ -28,7 +28,13 @@ class CalendarLocator:
         return len(self.labels)
 
     def get_attribute(self, name):
+        if self.page.stale_index == self.index:
+            raise RuntimeError("calendar button detached")
         return self.labels[self.index] if name == "aria-label" else None
+
+    def evaluate_all(self, expression):
+        self.page.label_snapshots += 1
+        return list(self.labels)
 
     def click(self, *args, **kwargs):
         if self.labels:
@@ -55,6 +61,8 @@ class CalendarPage:
         self.labels = labels
         self.selector = None
         self.selected = None
+        self.stale_index = None
+        self.label_snapshots = 0
         self.next_months = 0
         self.date_picker_opened = False
         self.menu_opened = False
@@ -88,6 +96,18 @@ def test_schedule_chooses_the_requested_full_year_and_exact_day():
     ])
     browser._pick_schedule(page, {"year": 2026, "month": 1, "day": 1, "hour": 20})
     assert page.selected == "Thursday, January 1, 2026"
+    assert page.confirmed
+
+
+def test_schedule_snapshots_calendar_labels_instead_of_waiting_on_each_button():
+    labels = ["Tuesday, November 10, 2026", *([""] * 32)]
+    page = CalendarPage(labels)
+    page.stale_index = 32
+
+    browser._pick_schedule(page, {"year": 2026, "month": 11, "day": 10, "hour": 20})
+
+    assert page.selected == labels[0]
+    assert page.label_snapshots == 1
     assert page.confirmed
 
 
