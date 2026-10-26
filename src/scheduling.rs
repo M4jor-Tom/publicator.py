@@ -41,16 +41,18 @@ fn week_day(value: Option<&Value>) -> Result<Weekday> {
         Some(_) => return Err(config_error("day must be a weekday name")),
     }
     .to_ascii_lowercase();
-    match name.as_str() {
-        "monday" => Ok(Weekday::Mon),
-        "tuesday" => Ok(Weekday::Tue),
-        "wednesday" => Ok(Weekday::Wed),
-        "thursday" => Ok(Weekday::Thu),
-        "friday" => Ok(Weekday::Fri),
-        "saturday" => Ok(Weekday::Sat),
-        "sunday" => Ok(Weekday::Sun),
-        _ => Err(config_error(format!("day {name:?} is invalid"))),
-    }
+    [
+        ("monday", Weekday::Mon),
+        ("tuesday", Weekday::Tue),
+        ("wednesday", Weekday::Wed),
+        ("thursday", Weekday::Thu),
+        ("friday", Weekday::Fri),
+        ("saturday", Weekday::Sat),
+        ("sunday", Weekday::Sun),
+    ]
+    .into_iter()
+    .find_map(|(label, day)| (name == label).then_some(day))
+    .ok_or_else(|| config_error(format!("day {name:?} is invalid")))
 }
 
 pub fn profiles(config: &Config) -> Result<Vec<Profile>> {
@@ -63,97 +65,113 @@ pub fn profiles(config: &Config) -> Result<Vec<Profile>> {
     if profile_values.is_empty() {
         return Err(config_error("profiles is empty"));
     }
-    let mut output = Vec::with_capacity(profile_values.len());
     let mut slots_seen = Vec::new();
     let mut names_seen = Vec::new();
-    for (index, value) in profile_values.iter().enumerate() {
-        let table = value
-            .as_table()
-            .ok_or_else(|| config_error(format!("profile {} must be a table", index + 1)))?;
-        if let Some(freq) = table.get("frequency")
-            && freq.as_str() != Some("weekly")
-        {
-            return Err(config_error("frequency must be 'weekly'"));
-        }
-        let name = match table.get("name") {
-            None => "default".to_owned(),
-            Some(Value::String(name)) => name.clone(),
-            Some(_) => return Err(config_error("profile name must be a string")),
-        };
-        if name.trim().is_empty() {
-            return Err(config_error("profile name must not be empty"));
-        }
-        if names_seen.iter().any(|old| old == &name) {
-            return Err(config_error(format!("duplicate profile name {name:?}")));
-        }
-        names_seen.push(name.clone());
-        let weekday = week_day(table.get("day"))?;
-        let hour = int(table.get("hour"), 20, "hour")?;
-        if !(0..=23).contains(&hour) {
-            return Err(config_error(format!("hour must be 0..=23, got {hour}")));
-        }
-        let capacity = int(table.get("per_slot"), 2, "per_slot")?;
-        if capacity < 1 {
-            return Err(config_error(format!(
-                "per_slot must be >= 1, got {capacity}"
-            )));
-        }
-        if slots_seen
-            .iter()
-            .any(|(day, h)| *day == weekday && *h == hour as u32)
-        {
-            return Err(config_error(format!(
-                "profiles collide on day/hour ({weekday}, {hour})"
-            )));
-        }
-        slots_seen.push((weekday, hour as u32));
-        let default_tiers = match table.get("default_tiers") {
-            None => vec![],
-            Some(Value::Array(values)) => values
-                .iter()
-                .map(|v| {
-                    v.as_str()
-                        .map(str::to_owned)
-                        .ok_or_else(|| config_error("default_tiers must contain only strings"))
-                })
-                .collect::<Result<Vec<_>>>()?,
-            Some(_) => return Err(config_error("default_tiers must be an array of tier names")),
-        };
-        if let Some(tier) = default_tiers
-            .iter()
-            .find(|tier| !config.tiers.contains(tier))
-        {
-            return Err(config_error(format!(
-                "profile {name:?} has unconfigured default tier {tier:?}"
-            )));
-        }
-        let default_price = match table.get("default_price") {
-            None => None,
-            Some(v) => {
-                let price = v
-                    .as_float()
-                    .or_else(|| v.as_integer().map(|n| n as f64))
-                    .ok_or_else(|| {
-                        config_error("default_price must be a finite nonnegative number")
-                    })?;
-                if !price.is_finite() || price < 0.0 {
-                    return Err(config_error(
-                        "default_price must be a finite nonnegative number",
-                    ));
-                }
-                Some(price)
+    profile_values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let table = value
+                .as_table()
+                .ok_or_else(|| config_error(format!("profile {} must be a table", index + 1)))?;
+            let name = profile_name(table)?;
+            if names_seen.iter().any(|old| old == &name) {
+                return Err(config_error(format!("duplicate profile name {name:?}")));
             }
-        };
-        output.push(Profile {
-            name,
-            weekday,
-            hour: hour as u32,
-            per_slot: capacity as usize,
-            default_tiers,
-            default_price,
-        });
+            names_seen.push(name.clone());
+            let (weekday, hour, capacity) = profile_slot(table)?;
+            if slots_seen.contains(&(weekday, hour)) {
+                return Err(config_error(format!(
+                    "profiles collide on day/hour ({weekday}, {hour})"
+                )));
+            }
+            slots_seen.push((weekday, hour));
+            let default_tiers = profile_tiers(table, config, &name)?;
+            let default_price = profile_price(table)?;
+            Ok(Profile {
+                name,
+                weekday,
+                hour,
+                per_slot: capacity,
+                default_tiers,
+                default_price,
+            })
+        })
+        .collect()
+}
+
+fn profile_name(table: &toml::Table) -> Result<String> {
+    if let Some(freq) = table.get("frequency")
+        && freq.as_str() != Some("weekly")
+    {
+        return Err(config_error("frequency must be 'weekly'"));
     }
-    Ok(output)
+    let name = match table.get("name") {
+        None => "default".to_owned(),
+        Some(Value::String(name)) => name.clone(),
+        Some(_) => return Err(config_error("profile name must be a string")),
+    };
+    if name.trim().is_empty() {
+        return Err(config_error("profile name must not be empty"));
+    }
+    Ok(name)
+}
+
+fn profile_slot(table: &toml::Table) -> Result<(Weekday, u32, usize)> {
+    let weekday = week_day(table.get("day"))?;
+    let hour = int(table.get("hour"), 20, "hour")?;
+    if !(0..=23).contains(&hour) {
+        return Err(config_error(format!("hour must be 0..=23, got {hour}")));
+    }
+    let capacity = int(table.get("per_slot"), 2, "per_slot")?;
+    if capacity < 1 {
+        return Err(config_error(format!(
+            "per_slot must be >= 1, got {capacity}"
+        )));
+    }
+    Ok((weekday, hour as u32, capacity as usize))
+}
+
+fn profile_tiers(table: &toml::Table, config: &Config, name: &str) -> Result<Vec<String>> {
+    let default_tiers = match table.get("default_tiers") {
+        None => vec![],
+        Some(Value::Array(values)) => values
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| config_error("default_tiers must contain only strings"))
+            })
+            .collect::<Result<Vec<_>>>()?,
+        Some(_) => return Err(config_error("default_tiers must be an array of tier names")),
+    };
+    if let Some(tier) = default_tiers
+        .iter()
+        .find(|tier| !config.tiers.contains(tier))
+    {
+        return Err(config_error(format!(
+            "profile {name:?} has unconfigured default tier {tier:?}"
+        )));
+    }
+    Ok(default_tiers)
+}
+
+fn profile_price(table: &toml::Table) -> Result<Option<f64>> {
+    Ok(match table.get("default_price") {
+        None => None,
+        Some(v) => {
+            let price = v
+                .as_float()
+                .or_else(|| v.as_integer().map(|n| n as f64))
+                .ok_or_else(|| config_error("default_price must be a finite nonnegative number"))?;
+            if !price.is_finite() || price < 0.0 {
+                return Err(config_error(
+                    "default_price must be a finite nonnegative number",
+                ));
+            }
+            Some(price)
+        }
+    })
 }
 
 fn resolve_naive(naive: NaiveDateTime, zone: Tz) -> Result<i64> {
@@ -221,6 +239,10 @@ pub fn slots(profile: &Profile, zone: Tz, now: i64) -> Result<Vec<i64>> {
             .checked_add_days(Days::new(7))
             .ok_or_else(|| config_error("slot date overflow"))?;
     }
+    weekly_slots(profile, zone, day)
+}
+
+fn weekly_slots(profile: &Profile, zone: Tz, mut day: chrono::NaiveDate) -> Result<Vec<i64>> {
     let mut output = Vec::with_capacity(SLOT_HORIZON_WEEKS);
     for _ in 0..SLOT_HORIZON_WEEKS {
         output.push(resolve_naive(

@@ -231,41 +231,43 @@ pub fn edit_date(store: &Store, uuid: &str, edit: DateEdit, now: i64) -> Result<
     store.mutate(|rows| {
         let row = find_mut(rows, uuid)?;
         require_editable(row)?;
-        match edit {
-            DateEdit::Custom(wall) => {
-                let ts = resolve_wall_clock(&wall, schedule_zone(store.config())?)?;
-                row["apparitionTimestampIfDifferentThanSubmission"] = json!(ts);
-                row["scheduleIsManual"] = json!(true);
-            }
-            DateEdit::Epoch(ts) => {
-                row["apparitionTimestampIfDifferentThanSubmission"] = json!(ts);
-                row["scheduleIsManual"] = json!(true);
-            }
-            DateEdit::Preset(name) => {
-                if !profiles(store.config())?
-                    .iter()
-                    .any(|profile| profile.name == name)
-                {
-                    return Err(Error::Validation(format!(
-                        "unknown schedule profile {name:?}"
-                    )));
-                }
-                row["scheduleProfile"] = json!(name);
-                row["scheduleIsManual"] = json!(false);
-                row.as_object_mut()
-                    .unwrap()
-                    .remove("apparitionTimestampIfDifferentThanSubmission");
-            }
-            DateEdit::Suggested => {
-                row["scheduleIsManual"] = json!(false);
-                row.as_object_mut()
-                    .unwrap()
-                    .remove("apparitionTimestampIfDifferentThanSubmission");
-                row.as_object_mut().unwrap().remove("scheduleProfile");
-            }
-        }
+        apply_date_edit(row, edit, store.config())?;
         repack(rows, store.config(), now)
     })
+}
+
+fn apply_date_edit(row: &mut Value, edit: DateEdit, config: &Config) -> Result<()> {
+    match edit {
+        DateEdit::Custom(wall) => {
+            let ts = resolve_wall_clock(&wall, schedule_zone(config)?)?;
+            row["apparitionTimestampIfDifferentThanSubmission"] = json!(ts);
+            row["scheduleIsManual"] = json!(true);
+        }
+        DateEdit::Epoch(ts) => {
+            row["apparitionTimestampIfDifferentThanSubmission"] = json!(ts);
+            row["scheduleIsManual"] = json!(true);
+        }
+        DateEdit::Preset(name) => {
+            if !profiles(config)?.iter().any(|profile| profile.name == name) {
+                return Err(Error::Validation(format!(
+                    "unknown schedule profile {name:?}"
+                )));
+            }
+            row["scheduleProfile"] = json!(name);
+            row["scheduleIsManual"] = json!(false);
+            row.as_object_mut()
+                .unwrap()
+                .remove("apparitionTimestampIfDifferentThanSubmission");
+        }
+        DateEdit::Suggested => {
+            row["scheduleIsManual"] = json!(false);
+            row.as_object_mut()
+                .unwrap()
+                .remove("apparitionTimestampIfDifferentThanSubmission");
+            row.as_object_mut().unwrap().remove("scheduleProfile");
+        }
+    }
+    Ok(())
 }
 
 pub fn approve_date(store: &Store, uuid: &str, now: i64) -> Result<()> {
@@ -309,91 +311,125 @@ pub fn select(
             rows.iter_mut().collect()
         };
         for pub_ in selected_rows {
-            let is_target = matches!(phase(pub_)?, Phase::Described | Phase::Appeared);
-            if !is_target {
-                if uuid.is_some() {
-                    return Err(Error::InvalidState(
-                        "platform selection requires DESCRIBED or APPEARED publication".into(),
-                    ));
-                }
-                continue;
-            }
-            let names: Vec<&str> = platform
-                .map(|name| vec![name])
-                .unwrap_or_else(|| REGISTERED_PLATFORMS.to_vec());
-            for name in names {
-                let title = pub_
-                    .get("title")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned();
-                let description = pub_
-                    .get("description")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned();
-                let profile_name = pub_
-                    .get("scheduleProfile")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
-                let apps = pub_
-                    .get_mut("apparitions")
-                    .and_then(Value::as_array_mut)
-                    .ok_or_else(|| Error::Validation("apparitions must be an array".into()))?;
-                let existing = apps
-                    .iter()
-                    .position(|app| app.get("platformName").and_then(Value::as_str) == Some(name));
-                match (selected, existing) {
-                    (_, Some(index))
-                        if apps[index].get("state").and_then(Value::as_str)
-                            == Some("published_or_scheduled") =>
-                    {
-                        if uuid.is_some() && !selected {
-                            return Err(Error::InvalidState(
-                                "successful selection is locked".into(),
-                            ));
-                        }
-                    }
-                    (true, Some(_)) => {}
-                    (true, None) => {
-                        validate_metadata(&title, &description)?;
-                        let mut app = json!({"platformName": name, "state": "unpublished"});
-                        if name == "deviantart"
-                            && let Some(profile) =
-                                profiles(store.config())?.into_iter().find(|profile| {
-                                    Some(profile.name.as_str()) == profile_name.as_deref()
-                                })
-                        {
-                            if !profile.default_tiers.is_empty() {
-                                app["tiers"] = json!(profile.default_tiers);
-                            }
-                            if let Some(price) = profile.default_price {
-                                app["priceIfNotFree"] = json!(price);
-                            }
-                        }
-                        apps.push(app);
-                        pub_["state"] = json!("DESCRIBED");
-                    }
-                    (false, Some(index)) => {
-                        apps.remove(index);
-                    }
-                    (false, None) => {}
-                }
-            }
-            if pub_
-                .get("apparitions")
-                .and_then(Value::as_array)
-                .is_some_and(|apps| !apps.is_empty())
-            {
-                pub_["state"] = if deliveries_complete(pub_) {
-                    json!("APPEARED")
-                } else {
-                    json!("DESCRIBED")
-                };
-            }
+            select_publication(pub_, platform, selected, uuid.is_some(), store.config())?;
         }
         Ok(())
     })
+}
+
+fn select_publication(
+    pub_: &mut Value,
+    platform: Option<&str>,
+    selected: bool,
+    explicit: bool,
+    config: &Config,
+) -> Result<()> {
+    let is_target = matches!(phase(pub_)?, Phase::Described | Phase::Appeared);
+    if !is_target {
+        if explicit {
+            return Err(Error::InvalidState(
+                "platform selection requires DESCRIBED or APPEARED publication".into(),
+            ));
+        }
+        return Ok(());
+    }
+    let names: Vec<&str> = platform
+        .map(|name| vec![name])
+        .unwrap_or_else(|| REGISTERED_PLATFORMS.to_vec());
+    for name in names {
+        select_platform(pub_, name, selected, explicit, config)?;
+    }
+    if pub_
+        .get("apparitions")
+        .and_then(Value::as_array)
+        .is_some_and(|apps| !apps.is_empty())
+    {
+        pub_["state"] = if deliveries_complete(pub_) {
+            json!("APPEARED")
+        } else {
+            json!("DESCRIBED")
+        };
+    }
+    Ok(())
+}
+
+fn select_platform(
+    pub_: &mut Value,
+    name: &str,
+    selected: bool,
+    explicit: bool,
+    config: &Config,
+) -> Result<()> {
+    let title = pub_
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let description = pub_
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let profile_name = pub_
+        .get("scheduleProfile")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let apps = pub_
+        .get_mut("apparitions")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| Error::Validation("apparitions must be an array".into()))?;
+    let existing = apps
+        .iter()
+        .position(|app| app.get("platformName").and_then(Value::as_str) == Some(name));
+    match (selected, existing) {
+        (_, Some(index))
+            if apps[index].get("state").and_then(Value::as_str)
+                == Some("published_or_scheduled") =>
+        {
+            if explicit && !selected {
+                return Err(Error::InvalidState("successful selection is locked".into()));
+            }
+        }
+        (true, None) => {
+            apps.push(new_apparition(
+                name,
+                &title,
+                &description,
+                profile_name.as_deref(),
+                config,
+            )?);
+            pub_["state"] = json!("DESCRIBED");
+        }
+        (false, Some(index)) => {
+            apps.remove(index);
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn new_apparition(
+    name: &str,
+    title: &str,
+    description: &str,
+    profile_name: Option<&str>,
+    config: &Config,
+) -> Result<Value> {
+    validate_metadata(title, description)?;
+    let mut app = json!({"platformName": name, "state": "unpublished"});
+    if name == "deviantart"
+        && let Some(profile) = profiles(config)?
+            .into_iter()
+            .find(|profile| Some(profile.name.as_str()) == profile_name)
+    {
+        if !profile.default_tiers.is_empty() {
+            app["tiers"] = json!(profile.default_tiers);
+        }
+        if let Some(price) = profile.default_price {
+            app["priceIfNotFree"] = json!(price);
+        }
+    }
+    Ok(app)
 }
 
 pub fn save_options(store: &Store, uuid: &str, options: PlatformOptions) -> Result<()> {
@@ -422,21 +458,25 @@ pub fn save_options(store: &Store, uuid: &str, options: PlatformOptions) -> Resu
         if app.get("state").and_then(Value::as_str) != Some("unpublished") {
             return Err(Error::InvalidState("undelivered selection required".into()));
         }
-        if let Some(price) = options.price {
-            if let Some(price) = price {
-                app["priceIfNotFree"] = json!(price);
-            } else if let Some(object) = app.as_object_mut() {
-                object.remove("priceIfNotFree");
-            }
-        }
-        if let Some(tiers) = options.tiers {
-            app["tiers"] = json!(tiers);
-        }
-        if let Some(galleries) = options.galleries {
-            app["galleries"] = json!(galleries);
-        }
+        apply_options(app, options);
         Ok(())
     })
+}
+
+fn apply_options(app: &mut Value, options: PlatformOptions) {
+    if let Some(price) = options.price {
+        if let Some(price) = price {
+            app["priceIfNotFree"] = json!(price);
+        } else if let Some(object) = app.as_object_mut() {
+            object.remove("priceIfNotFree");
+        }
+    }
+    if let Some(tiers) = options.tiers {
+        app["tiers"] = json!(tiers);
+    }
+    if let Some(galleries) = options.galleries {
+        app["galleries"] = json!(galleries);
+    }
 }
 
 pub fn record_delivery(

@@ -6,7 +6,6 @@ use publicator::{
     publishing::{PublishRequest, Publisher},
 };
 use serde_json::json;
-use std::os::unix::fs::PermissionsExt;
 use std::{
     path::PathBuf,
     sync::{Arc, atomic::AtomicBool},
@@ -58,30 +57,7 @@ async fn historical_only_publications_do_not_start_worker() {
         {"platformName":"historic","state":"unpublished"}
     ]);
     f.write(json!([publication]));
-    let before = std::fs::read(&f.store.paths().json).unwrap();
-    let app = app(&f);
-    let publisher = Publisher::new(
-        PathBuf::from("/does/not/exist"),
-        PathBuf::from("/does/not/exist"),
-    );
-    let report = publisher
-        .publish(
-            &app,
-            PublishRequest {
-                uuids: None,
-                headless: true,
-            },
-            Arc::new(AtomicBool::new(false)),
-        )
-        .await
-        .unwrap();
-    assert_eq!(report.published, 0);
-    assert_eq!(report.failed, 0);
-    assert_eq!(report.unknown, 0);
-    assert_eq!(report.unattempted, 0);
-    assert_eq!(report.error, None);
-    assert!(report.outcomes.is_empty());
-    assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), before);
+    assert_no_worker_started(&f).await;
 }
 #[tokio::test]
 async fn historical_pending_cells_do_not_block_registered_publish_targets() {
@@ -153,17 +129,7 @@ done"#,
     assert!(f.read()[1]["apparitions"][1]["state"] == "unpublished");
 }
 
-#[tokio::test]
-async fn marked_historical_only_publication_is_an_unchanged_noop() {
-    let f = Fixture::new();
-    let mut publication = row(1, "SCHEDULED");
-    publication["title"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
-    publication["apparitions"] = json!([{
-        "platformName":"pixiv",
-        "state":"unpublished",
-        "url":"https://pixiv.example/art/old"
-    }]);
-    f.write(json!([publication]));
+async fn assert_no_worker_started(f: &Fixture) {
     let before = std::fs::read(&f.store.paths().json).unwrap();
     let publisher = Publisher::new(
         PathBuf::from("/does/not/exist"),
@@ -171,7 +137,7 @@ async fn marked_historical_only_publication_is_an_unchanged_noop() {
     );
     let report = publisher
         .publish(
-            &app(&f),
+            &app(f),
             PublishRequest {
                 uuids: None,
                 headless: true,
@@ -195,6 +161,20 @@ async fn marked_historical_only_publication_is_an_unchanged_noop() {
 }
 
 #[tokio::test]
+async fn marked_historical_only_publication_is_an_unchanged_noop() {
+    let f = Fixture::new();
+    let mut publication = row(1, "SCHEDULED");
+    publication["title"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
+    publication["apparitions"] = json!([{
+        "platformName":"pixiv",
+        "state":"unpublished",
+        "url":"https://pixiv.example/art/old"
+    }]);
+    f.write(json!([publication]));
+    assert_no_worker_started(&f).await;
+}
+
+#[tokio::test]
 async fn marked_or_unphased_pending_targets_never_start_the_worker() {
     let f = Fixture::new();
     let mut marked = row(1, "SCHEDULED");
@@ -203,34 +183,7 @@ async fn marked_or_unphased_pending_targets_never_start_the_worker() {
     let mut unphased = row(2, "PICKED");
     unphased["apparitions"] = json!([{"platformName":"deviantart","state":"unpublished"}]);
     f.write(json!([marked, unphased]));
-    let before = std::fs::read(&f.store.paths().json).unwrap();
-    let publisher = Publisher::new(
-        PathBuf::from("/does/not/exist"),
-        PathBuf::from("/does/not/exist"),
-    );
-    let report = publisher
-        .publish(
-            &app(&f),
-            PublishRequest {
-                uuids: None,
-                headless: true,
-            },
-            Arc::new(AtomicBool::new(false)),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        (
-            report.published,
-            report.failed,
-            report.unknown,
-            report.unattempted
-        ),
-        (0, 0, 0, 0)
-    );
-    assert_eq!(report.error, None);
-    assert!(report.outcomes.is_empty());
-    assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), before);
+    assert_no_worker_started(&f).await;
 }
 
 #[tokio::test]
@@ -305,14 +258,10 @@ fn configured_fixture() -> Fixture {
 }
 fn fake_worker(f: &Fixture, body: &str) -> PathBuf {
     let path = f.path("worker.sh");
-    std::fs::write(
+    common::executable::write_executable(
         &path,
-        format!("#!/bin/sh\nif [ \"$1\" = \"--check-steps\" ]; then exit 0; fi\n{body}\n"),
-    )
-    .unwrap();
-    let mut permissions = std::fs::metadata(&path).unwrap().permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&path, permissions).unwrap();
+        &format!("#!/bin/sh\nif [ \"$1\" = \"--check-steps\" ]; then exit 0; fi\n{body}\n"),
+    );
     path
 }
 fn proc_stat(pid: i32) -> Option<(char, i32, i32)> {
@@ -414,17 +363,14 @@ async fn step_check_failure_prevents_worker_session_start() {
     let checked = f.path("checked");
     let started = f.path("started");
     let worker = f.path("worker.sh");
-    std::fs::write(
+    common::executable::write_executable(
         &worker,
-        format!(
+        &format!(
             "#!/bin/sh\nif [ \"$1\" = \"--check-steps\" ]; then touch '{}'; exit 1; fi\ntouch '{}'\n",
             checked.display(),
             started.display()
         ),
-    ).unwrap();
-    let mut permissions = std::fs::metadata(&worker).unwrap().permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&worker, permissions).unwrap();
+    );
     let result = app(&f)
         .with_publisher(Publisher::new(worker, PathBuf::from("unused")))
         .publish(
@@ -519,7 +465,7 @@ async fn shutdown_terminates_worker_descendants() {
     let descendant_pid_file = f.path("descendant.pid");
     let term_file = f.path("descendant.term");
     let descendant = f.path("descendant.py");
-    std::fs::write(
+    common::executable::write_executable(
         &descendant,
         r#"#!/usr/bin/env python3
 import os, signal, sys, time
@@ -536,11 +482,7 @@ with open(info_path, "w") as info:
 while True:
     time.sleep(60)
 "#,
-    )
-    .unwrap();
-    let mut permissions = std::fs::metadata(&descendant).unwrap().permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&descendant, permissions).unwrap();
+    );
     let worker = fake_worker(
         &f,
         &format!(

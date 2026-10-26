@@ -9,13 +9,7 @@ use publicator::{
     ui::{App, Message, UiOptions, describe},
 };
 use serde_json::json;
-use std::{
-    io::{Read, Write},
-    net::TcpListener,
-    sync::{Arc, mpsc},
-    thread,
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 async fn run_tasks(task: iced::Task<Message>) -> Vec<Message> {
     use iced::futures::StreamExt;
@@ -65,6 +59,27 @@ fn fixture_app(f: &Fixture, endpoint: String) -> (App, Arc<Application>) {
     (app, application)
 }
 
+async fn select_local(app: &mut App) {
+    let selected = run_task(app.update(Message::SelectSource(Source::Local))).await;
+    let _ = app.update(selected);
+}
+
+fn edit_manual_metadata(app: &mut App) {
+    for (field, text) in [
+        (publicator::ui::drafts::Field::Title, "Manual title"),
+        (
+            publicator::ui::drafts::Field::Description,
+            "Manual description",
+        ),
+    ] {
+        let _ = app.update(Message::Edited {
+            uuid: id(1),
+            field,
+            text: text.into(),
+        });
+    }
+}
+
 fn marker_row(n: u64) -> serde_json::Value {
     let mut row = row(n, "SCHEDULED");
     row["title"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
@@ -73,7 +88,6 @@ fn marker_row(n: u64) -> serde_json::Value {
 }
 
 fn fake_llmfit(f: &Fixture, level: &str, notes: &[&str]) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let shell = std::process::Command::new("sh")
         .args(["-c", "command -v sh"])
         .output()
@@ -84,35 +98,30 @@ fn fake_llmfit(f: &Fixture, level: &str, notes: &[&str]) -> std::path::PathBuf {
         .map(|model| json!({"name":model.llmfit_name,"fit_level":level,"notes":notes}))
         .collect::<Vec<_>>();
     let path = f.path("llmfit");
-    std::fs::write(
+    common::executable::write_executable(
         &path,
-        format!(
+        &format!(
             "#!{}\ncat <<'EOF'\n{}\nEOF\n",
             shell.trim_end(),
             json!({"models":models})
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     path
 }
 
 fn failed_llmfit(f: &Fixture) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let shell = std::process::Command::new("sh")
         .args(["-c", "command -v sh"])
         .output()
         .unwrap();
     let path = f.path("llmfit-failed");
-    std::fs::write(
+    common::executable::write_executable(
         &path,
-        format!(
+        &format!(
             "#!{}\nprintf 'fit unavailable' >&2\nexit 1\n",
             String::from_utf8(shell.stdout).unwrap().trim_end()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     path
 }
 
@@ -150,6 +159,25 @@ fn ollama_reply(path: &str, body: serde_json::Value) -> common::http::Reply {
     }
 }
 
+fn good_local_status_app(f: &Fixture, installed: bool) -> (App, common::http::Server) {
+    let models = if installed {
+        json!([{"name": VISION_MODELS[0].ollama_name}])
+    } else {
+        json!([])
+    };
+    let server = common::http::Server::start(
+        (0..2)
+            .map(|_| ollama_reply("/api/tags", json!({"models":models})))
+            .collect(),
+    );
+    let (app, _) = local_fixture_app(
+        f,
+        fake_llmfit(f, "Good", &["Fits host"]),
+        server.url().into(),
+    );
+    (app, server)
+}
+
 #[test]
 fn source_options_do_not_include_a_third_provider() {
     assert_eq!(available_sources(), &[Source::OpenRouter, Source::Local]);
@@ -164,15 +192,14 @@ async fn local_generation_checks_and_exposes_fit_before_install_consent() {
         .output()
         .unwrap();
     let shell = String::from_utf8(shell.stdout).unwrap();
-    std::fs::write(
+    common::executable::write_executable(
         &llmfit,
-        format!(
-            "#!{}\ncat <<'EOF'\n{}\nEOF\n", shell.trim_end(),
+        &format!(
+            "#!{}\ncat <<'EOF'\n{}\nEOF\n",
+            shell.trim_end(),
             json!({"models":[{"name":VISION_MODELS[0].llmfit_name,"fit_level":"Too Tight","notes":["Needs 40 GB RAM"]}]})
         ),
-    ).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&llmfit, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     assert!(
         std::process::Command::new(&llmfit)
             .output()
@@ -223,8 +250,7 @@ async fn installed_good_local_model_generates_without_pull_or_install_modal() {
         fake_llmfit(&f, "Good", &["Fits in memory"]),
         server.url().into(),
     );
-    let selected = run_task(app.update(Message::SelectSource(Source::Local))).await;
-    let _ = app.update(selected);
+    select_local(&mut app).await;
     let status = app.local_fit_status().unwrap();
     assert_eq!(status.fit.reason, "Fits in memory");
     assert!(status.available && status.installed);
@@ -271,8 +297,7 @@ async fn missing_good_model_requires_confirmation_and_only_then_pulls() {
         fake_llmfit(&f, "Good", &["Fits host"]),
         server.url().into(),
     );
-    let selected = run_task(app.update(Message::SelectSource(Source::Local))).await;
-    let _ = app.update(selected);
+    select_local(&mut app).await;
     let checked = run_task(app.update(Message::GenerateOne(id(1)))).await;
     let _ = app.update(checked);
     assert!(app.local_install_consent_pending());
@@ -324,19 +349,7 @@ async fn dirty_local_batch_requires_consent_and_refusal_never_pulls() {
         server.url().into(),
     );
     let _pending_status = app.update(Message::SelectSource(Source::Local));
-    for (field, text) in [
-        (publicator::ui::drafts::Field::Title, "Manual title"),
-        (
-            publicator::ui::drafts::Field::Description,
-            "Manual description",
-        ),
-    ] {
-        let _ = app.update(Message::Edited {
-            uuid: id(1),
-            field,
-            text: text.into(),
-        });
-    }
+    edit_manual_metadata(&mut app);
 
     let fit_result = run_task(app.update(Message::GenerateMarked)).await;
     assert!(matches!(fit_result, Message::LocalFitFinished { .. }));
@@ -382,37 +395,14 @@ async fn installed_local_batch_keeps_identity_through_dirty_flush_and_admission(
     let f = Fixture::new();
     f.image("1.png", 4, 4);
     f.write(json!([marker_row(1), marker_row(2)]));
-    let model_name = VISION_MODELS[0].ollama_name.clone();
-    let tags = json!({"models":[{"name":model_name}]});
-    let server = common::http::Server::start(vec![
-        ollama_reply("/api/tags", tags.clone()),
-        ollama_reply("/api/tags", tags),
-    ]);
-    let (mut app, _) = local_fixture_app(
-        &f,
-        fake_llmfit(&f, "Good", &["Fits host"]),
-        server.url().into(),
-    );
-    let selected = run_task(app.update(Message::SelectSource(Source::Local))).await;
-    let _ = app.update(selected);
+    let (mut app, server) = good_local_status_app(&f, true);
+    select_local(&mut app).await;
 
     // The Good/installed fit result immediately continues without consent. Add
     // a draft while status is pending so the batch identity must survive save.
     let fit_task = app.update(Message::GenerateMarked);
     let status = run_task(fit_task).await;
-    for (field, text) in [
-        (publicator::ui::drafts::Field::Title, "Manual title"),
-        (
-            publicator::ui::drafts::Field::Description,
-            "Manual description",
-        ),
-    ] {
-        let _ = app.update(Message::Edited {
-            uuid: id(1),
-            field,
-            text: text.into(),
-        });
-    }
+    edit_manual_metadata(&mut app);
     let flush = app.update(status);
     let saved = run_task(flush).await;
     let generation = app.update(saved);
@@ -447,19 +437,8 @@ async fn installed_local_batch_rejects_membership_changed_before_admission() {
     let f = Fixture::new();
     f.image("1.png", 4, 4);
     f.write(json!([marker_row(1), marker_row(2)]));
-    let model_name = VISION_MODELS[0].ollama_name.clone();
-    let tags = json!({"models":[{"name":model_name}]});
-    let server = common::http::Server::start(vec![
-        ollama_reply("/api/tags", tags.clone()),
-        ollama_reply("/api/tags", tags),
-    ]);
-    let (mut app, _) = local_fixture_app(
-        &f,
-        fake_llmfit(&f, "Good", &["Fits host"]),
-        server.url().into(),
-    );
-    let selected = run_task(app.update(Message::SelectSource(Source::Local))).await;
-    let _ = app.update(selected);
+    let (mut app, server) = good_local_status_app(&f, true);
+    select_local(&mut app).await;
     let status = run_task(app.update(Message::GenerateMarked)).await;
     let generation = app.update(status);
     f.store
@@ -508,19 +487,7 @@ async fn batch_local_install_consent_rejects_a_changed_eligible_set() {
         server.url().into(),
     );
     let _pending_status = app.update(Message::SelectSource(Source::Local));
-    for (field, text) in [
-        (publicator::ui::drafts::Field::Title, "Manual title"),
-        (
-            publicator::ui::drafts::Field::Description,
-            "Manual description",
-        ),
-    ] {
-        let _ = app.update(Message::Edited {
-            uuid: id(1),
-            field,
-            text: text.into(),
-        });
-    }
+    edit_manual_metadata(&mut app);
     let checked = run_task(app.update(Message::GenerateMarked)).await;
     let _ = app.update(checked);
     assert!(app.local_install_consent_pending());
@@ -567,17 +534,8 @@ async fn cancel_missing_model_consent_keeps_saved_bytes_and_never_pulls_or_chats
     let f = Fixture::new();
     f.write(json!([marker_row(1)]));
     let before = std::fs::read(&f.store.paths().json).unwrap();
-    let server = common::http::Server::start(vec![
-        ollama_reply("/api/tags", json!({"models":[]})),
-        ollama_reply("/api/tags", json!({"models":[]})),
-    ]);
-    let (mut app, _) = local_fixture_app(
-        &f,
-        fake_llmfit(&f, "Good", &["Fits host"]),
-        server.url().into(),
-    );
-    let selected = run_task(app.update(Message::SelectSource(Source::Local))).await;
-    let _ = app.update(selected);
+    let (mut app, server) = good_local_status_app(&f, false);
+    select_local(&mut app).await;
     let checked = run_task(app.update(Message::GenerateOne(id(1)))).await;
     let _ = app.update(checked);
     assert!(app.local_install_consent_pending());
@@ -607,8 +565,7 @@ async fn older_target_fit_result_cannot_authorize_newer_target_consent() {
         fake_llmfit(&f, "Good", &["Fits host"]),
         server.url().into(),
     );
-    let selected = run_task(app.update(Message::SelectSource(Source::Local))).await;
-    let _ = app.update(selected);
+    select_local(&mut app).await;
     let first = run_task(app.update(Message::GenerateOne(id(1)))).await;
     let second = run_task(app.update(Message::GenerateOne(id(2)))).await;
     let _ = app.update(first);
@@ -660,8 +617,7 @@ async fn poor_unknown_and_failed_fit_results_never_prompt_or_mutate() {
     let before = std::fs::read(&f.store.paths().json).unwrap();
     let server = common::http::Server::start(vec![]);
     let (mut app, _) = local_fixture_app(&f, failed_llmfit(&f), server.url().into());
-    let selected = run_task(app.update(Message::SelectSource(Source::Local))).await;
-    let _ = app.update(selected);
+    select_local(&mut app).await;
     let checked = run_task(app.update(Message::GenerateOne(id(1)))).await;
     let _ = app.update(checked);
     assert!(
@@ -686,8 +642,7 @@ async fn good_fit_with_unavailable_ollama_never_prompts_or_mutates() {
         fake_llmfit(&f, "Good", &["Fits host"]),
         "http://127.0.0.1:1".into(),
     );
-    let selected = run_task(app.update(Message::SelectSource(Source::Local))).await;
-    let _ = app.update(selected);
+    select_local(&mut app).await;
     let checked = run_task(app.update(Message::GenerateOne(id(1)))).await;
     let _ = app.update(checked);
     let status = app.local_fit_status().unwrap();
@@ -702,18 +657,8 @@ async fn cancelled_or_source_stale_fit_result_cannot_reopen_install_consent() {
     let f = Fixture::new();
     f.write(json!([marker_row(1)]));
     let before = std::fs::read(&f.store.paths().json).unwrap();
-    let empty = json!({"models":[]});
-    let server = common::http::Server::start(vec![
-        ollama_reply("/api/tags", empty.clone()),
-        ollama_reply("/api/tags", empty),
-    ]);
-    let (mut app, _) = local_fixture_app(
-        &f,
-        fake_llmfit(&f, "Good", &["Fits host"]),
-        server.url().into(),
-    );
-    let selected = run_task(app.update(Message::SelectSource(Source::Local))).await;
-    let _ = app.update(selected);
+    let (mut app, server) = good_local_status_app(&f, false);
+    select_local(&mut app).await;
     let consent_result = run_task(app.update(Message::GenerateOne(id(1)))).await;
     let stale_copy = consent_result.clone();
     let _ = app.update(consent_result);
@@ -734,17 +679,8 @@ async fn cancelled_or_source_stale_fit_result_cannot_reopen_install_consent() {
 async fn model_change_invalidates_in_flight_local_fit_before_consent() {
     let f = Fixture::new();
     f.write(json!([marker_row(1)]));
-    let server = common::http::Server::start(vec![
-        ollama_reply("/api/tags", json!({"models":[]})),
-        ollama_reply("/api/tags", json!({"models":[]})),
-    ]);
-    let (mut app, _) = local_fixture_app(
-        &f,
-        fake_llmfit(&f, "Good", &["Fits host"]),
-        server.url().into(),
-    );
-    let selected = run_task(app.update(Message::SelectSource(Source::Local))).await;
-    let _ = app.update(selected);
+    let (mut app, _server) = good_local_status_app(&f, false);
+    select_local(&mut app).await;
     let stale = run_task(app.update(Message::GenerateOne(id(1)))).await;
     let current = run_task(app.update(Message::SelectModel(VISION_MODELS[1].clone()))).await;
     let _ = app.update(stale);
@@ -758,17 +694,8 @@ async fn source_change_invalidates_in_flight_local_fit_before_consent() {
     let f = Fixture::new();
     f.write(json!([marker_row(1)]));
     let before = std::fs::read(&f.store.paths().json).unwrap();
-    let server = common::http::Server::start(vec![
-        ollama_reply("/api/tags", json!({"models":[]})),
-        ollama_reply("/api/tags", json!({"models":[]})),
-    ]);
-    let (mut app, _) = local_fixture_app(
-        &f,
-        fake_llmfit(&f, "Good", &["Fits host"]),
-        server.url().into(),
-    );
-    let selected = run_task(app.update(Message::SelectSource(Source::Local))).await;
-    let _ = app.update(selected);
+    let (mut app, _server) = good_local_status_app(&f, false);
+    select_local(&mut app).await;
     let stale = run_task(app.update(Message::GenerateOne(id(1)))).await;
     let _ = app.update(Message::SelectSource(Source::OpenRouter));
     let _ = app.update(stale);
@@ -794,29 +721,12 @@ async fn describe_dispatch_holds_only_target_until_provider_result_is_persisted(
     let image = f.image("1.png", 4, 4);
     assert!(image.exists());
     f.write(json!([marker_row(1), row(2, "SCHEDULED")]));
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let endpoint = format!("http://{}", listener.local_addr().unwrap());
-    let (started_tx, started_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel();
-    let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut request = [0; 8192];
-        let _ = stream.read(&mut request).unwrap();
-        started_tx.send(()).unwrap();
-        release_rx.recv().unwrap();
-        let content =
-            json!({"title":"Generated", "description":"Saved after provider completion."})
-                .to_string();
-        let body = json!({"choices":[{"message":{"content":content}}]}).to_string();
-        write!(
-            stream,
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        )
-        .unwrap();
+    let (server, started_rx, release_tx) = common::http::Server::start_paused(common::http::Reply {
+        path: "/chat/completions".into(),
+        status: 200,
+        body: json!({"choices":[{"message":{"content":json!({"title":"Generated","description":"Saved after provider completion."}).to_string()}}]}).to_string(),
     });
-    let (mut app, _) = fixture_app(&f, endpoint);
+    let (mut app, _) = fixture_app(&f, server.url().to_owned());
     let task = tokio::spawn(run_task(app.update(Message::GenerateOne(id(1)))));
     tokio::task::spawn_blocking(move || started_rx.recv_timeout(Duration::from_secs(3)).unwrap())
         .await
@@ -841,7 +751,7 @@ async fn describe_dispatch_holds_only_target_until_provider_result_is_persisted(
     release_tx.send(()).unwrap();
     let completion = task.await.unwrap();
     let _ = app.update(completion);
-    server.join().unwrap();
+    server.finish();
     let saved = f.read();
     assert_eq!(saved[0]["title"], "Generated");
     assert_eq!(saved[0]["state"], "DESCRIBED");
@@ -1056,24 +966,11 @@ async fn dirty_draft_is_saved_before_single_generation_starts() {
     let f = Fixture::new();
     f.image("1.png", 4, 4);
     f.write(json!([marker_row(1)]));
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let endpoint = format!("http://{}", listener.local_addr().unwrap());
-    let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut request = [0; 8192];
-        let _ = stream.read(&mut request).unwrap();
-        let content =
-            json!({"title":"Generated", "description":"Generated description."}).to_string();
-        let body = json!({"choices":[{"message":{"content":content}}]}).to_string();
-        write!(
-            stream,
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        )
-        .unwrap();
-    });
-    let (mut app, _) = fixture_app(&f, endpoint);
+    let server = common::http::Server::start(vec![ollama_reply(
+        "/chat/completions",
+        json!({"choices":[{"message":{"content":json!({"title":"Generated","description":"Generated description."}).to_string()}}]}),
+    )]);
+    let (mut app, _) = fixture_app(&f, server.url().to_owned());
     let _ = app.update(Message::Edited {
         uuid: id(1),
         field: publicator::ui::drafts::Field::Title,
@@ -1088,7 +985,7 @@ async fn dirty_draft_is_saved_before_single_generation_starts() {
     let generation = app.update(saved);
     let completed = run_task(generation).await;
     let _ = app.update(completed);
-    server.join().unwrap();
+    server.finish();
     assert_eq!(f.read()[0]["title"], "Generated");
 }
 

@@ -87,7 +87,7 @@ pub fn file_sha512(path: &Path) -> Result<String> {
         .collect())
 }
 
-pub fn find_candidates(store: &Store, search: &Search) -> Result<Vec<Candidate>> {
+pub(crate) fn validate_search(store: &Store, search: &Search) -> Result<()> {
     if ![0, 25, 50, 75, 100].contains(&search.limit) {
         return Err(Error::Validation(format!(
             "unsupported search limit {}",
@@ -107,10 +107,10 @@ pub fn find_candidates(store: &Store, search: &Search) -> Result<Vec<Candidate>>
             )));
         }
     }
-    if search.limit == 0 {
-        return Ok(Vec::new());
-    }
+    Ok(())
+}
 
+fn candidate_paths(store: &Store, search: &Search) -> Result<Vec<PathBuf>> {
     let data_root = fs::canonicalize(&store.paths().data_dir)?;
     let mut paths = Vec::new();
     for selected in &search.paths {
@@ -125,7 +125,15 @@ pub fn find_candidates(store: &Store, search: &Search) -> Result<Vec<Candidate>>
         }
         collect_images(&root, &mut paths)?;
     }
-    let mut paths = paths
+    Ok(paths)
+}
+
+pub fn find_candidates(store: &Store, search: &Search) -> Result<Vec<Candidate>> {
+    validate_search(store, search)?;
+    if search.limit == 0 {
+        return Ok(Vec::new());
+    }
+    let mut paths = candidate_paths(store, search)?
         .into_iter()
         .map(|path| (uuid::Uuid::new_v4(), path))
         .collect::<Vec<_>>();
@@ -133,27 +141,35 @@ pub fn find_candidates(store: &Store, search: &Search) -> Result<Vec<Candidate>>
     let rows = store.read()?;
     let references = published_hashes(&rows);
     let referenced_basenames = published_basenames(&rows);
-    let mut candidates = Vec::new();
-    for (_, path) in paths {
-        if path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| referenced_basenames.contains(name))
-        {
-            continue;
-        }
-        match file_sha512(&path) {
-            Ok(sha512) if !references.contains(&sha512) => {
-                candidates.push(Candidate { path, sha512 })
-            }
-            Ok(_) => {}
-            Err(error) => eprintln!("Error hashing {}: {error}", path.display()),
-        }
-        if candidates.len() == search.limit {
-            break;
+    Ok(paths
+        .into_iter()
+        .map(|(_, path)| path)
+        .filter(|path| {
+            !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| referenced_basenames.contains(name))
+        })
+        .filter_map(|path| unreferenced_candidate(&path, &references))
+        .take(search.limit)
+        .collect())
+}
+
+pub(crate) fn unreferenced_candidate(
+    path: &Path,
+    referenced: &HashSet<String>,
+) -> Option<Candidate> {
+    match file_sha512(path) {
+        Ok(sha512) if !referenced.contains(&sha512) => Some(Candidate {
+            path: path.to_owned(),
+            sha512,
+        }),
+        Ok(_) => None,
+        Err(error) => {
+            eprintln!("Error hashing {}: {error}", path.display());
+            None
         }
     }
-    Ok(candidates)
 }
 
 fn collect_images(root: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
@@ -179,44 +195,30 @@ fn collect_images(root: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-fn published_basenames(rows: &[Value]) -> HashSet<String> {
-    let mut names = HashSet::new();
-    for row in rows {
-        for key in ["files", "previewFilesIfNotFree"] {
-            if let Some(files) = row.get(key).and_then(Value::as_array) {
-                for file in files {
-                    for key in ["basename", "fileName"] {
-                        if let Some(name) = file.get(key).and_then(Value::as_str) {
-                            names.insert(name.to_owned());
-                        }
-                    }
-                }
-            }
-        }
-    }
-    names
+fn published_file_fields<'a>(rows: &'a [Value], keys: &'a [&str]) -> impl Iterator<Item = &'a str> {
+    rows.iter()
+        .flat_map(|row| {
+            ["files", "previewFilesIfNotFree"]
+                .into_iter()
+                .flat_map(move |key| row.get(key).and_then(Value::as_array).into_iter().flatten())
+        })
+        .flat_map(move |file| {
+            keys.iter()
+                .filter_map(move |key| file.get(*key).and_then(Value::as_str))
+        })
 }
 
-fn published_hashes(rows: &[Value]) -> HashSet<String> {
-    let mut hashes = HashSet::new();
-    for row in rows {
-        for key in ["files", "previewFilesIfNotFree"] {
-            if let Some(files) = row.get(key).and_then(Value::as_array) {
-                for file in files {
-                    for key in ["sha512sum", "fileSha512sum"] {
-                        if let Some(hash) = file
-                            .get(key)
-                            .and_then(Value::as_str)
-                            .filter(|s| !s.is_empty())
-                        {
-                            hashes.insert(hash.to_ascii_lowercase());
-                        }
-                    }
-                }
-            }
-        }
-    }
-    hashes
+fn published_basenames(rows: &[Value]) -> HashSet<String> {
+    published_file_fields(rows, &["basename", "fileName"])
+        .map(str::to_owned)
+        .collect()
+}
+
+pub(crate) fn published_hashes(rows: &[Value]) -> HashSet<String> {
+    published_file_fields(rows, &["sha512sum", "fileSha512sum"])
+        .filter(|hash| !hash.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect()
 }
 
 pub fn thumb_name(path: &Path, sha: &str) -> Result<String> {
@@ -252,6 +254,10 @@ pub fn ensure_thumb(path: &Path, cache: &Path, name: &str) -> Result<PathBuf> {
             path.display()
         )));
     }
+    write_thumb(path, cache, target)
+}
+
+fn write_thumb(path: &Path, cache: &Path, target: PathBuf) -> Result<PathBuf> {
     let extension = target.extension().and_then(|e| e.to_str()).unwrap_or("png");
     let mut temp = Builder::new()
         .prefix(".thumb-")
@@ -383,24 +389,7 @@ pub(crate) fn delete_candidate_with_hooks(
                 path.display()
             ))
         })?;
-    let current_path = fs::canonicalize(path)?;
-    let data_root = fs::canonicalize(&store.paths().data_dir)?;
-    let mut in_configured_root = false;
-    for configured in &store.config().publicable {
-        if let Ok(root) = fs::canonicalize(store.paths().data_dir.join(configured))
-            && root.starts_with(&data_root)
-            && current_path.starts_with(root)
-        {
-            in_configured_root = true;
-            break;
-        }
-    }
-    if !in_configured_root {
-        return Err(Error::Validation(format!(
-            "candidate is outside configured paths: {}",
-            path.display()
-        )));
-    }
+    require_configured_candidate(store, path)?;
     let identity = file_identity(path)?;
     let current_sha = file_sha512(path)?;
     if current_sha != candidate.sha512 || file_identity(path)? != identity {
@@ -430,6 +419,28 @@ pub(crate) fn delete_candidate_with_hooks(
         fs::remove_file(path)?;
         Ok(())
     })
+}
+
+fn require_configured_candidate(store: &Store, path: &Path) -> Result<()> {
+    let current_path = fs::canonicalize(path)?;
+    let data_root = fs::canonicalize(&store.paths().data_dir)?;
+    let mut in_configured_root = false;
+    for configured in &store.config().publicable {
+        if let Ok(root) = fs::canonicalize(store.paths().data_dir.join(configured))
+            && root.starts_with(&data_root)
+            && current_path.starts_with(root)
+        {
+            in_configured_root = true;
+            break;
+        }
+    }
+    if !in_configured_root {
+        return Err(Error::Validation(format!(
+            "candidate is outside configured paths: {}",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 pub fn index_by_basename(root: &Path) -> Result<std::collections::HashMap<String, PathBuf>> {

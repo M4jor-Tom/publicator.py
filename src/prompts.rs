@@ -1,11 +1,9 @@
 use crate::{
     config::{Config, ImageIdentity, PromptConfig, PromptGrammar},
     error::{Error, Result},
-    images::{Candidate, Search, file_sha512},
-    model::Publications,
+    images::{Candidate, Search, published_hashes, unreferenced_candidate, validate_search},
     store::Store,
 };
-use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     fs,
@@ -63,6 +61,39 @@ struct Index {
     by_path: BTreeMap<String, Vec<String>>,
     by_basename: BTreeMap<String, Vec<String>>,
 }
+impl Index {
+    fn from_versions(head: Option<String>, versions: BTreeMap<String, PromptVersion>) -> Self {
+        let mut by_path: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut by_basename: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for version in versions.values() {
+            for path in &version.paths {
+                by_path
+                    .entry(path.clone())
+                    .or_default()
+                    .push(version.digest.clone());
+                let base = Path::new(path)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(path);
+                let all = by_basename.entry(base.to_owned()).or_default();
+                if !all.contains(path) {
+                    all.push(path.clone());
+                }
+            }
+        }
+        for digests in by_path.values_mut() {
+            digests.sort_by_key(|d| (std::cmp::Reverse(versions[d].committed), d.clone()));
+        }
+        Self {
+            head: head.unwrap_or_default(),
+            probed: None,
+            versions,
+            by_path,
+            by_basename,
+        }
+    }
+}
+
 type BlobIndex = (BTreeMap<String, String>, BTreeMap<String, Vec<u8>>);
 
 pub struct PromptArchive {
@@ -176,6 +207,18 @@ impl PromptArchive {
             return Ok(());
         }
 
+        let mut updated = self.build_index(head)?;
+        // Build all derived maps before this assignment: readers see one complete index.
+        let mut index = self
+            .index
+            .write()
+            .map_err(|_| Error::Busy("prompt archive index lock poisoned".into()))?;
+        updated.probed = Some(Instant::now());
+        *index = updated;
+        Ok(())
+    }
+
+    fn build_index(&self, head: Option<String>) -> Result<Index> {
         let stream = self.git(&["cat-file", "--batch-all-objects", "--batch"])?;
         let (by_oid, blobs) = self.read_blobs(&stream).map_err(|error| match error {
             Error::Protocol(reason) => Error::PromptArchiveUnavailable(reason),
@@ -212,40 +255,7 @@ impl PromptArchive {
                 },
             );
         }
-        let mut by_path: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        let mut by_basename: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        for version in versions.values() {
-            for path in &version.paths {
-                by_path
-                    .entry(path.clone())
-                    .or_default()
-                    .push(version.digest.clone());
-                let base = Path::new(path)
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or(path);
-                let all = by_basename.entry(base.to_owned()).or_default();
-                if !all.contains(path) {
-                    all.push(path.clone());
-                }
-            }
-        }
-        for digests in by_path.values_mut() {
-            digests.sort_by_key(|d| (std::cmp::Reverse(versions[d].committed), d.clone()));
-        }
-        // Build all derived maps before this assignment: readers see one complete index.
-        let mut index = self
-            .index
-            .write()
-            .map_err(|_| Error::Busy("prompt archive index lock poisoned".into()))?;
-        *index = Index {
-            head: head.unwrap_or_default(),
-            probed: Some(Instant::now()),
-            versions,
-            by_path,
-            by_basename,
-        };
-        Ok(())
+        Ok(Index::from_versions(head, versions))
     }
 
     fn read_blobs(&self, stream: &[u8]) -> Result<BlobIndex> {
@@ -515,28 +525,6 @@ fn configured_files(data_dir: &Path, configured: &[String]) -> Result<Vec<PathBu
     output.sort();
     Ok(output)
 }
-fn published_hashes(rows: &Publications) -> HashSet<String> {
-    let mut hashes = HashSet::new();
-    for row in rows {
-        for key in ["files", "previewFilesIfNotFree"] {
-            if let Some(files) = row.get(key).and_then(Value::as_array) {
-                for file in files {
-                    for key in ["sha512sum", "fileSha512sum"] {
-                        if let Some(hash) = file
-                            .get(key)
-                            .and_then(Value::as_str)
-                            .filter(|s| !s.is_empty())
-                        {
-                            hashes.insert(hash.to_ascii_lowercase());
-                        }
-                    }
-                }
-            }
-        }
-    }
-    hashes
-}
-
 pub fn search(
     store: &Store,
     search: &Search,
@@ -547,42 +535,43 @@ pub fn search(
     let Some(archive) = archive else {
         return Ok(SearchMatches::default());
     };
-    if ![0, 25, 50, 75, 100].contains(&search.limit) {
-        return Err(Error::Validation(format!(
-            "unsupported search limit {}",
-            search.limit
-        )));
-    }
-    let mut unique = HashSet::new();
-    for path in &search.paths {
-        if !unique.insert(path) {
-            return Err(Error::Validation(format!("duplicate search path {path:?}")));
-        }
-        if !store.config().publicable.contains(path) {
-            return Err(Error::Validation(format!(
-                "search path {path:?} is not configured as publicable"
-            )));
-        }
-    }
+    validate_search(store, search)?;
     if search.limit == 0 {
         return Ok(SearchMatches::default());
     }
     let paths = configured_files(&store.paths().data_dir, &search.paths)?;
     let referenced = published_hashes(&store.read()?);
     let needle = needle.filter(|s| !s.is_empty()).map(str::to_lowercase);
+    let (mut exact, mut maybe, skipped) =
+        matching_paths(archive, paths, needle.as_deref(), lineage)?;
+    let truncated = exact.len() > SEARCH_GROUP_LIMIT
+        || maybe.len() > SEARCH_GROUP_LIMIT
+        || exact.len().saturating_add(maybe.len()) > search.limit;
+    exact.truncate(SEARCH_GROUP_LIMIT);
+    maybe.truncate(SEARCH_GROUP_LIMIT);
+    let exact = unreferenced_candidates(&exact, &referenced, search.limit);
+    let maybe = unreferenced_candidates(&maybe, &referenced, search.limit - exact.len());
+    Ok(SearchMatches {
+        exact,
+        maybe,
+        skipped,
+        truncated,
+    })
+}
+
+fn matching_paths(
+    archive: &PromptArchive,
+    paths: Vec<PathBuf>,
+    needle: Option<&str>,
+    lineage: Option<&str>,
+) -> Result<(Vec<PathBuf>, Vec<PathBuf>, usize)> {
     let mut exact = Vec::new();
     let mut maybe = Vec::new();
     let mut skipped = 0;
     for path in paths {
         match archive.resolve_path(&path)? {
             PromptMatch::Exact(version) => {
-                if needle
-                    .as_ref()
-                    .is_some_and(|text| !version.text.to_lowercase().contains(text))
-                {
-                    continue;
-                }
-                if lineage.is_some_and(|path| !version.paths.iter().any(|p| p == path)) {
+                if !version_matches(&version, needle, lineage) {
                     continue;
                 }
                 exact.push(path);
@@ -602,47 +591,24 @@ pub fn search(
             PromptMatch::Unknown(_) => {}
         }
     }
-    let truncated = exact.len() > SEARCH_GROUP_LIMIT
-        || maybe.len() > SEARCH_GROUP_LIMIT
-        || exact.len().saturating_add(maybe.len()) > search.limit;
-    exact.truncate(SEARCH_GROUP_LIMIT);
-    maybe.truncate(SEARCH_GROUP_LIMIT);
-    let mut result = SearchMatches {
-        skipped,
-        truncated,
-        ..SearchMatches::default()
-    };
-    for path in &exact {
-        if result.exact.len() >= search.limit {
-            break;
-        }
-        match file_sha512(path) {
-            Ok(sha512) if !referenced.contains(&sha512.to_ascii_lowercase()) => {
-                result.exact.push(Candidate {
-                    path: path.clone(),
-                    sha512,
-                });
-            }
-            Ok(_) => {}
-            Err(error) => eprintln!("Error hashing {}: {error}", path.display()),
-        }
-    }
-    for path in &maybe {
-        if result.exact.len() + result.maybe.len() >= search.limit {
-            break;
-        }
-        match file_sha512(path) {
-            Ok(sha512) if !referenced.contains(&sha512.to_ascii_lowercase()) => {
-                result.maybe.push(Candidate {
-                    path: path.clone(),
-                    sha512,
-                });
-            }
-            Ok(_) => {}
-            Err(error) => eprintln!("Error hashing {}: {error}", path.display()),
-        }
-    }
-    Ok(result)
+    Ok((exact, maybe, skipped))
+}
+
+fn version_matches(version: &PromptVersion, needle: Option<&str>, lineage: Option<&str>) -> bool {
+    needle.is_none_or(|text| version.text.to_lowercase().contains(text))
+        && lineage.is_none_or(|path| version.paths.iter().any(|p| p == path))
+}
+
+fn unreferenced_candidates(
+    paths: &[PathBuf],
+    referenced: &HashSet<String>,
+    limit: usize,
+) -> Vec<Candidate> {
+    paths
+        .iter()
+        .filter_map(|path| unreferenced_candidate(path, referenced))
+        .take(limit)
+        .collect()
 }
 
 pub fn audit(

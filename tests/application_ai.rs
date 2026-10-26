@@ -122,20 +122,17 @@ async fn marked_batch_uses_configuration_from_data_dir_for_external_json() {
 
 #[tokio::test]
 async fn empty_local_marked_batch_is_noop_without_model_or_service_setup() {
-    use std::os::unix::fs::PermissionsExt;
     let f = Fixture::new();
     f.write(json!([row(1, "SCHEDULED")]));
     let marker = f.path("llmfit-called");
     let tool = f.path("llmfit");
-    std::fs::write(
+    common::executable::write_executable(
         &tool,
-        format!(
+        &format!(
             "#!/bin/sh\ntouch '{}'\nprintf '%s' '{{\"models\":[]}}'\n",
             marker.display()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let app = Application::new(
         Arc::new(f.store.clone()),
         local_client("http://127.0.0.1:1".into(), &tool),
@@ -205,30 +202,14 @@ async fn generation_lease_excludes_duplicate_and_same_uuid_edits_but_not_other_w
     let f = Fixture::new();
     f.image("1.png", 4, 4);
     f.write(json!([row(1, "SCHEDULED"), row(2, "SCHEDULED")]));
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let endpoint = format!("http://{}", listener.local_addr().unwrap());
-    let (started_tx, started_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel();
-    let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut request = [0; 8192];
-        let _ = stream.read(&mut request).unwrap();
-        started_tx.send(()).unwrap();
-        release_rx.recv().unwrap();
-        let content =
-            json!({"title":"Generated title","description":"A generated description."}).to_string();
-        let body = json!({"choices":[{"message":{"content":content}}]}).to_string();
-        write!(
-            stream,
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        )
-        .unwrap();
+    let (server, started_rx, release_tx) = common::http::Server::start_paused(common::http::Reply {
+        path: "/chat/completions".into(),
+        status: 200,
+        body: json!({"choices":[{"message":{"content":json!({"title":"Generated title","description":"A generated description."}).to_string()}}]}).to_string(),
     });
     let app = Arc::new(Application::new(
         Arc::new(f.store.clone()),
-        client(endpoint),
+        client(server.url().to_owned()),
     ));
     let task = {
         let app = Arc::clone(&app);
@@ -247,7 +228,7 @@ async fn generation_lease_excludes_duplicate_and_same_uuid_edits_but_not_other_w
     app.mutate(Some(&id(2)), |_| Ok(())).unwrap();
     release_tx.send(()).unwrap();
     assert!(task.await.unwrap().is_ok());
-    server.join().unwrap();
+    server.finish();
     assert_eq!(f.read()[0]["title"], "Generated title");
 }
 
@@ -438,12 +419,13 @@ async fn successful_batches_save_in_provider_order() {
             client(server.url().to_owned())
         } else {
             let tool = f.path("llmfit");
-            std::fs::write(&tool, format!("#!/bin/sh\nprintf '%s' '{{\"models\":[{{\"name\":\"{}\",\"fit_level\":\"Good\"}}]}}'\n", VISION_MODELS[0].llmfit_name)).unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
-            }
+            common::executable::write_executable(
+                &tool,
+                &format!(
+                    "#!/bin/sh\nprintf '%s' '{{\"models\":[{{\"name\":\"{}\",\"fit_level\":\"Good\"}}]}}'\n",
+                    VISION_MODELS[0].llmfit_name
+                ),
+            );
             local_client(server.url().to_owned(), &tool)
         };
         let app = Application::new(Arc::new(f.store.clone()), metadata);

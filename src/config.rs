@@ -27,26 +27,28 @@ impl Paths {
         } else {
             data_dir.join(json)
         };
-        let json = match std::fs::canonicalize(&json) {
-            Ok(target) => target,
-            Err(error) => {
-                if std::fs::symlink_metadata(&json).is_ok() {
-                    return Err(error.into());
-                }
-                let parent = json.parent().unwrap_or_else(|| Path::new("."));
-                match std::fs::canonicalize(parent) {
-                    Ok(parent) => parent.join(json.file_name().ok_or_else(|| {
-                        Error::Config("publication database path has no filename".into())
-                    })?),
-                    Err(parent_error) if parent_error.kind() == std::io::ErrorKind::NotFound => {
-                        json
-                    }
-                    Err(parent_error) => return Err(parent_error.into()),
-                }
-            }
-        };
+        let json = resolve_database_path(json)?;
         Ok(Self { data_dir, json })
     }
+}
+
+fn resolve_database_path(json: PathBuf) -> Result<PathBuf> {
+    Ok(match std::fs::canonicalize(&json) {
+        Ok(target) => target,
+        Err(error) => {
+            if std::fs::symlink_metadata(&json).is_ok() {
+                return Err(error.into());
+            }
+            let parent = json.parent().unwrap_or_else(|| Path::new("."));
+            match std::fs::canonicalize(parent) {
+                Ok(parent) => parent.join(json.file_name().ok_or_else(|| {
+                    Error::Config("publication database path has no filename".into())
+                })?),
+                Err(parent_error) if parent_error.kind() == std::io::ErrorKind::NotFound => json,
+                Err(parent_error) => return Err(parent_error.into()),
+            }
+        }
+    })
 }
 #[derive(Clone, Debug, Default)]
 pub struct Config {
@@ -211,56 +213,13 @@ pub(crate) fn validate_publications_with(
             .get("uuid")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("publication");
-        if let Some(apparitions) = row.get("apparitions").and_then(serde_json::Value::as_array) {
-            for a in apparitions {
-                for key in [
-                    "urlElsePublicationName",
-                    "apparitionTimestampIfDifferentThanSubmission",
-                    "tier",
-                ] {
-                    if a.get(key).is_some() {
-                        return Err(Error::Validation(format!("{uuid}: obsolete {key}")));
-                    }
-                }
-                if let Some(url) = a.get("url").and_then(serde_json::Value::as_str) {
-                    let valid_authority = url.split_once("://").is_some_and(|(_, authority)| {
-                        !authority.starts_with('/') && !authority.starts_with('\\')
-                    });
-                    let valid = valid_authority
-                        && url::Url::parse(url)
-                            .map(|u| {
-                                matches!(u.scheme(), "http" | "https") && u.host_str().is_some()
-                            })
-                            .unwrap_or(false);
-                    if !valid {
-                        return Err(Error::Validation(format!(
-                            "{uuid}: apparition url must be an HTTP(S) URL with a host"
-                        )));
-                    }
-                }
-                if a.get("platformName").and_then(serde_json::Value::as_str) == Some("deviantart") {
-                    for (key, allowed) in
-                        [("tiers", &config.tiers), ("galleries", &config.galleries)]
-                    {
-                        if let Some(vs) = a.get(key).and_then(serde_json::Value::as_array) {
-                            for v in vs {
-                                if let Some(v) = v.as_str()
-                                    && !allowed.iter().any(|x| x == v)
-                                {
-                                    let label = if key == "galleries" {
-                                        "gallery"
-                                    } else {
-                                        "tier"
-                                    };
-                                    return Err(Error::Validation(format!(
-                                        "{uuid}: {label} {v:?} not in publicator.toml"
-                                    )));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        for a in row
+            .get("apparitions")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            validate_apparition(a, uuid, config)?;
         }
     }
     if let Some(e) = validator
@@ -268,6 +227,67 @@ pub(crate) fn validate_publications_with(
         .next()
     {
         return Err(Error::Validation(e.to_string()));
+    }
+    Ok(())
+}
+
+fn validate_apparition(a: &serde_json::Value, uuid: &str, config: &Config) -> Result<()> {
+    for key in [
+        "urlElsePublicationName",
+        "apparitionTimestampIfDifferentThanSubmission",
+        "tier",
+    ] {
+        if a.get(key).is_some() {
+            return Err(Error::Validation(format!("{uuid}: obsolete {key}")));
+        }
+    }
+    if let Some(url) = a.get("url").and_then(serde_json::Value::as_str)
+        && !valid_apparition_url(url)
+    {
+        return Err(Error::Validation(format!(
+            "{uuid}: apparition url must be an HTTP(S) URL with a host"
+        )));
+    }
+    if a.get("platformName").and_then(serde_json::Value::as_str) == Some("deviantart") {
+        for (key, allowed) in [("tiers", &config.tiers), ("galleries", &config.galleries)] {
+            validate_allowed_options(a, uuid, key, allowed)?;
+        }
+    }
+    Ok(())
+}
+
+fn valid_apparition_url(url: &str) -> bool {
+    let valid_authority = url
+        .split_once("://")
+        .is_some_and(|(_, authority)| !authority.starts_with('/') && !authority.starts_with('\\'));
+    valid_authority
+        && url::Url::parse(url)
+            .is_ok_and(|u| matches!(u.scheme(), "http" | "https") && u.host_str().is_some())
+}
+
+fn validate_allowed_options(
+    a: &serde_json::Value,
+    uuid: &str,
+    key: &str,
+    allowed: &[String],
+) -> Result<()> {
+    for v in a
+        .get(key)
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+    {
+        if !allowed.iter().any(|x| x == v) {
+            let label = if key == "galleries" {
+                "gallery"
+            } else {
+                "tier"
+            };
+            return Err(Error::Validation(format!(
+                "{uuid}: {label} {v:?} not in publicator.toml"
+            )));
+        }
     }
     Ok(())
 }

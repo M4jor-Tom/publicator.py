@@ -67,15 +67,7 @@ pub fn timeline(rows: &[Value]) -> Result<Vec<Event>> {
                 .ok_or_else(|| {
                     Error::Validation(format!("{uuid}: apparition platformName must be a string"))
                 })?;
-            let delivery = match app.get("state").and_then(Value::as_str) {
-                Some("unpublished") => Delivery::Unpublished,
-                Some("published_or_scheduled") => Delivery::PublishedOrScheduled,
-                _ => {
-                    return Err(Error::Validation(format!(
-                        "{uuid}: apparition state is invalid"
-                    )));
-                }
-            };
+            let delivery = apparition_delivery(app, &uuid)?;
             events.push(Event {
                 uuid: uuid.clone(),
                 apparition_index,
@@ -91,6 +83,16 @@ pub fn timeline(rows: &[Value]) -> Result<Vec<Event>> {
     }
     events.sort_by_key(|event| event.timestamp);
     Ok(events)
+}
+
+fn apparition_delivery(app: &Value, uuid: &str) -> Result<Delivery> {
+    match app.get("state").and_then(Value::as_str) {
+        Some("unpublished") => Ok(Delivery::Unpublished),
+        Some("published_or_scheduled") => Ok(Delivery::PublishedOrScheduled),
+        _ => Err(Error::Validation(format!(
+            "{uuid}: apparition state is invalid"
+        ))),
+    }
 }
 
 /// Inclusive month starts from the earliest event through the later of the last event and now.

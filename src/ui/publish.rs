@@ -51,67 +51,25 @@ pub fn view(state: &App) -> Element<'_, Message> {
     let mut selections = Vec::new();
     if let Some(rows) = &state.publications {
         for publication in ordered_rows(rows, state.revealed_publication()) {
-            let uuid = publication
-                .get("uuid")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let apparitions = publication
-                .get("apparitions")
-                .and_then(Value::as_array)
-                .map(Vec::as_slice)
-                .unwrap_or_default();
-            let da = apparitions.iter().find(|apparition| {
-                apparition.get("platformName").and_then(Value::as_str) == Some("deviantart")
-            });
-            let label = format!("{uuid} — DeviantArt");
-            if state.publish_keyboard_mode && state.publish_keyboard_focus.as_deref() == Some(uuid)
-            {
-                content = content.push(text(format!("Keyboard focus → {label}")));
-            }
-            if state.revealed_publication() == Some(uuid) {
-                content = content.push(text(format!("Opened from Calendar — {label}")));
-            }
-            let delivery_state =
-                da.and_then(|apparition| apparition.get("state").and_then(Value::as_str));
-            let outcome = state.publish_cell_outcome(uuid);
-            if delivery_state == Some("published_or_scheduled") {
-                content = content.push(text(format!(
-                    "{label} — {}",
-                    outcome_text(outcome.as_ref()).unwrap_or_else(|| "Published (locked)".into())
-                )));
-                continue;
-            }
-            if !matches!(delivery_state, Some("unpublished") | None) {
-                continue;
-            }
-            let checked = da.is_some();
-            selections.push(checked);
-            let key = format!("{uuid}:deviantart");
-            let selection = checkbox(checked).label(label.clone());
-            content = content.push(if state.selection_locked(Some(uuid)) {
-                selection
-            } else {
-                selection.on_toggle(move |selected| Message::SelectCell {
-                    key: key.clone(),
-                    selected,
-                })
-            });
-            if let Some(outcome) = &outcome {
-                content = content.push(text(format!(
-                    "{} — {}",
-                    label,
-                    outcome_text(Some(outcome)).unwrap()
-                )));
-            }
-            if let Some(apparition) = da {
-                content = content.push(options_view(state, uuid, apparition));
-            }
+            content = publication_cell(state, publication, content, &mut selections);
         }
     }
     for attempt in state.unresolved_publish_attempts() {
         content = content.push(attempt_view(state, attempt));
     }
-    let selection = selection_state(&selections);
+    content = publish_actions(state, content, &selections);
+    scrollable(content)
+        .id(SCROLL_ID)
+        .height(Length::Fill)
+        .into()
+}
+
+fn publish_actions<'a>(
+    state: &'a App,
+    mut content: iced::widget::Column<'a, Message>,
+    selections: &[bool],
+) -> iced::widget::Column<'a, Message> {
+    let selection = selection_state(selections);
     let all = selection == SelectionState::All && !selections.is_empty();
     let select_all = checkbox(all).label(match selection {
         SelectionState::None => "Select all eligible pending DeviantArt cells",
@@ -124,15 +82,7 @@ pub fn view(state: &App) -> Element<'_, Message> {
         select_all.on_toggle(Message::SelectAll)
     });
     let publish = button("Publish selected");
-    let publish = if state.publish_active
-        || state.publish_locks.is_none()
-        || state.publish_lock_error.is_some()
-        || state
-            .publish_locks
-            .as_ref()
-            .is_some_and(|locks| !locks.is_empty())
-        || !selections.iter().any(|selected| *selected)
-    {
+    let publish = if publish_disabled(state, selections) {
         publish
     } else {
         publish.on_press(Message::PublishSelected)
@@ -149,35 +99,87 @@ pub fn view(state: &App) -> Element<'_, Message> {
     if let Some(diagnostic) = &state.publish_diagnostic {
         content = content.push(text(format!("Worker diagnostic (stderr): {diagnostic}")));
     }
-    scrollable(content)
-        .id(SCROLL_ID)
-        .height(Length::Fill)
-        .into()
+    content
+}
+
+fn publish_disabled(state: &App, selections: &[bool]) -> bool {
+    state.publish_active
+        || state.selection_locked(None)
+        || !selections.iter().any(|selected| *selected)
+}
+
+fn publication_cell<'a>(
+    state: &'a App,
+    publication: &'a Value,
+    mut content: iced::widget::Column<'a, Message>,
+    selections: &mut Vec<bool>,
+) -> iced::widget::Column<'a, Message> {
+    let uuid = publication
+        .get("uuid")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let apparitions = publication
+        .get("apparitions")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let da = apparitions.iter().find(|apparition| {
+        apparition.get("platformName").and_then(Value::as_str) == Some("deviantart")
+    });
+    let label = format!("{uuid} — DeviantArt");
+    if state.publish_keyboard_mode && state.publish_keyboard_focus.as_deref() == Some(uuid) {
+        content = content.push(text(format!("Keyboard focus → {label}")));
+    }
+    if state.revealed_publication() == Some(uuid) {
+        content = content.push(text(format!("Opened from Calendar — {label}")));
+    }
+    let delivery_state = da.and_then(|apparition| apparition.get("state").and_then(Value::as_str));
+    let outcome = state.publish_cell_outcome(uuid);
+    if delivery_state == Some("published_or_scheduled") {
+        content = content.push(text(format!(
+            "{label} — {}",
+            outcome_text(outcome.as_ref()).unwrap_or_else(|| "Published (locked)".into())
+        )));
+        return content;
+    }
+    if !matches!(delivery_state, Some("unpublished") | None) {
+        return content;
+    }
+    let checked = da.is_some();
+    selections.push(checked);
+    let key = format!("{uuid}:deviantart");
+    let selection = checkbox(checked).label(label.clone());
+    content = content.push(if state.selection_locked(Some(uuid)) {
+        selection
+    } else {
+        selection.on_toggle(move |selected| Message::SelectCell {
+            key: key.clone(),
+            selected,
+        })
+    });
+    if let Some(outcome) = &outcome {
+        content = content.push(text(format!(
+            "{} — {}",
+            label,
+            outcome_text(Some(outcome)).unwrap()
+        )));
+    }
+    if let Some(apparition) = da {
+        content = content.push(options_view(state, uuid, apparition));
+    }
+    content
 }
 
 pub(super) fn ordered_rows<'a>(rows: &'a [Value], target: Option<&str>) -> Vec<&'a Value> {
-    let mut rows = rows
-        .iter()
-        .filter(|row| matches!(phase(row), Ok(Phase::Described | Phase::Appeared)))
-        .collect::<Vec<_>>();
-    if let Some(target) = target
-        && let Some(index) = rows
-            .iter()
-            .position(|row| row.get("uuid").and_then(Value::as_str) == Some(target))
-    {
-        rows.swap(0, index);
-    }
-    rows
+    super::revealed_rows(
+        rows.iter()
+            .filter(|row| matches!(phase(row), Ok(Phase::Described | Phase::Appeared))),
+        target,
+    )
 }
 
 pub(super) fn scroll_to_target() -> Task<Message> {
-    iced::widget::operation::scroll_to(
-        SCROLL_ID,
-        iced::widget::operation::AbsoluteOffset {
-            x: None,
-            y: Some(0.0),
-        },
-    )
+    super::scroll_to_publication(SCROLL_ID)
 }
 
 fn attempt_view<'a>(state: &'a App, attempt: &'a AttemptStatus) -> Element<'a, Message> {
@@ -326,14 +328,7 @@ fn options_view<'a>(state: &'a App, uuid: &'a str, apparition: &'a Value) -> Ele
                 .map(|price| price.to_string())
         })
         .unwrap_or_default();
-    let locked = state.busy
-        || state.publish_active
-        || state.publish_locks.is_none()
-        || state.publish_lock_error.is_some()
-        || state
-            .publish_locks
-            .as_ref()
-            .is_some_and(|locks| locks.contains(uuid));
+    let locked = state.options_locked(uuid);
     let mut panel = column![text("DeviantArt options")].spacing(4);
     let price_input = text_input("Price (blank clears/free)", &price);
     panel = panel.push(if locked {
@@ -350,34 +345,34 @@ fn options_view<'a>(state: &'a App, uuid: &'a str, apparition: &'a Value) -> Ele
             .map(|options| options.tiers.contains(tier))
             .unwrap_or_else(|| contains_option(apparition, "tiers", tier));
         let control = checkbox(selected).label(tier.as_str());
-        panel = panel.push(if locked {
-            control
-        } else {
-            let uuid = uuid.to_owned();
-            let tier = tier.clone();
-            control.on_toggle(move |selected| Message::OptionTierChanged {
-                uuid: uuid.clone(),
-                value: tier.clone(),
-                selected,
-            })
-        });
+        let uuid = uuid.to_owned();
+        let tier = tier.clone();
+        panel = panel.push(
+            control.on_toggle_maybe((!locked).then_some(move |selected| {
+                Message::OptionTierChanged {
+                    uuid: uuid.clone(),
+                    value: tier.clone(),
+                    selected,
+                }
+            })),
+        );
     }
     for gallery in &state.application.store().config().galleries {
         let selected = draft
             .map(|options| options.galleries.contains(gallery))
             .unwrap_or_else(|| contains_option(apparition, "galleries", gallery));
         let control = checkbox(selected).label(gallery.as_str());
-        panel = panel.push(if locked {
-            control
-        } else {
-            let uuid = uuid.to_owned();
-            let gallery = gallery.clone();
-            control.on_toggle(move |selected| Message::OptionGalleryChanged {
-                uuid: uuid.clone(),
-                value: gallery.clone(),
-                selected,
-            })
-        });
+        let uuid = uuid.to_owned();
+        let gallery = gallery.clone();
+        panel = panel.push(
+            control.on_toggle_maybe((!locked).then_some(move |selected| {
+                Message::OptionGalleryChanged {
+                    uuid: uuid.clone(),
+                    value: gallery.clone(),
+                    selected,
+                }
+            })),
+        );
     }
     if let Some(error) = draft
         .and_then(|options| options.error.as_deref())
@@ -385,14 +380,14 @@ fn options_view<'a>(state: &'a App, uuid: &'a str, apparition: &'a Value) -> Ele
     {
         panel = panel.push(text(error));
     }
-    if let Some(options) = draft.filter(|options| options.dirty) {
+    if draft.is_some_and(|options| options.dirty) {
         let save = button("Save options");
         panel = panel.push(if locked {
             save
         } else {
             save.on_press(Message::SaveOptions(uuid.to_owned()))
         });
-        if options.dirty && state.publish_locks.is_none() {
+        if state.publish_locks.is_none() {
             panel = panel.push(text("Checking unresolved attempts; options are locked."));
         }
     }

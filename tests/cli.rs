@@ -40,10 +40,11 @@ fn marked_data(root: &std::path::Path) {
 }
 
 fn llmfit(root: &std::path::Path) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let path = root.join("llmfit");
-    fs::write(&path, "#!/bin/sh\nprintf '%s' '{\"models\":[{\"name\":\"google/gemma-4-26B-A4B-it\",\"fit_level\":\"Good\"}]}'\n").unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    common::executable::write_executable(
+        &path,
+        "#!/bin/sh\nprintf '%s' '{\"models\":[{\"name\":\"google/gemma-4-26B-A4B-it\",\"fit_level\":\"Good\"}]}'\n",
+    );
     path
 }
 
@@ -84,7 +85,6 @@ fn publication_batch(root: &std::path::Path) {
 }
 
 fn logging_worker(root: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
-    use std::os::unix::fs::PermissionsExt;
     let worker = root.join("worker.sh");
     let calls = root.join("worker-calls.txt");
     let script = format!(
@@ -106,8 +106,7 @@ done
         calls.display(),
         calls.display()
     );
-    fs::write(&worker, script).unwrap();
-    fs::set_permissions(&worker, fs::Permissions::from_mode(0o755)).unwrap();
+    common::executable::write_executable(&worker, &script);
     (worker, calls)
 }
 
@@ -352,15 +351,13 @@ fn default_publish_is_first_pending_and_all_uuid_remain_explicit_batches() {
 
 #[test]
 fn headless_flag_reaches_the_publish_worker_open_command() {
-    use std::os::unix::fs::PermissionsExt;
-
     let root = tempdir().unwrap();
     publication_batch(root.path());
     let worker = root.path().join("headless-worker.sh");
     let open = root.path().join("open.json");
-    fs::write(
+    common::executable::write_executable(
         &worker,
-        format!(
+        &format!(
             r#"#!/bin/sh
 if [ "$1" = "--check-steps" ]; then exit 0; fi
 while IFS= read -r line; do
@@ -376,9 +373,7 @@ done
 "#,
             open.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&worker, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let skill = root.path().join("skill.md");
     fs::write(&skill, "fixture").unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_publicator"))
@@ -469,13 +464,9 @@ fn check_steps_is_check_only_even_with_submission_flags_or_bad_data() {
 
 #[test]
 fn explicit_missing_uuid_is_an_error_after_steps_check() {
-    use std::os::unix::fs::PermissionsExt;
     let root = tempdir().unwrap();
     let worker = root.path().join("worker.sh");
-    fs::write(&worker, "#!/bin/sh\nexit 0\n").unwrap();
-    let mut permissions = fs::metadata(&worker).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&worker, permissions).unwrap();
+    common::executable::write_executable(&worker, "#!/bin/sh\nexit 0\n");
     let result = Command::new(env!("CARGO_BIN_EXE_publicator"))
         .current_dir(root.path())
         .env("PUBLICATOR_WORKER", &worker)
@@ -625,17 +616,14 @@ fn cli_local_consent_paths_are_terminal_and_nonterminal_safe() {
         id(1)
     );
 
-    use std::os::unix::fs::PermissionsExt;
     let root = tempdir().unwrap();
     fs::write(root.path().join("publications.json"), "[]").unwrap();
     let marker = root.path().join("llmfit-called");
     let fit = root.path().join("llmfit");
-    fs::write(
+    common::executable::write_executable(
         &fit,
-        format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
-    )
-    .unwrap();
-    fs::set_permissions(&fit, fs::Permissions::from_mode(0o755)).unwrap();
+        &format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+    );
     let output = Command::new(env!("CARGO_BIN_EXE_publicator"))
         .current_dir(root.path())
         .env(
@@ -695,12 +683,13 @@ fn echo_first_uses_configured_timezone_and_vision_models_only_runs_llmfit() {
     assert!(echo_stdout.contains("title: Title"));
     assert!(echo_stdout.contains("schedule: 2023-11-14 12:13 HST"));
 
-    use std::os::unix::fs::PermissionsExt;
     let bin = root.path().join("bin");
     fs::create_dir(&bin).unwrap();
     let fit = bin.join("llmfit");
-    fs::write(&fit, "#!/bin/sh\nprintf '%s' '{\"models\":[{\"name\":\"google/gemma-4-26B-A4B-it\",\"fit_level\":\"Good\"},{\"name\":\"google/gemma-4-31B-it\",\"fit_level\":\"Good\"}]}'\n").unwrap();
-    fs::set_permissions(&fit, fs::Permissions::from_mode(0o755)).unwrap();
+    common::executable::write_executable(
+        &fit,
+        "#!/bin/sh\nprintf '%s' '{\"models\":[{\"name\":\"google/gemma-4-26B-A4B-it\",\"fit_level\":\"Good\"},{\"name\":\"google/gemma-4-31B-it\",\"fit_level\":\"Good\"}]}'\n",
+    );
     let vision = Command::new(env!("CARGO_BIN_EXE_publicator"))
         .current_dir(cwd.path())
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
@@ -746,41 +735,51 @@ fn publish_empty_batch_succeeds_without_worker() {
     );
 }
 
+fn publish_fixture() -> common::Fixture {
+    let f = common::Fixture::new();
+    let image = f.image("art.png", 4, 4);
+    fs::write(f.path("tags.txt"), "tag\n").unwrap();
+    fs::write(f.path("publicator.toml"), "tags='tags.txt'\n").unwrap();
+    let mut publication = common::row(1, "DESCRIBED");
+    publication["files"][0]["basename"] = json!("art.png");
+    publication["files"][0]["sha512sum"] = json!(publicator::images::file_sha512(&image).unwrap());
+    publication["apparitionTimestampIfDifferentThanSubmission"] = json!(1700002800);
+    publication["apparitions"] = json!([
+        {"platformName":"deviantart","state":"unpublished","tiers":[],"galleries":[]}
+    ]);
+    f.write(json!([publication]));
+    f
+}
+
+fn publish_command(root: &std::path::Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_publicator"));
+    command
+        .current_dir(root)
+        .env("PUBLICATOR_WORKER", root.join("worker.sh"))
+        .env("PUBLICATOR_SKILL", root.join("skill.md"))
+        .args(["da-publish", "--data-dir", root.to_str().unwrap()]);
+    command
+}
+
+fn run_publish_worker(root: &std::path::Path, script: &str) -> std::process::Output {
+    let worker = root.join("worker.sh");
+    common::executable::write_executable(&worker, script);
+    fs::write(root.join("skill.md"), "fixture skill").unwrap();
+    publish_command(root).output().unwrap()
+}
+
 #[test]
 fn publish_unknown_worker_result_is_nonzero() {
-    use std::os::unix::fs::PermissionsExt;
-    let root = tempdir().unwrap();
-    let image = root.path().join("art.png");
-    assert!(
-        Command::new("magick")
-            .args(["-size", "4x4", "xc:white"])
-            .arg(&image)
-            .status()
-            .unwrap()
-            .success()
+    let f = publish_fixture();
+    let root = f.root.path();
+    let starts = root.join("worker-starts.txt");
+    let output = run_publish_worker(
+        root,
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--check-steps\" ]; then exit 0; fi\nwhile IFS= read -r line; do case \"$line\" in *'\"type\":\"open\"'*) echo start >> '{}'; echo '{{\"protocol\":1,\"type\":\"ready\"}}' ;; *'\"type\":\"submit\"'*) echo malformed ;; *'\"type\":\"close\"'*) exit 0 ;; esac; done\n",
+            starts.display()
+        ),
     );
-    fs::write(root.path().join("tags.txt"), "tag\n").unwrap();
-    fs::write(root.path().join("publicator.toml"), "tags='tags.txt'\n").unwrap();
-    let digest = publicator::images::file_sha512(&image).unwrap();
-    fs::write(root.path().join("publications.json"), json!([{
-        "uuid":"00000000-0000-4000-8000-000000000001", "state":"DESCRIBED", "title":"Title", "description":"Description",
-        "submissionTimestamp":1700000000, "apparitionTimestampIfDifferentThanSubmission":1700002800,
-        "files":[{"basename":"art.png","sha512sum":digest}],
-        "apparitions":[{"platformName":"deviantart","state":"unpublished","tiers":[],"galleries":[]}]
-    }]).to_string()).unwrap();
-    let worker = root.path().join("worker.sh");
-    let starts = root.path().join("worker-starts.txt");
-    fs::write(&worker, format!("#!/bin/sh\nif [ \"$1\" = \"--check-steps\" ]; then exit 0; fi\nwhile IFS= read -r line; do case \"$line\" in *'\"type\":\"open\"'*) echo start >> '{}'; echo '{{\"protocol\":1,\"type\":\"ready\"}}' ;; *'\"type\":\"submit\"'*) echo malformed ;; *'\"type\":\"close\"'*) exit 0 ;; esac; done\n", starts.display())).unwrap();
-    fs::set_permissions(&worker, fs::Permissions::from_mode(0o755)).unwrap();
-    let skill = root.path().join("skill.md");
-    fs::write(&skill, "fixture skill").unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_publicator"))
-        .current_dir(root.path())
-        .env("PUBLICATOR_WORKER", &worker)
-        .env("PUBLICATOR_SKILL", &skill)
-        .args(["da-publish", "--data-dir", root.path().to_str().unwrap()])
-        .output()
-        .unwrap();
     assert!(
         !output.status.success(),
         "stdout={} stderr={}",
@@ -794,13 +793,7 @@ fn publish_unknown_worker_result_is_nonzero() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(fs::read_to_string(&starts).unwrap().lines().count(), 1);
-    let unresolved = Command::new(env!("CARGO_BIN_EXE_publicator"))
-        .current_dir(root.path())
-        .env("PUBLICATOR_WORKER", &worker)
-        .env("PUBLICATOR_SKILL", &skill)
-        .args(["da-publish", "--data-dir", root.path().to_str().unwrap()])
-        .output()
-        .unwrap();
+    let unresolved = publish_command(root).output().unwrap();
     assert!(!unresolved.status.success());
     assert!(String::from_utf8_lossy(&unresolved.stderr).contains("unresolved"));
     assert_eq!(fs::read_to_string(starts).unwrap().lines().count(), 1);
@@ -808,38 +801,12 @@ fn publish_unknown_worker_result_is_nonzero() {
 
 #[test]
 fn publish_failed_worker_result_is_nonzero() {
-    use std::os::unix::fs::PermissionsExt;
-    let root = tempdir().unwrap();
-    let image = root.path().join("art.png");
-    assert!(
-        Command::new("magick")
-            .args(["-size", "4x4", "xc:white"])
-            .arg(&image)
-            .status()
-            .unwrap()
-            .success()
+    let f = publish_fixture();
+    let root = f.root.path();
+    let output = run_publish_worker(
+        root,
+        "#!/bin/sh\nif [ \"$1\" = \"--check-steps\" ]; then exit 0; fi\nwhile IFS= read -r line; do case \"$line\" in *'\"type\":\"open\"'*) echo '{\"protocol\":1,\"type\":\"ready\"}' ;; *'\"type\":\"submit\"'*) attempt=$(printf '%s' \"$line\" | sed -n 's/.*\"attempt_id\":\"\\([^\"]*\\)\".*/\\1/p'); echo \"{\\\"protocol\\\":1,\\\"type\\\":\\\"failed\\\",\\\"attempt_id\\\":\\\"$attempt\\\",\\\"uuid\\\":\\\"00000000-0000-4000-8000-000000000001\\\",\\\"error\\\":\\\"fake failure\\\"}\" ;; *'\"type\":\"close\"'*) exit 0 ;; esac; done\n",
     );
-    fs::write(root.path().join("tags.txt"), "tag\n").unwrap();
-    fs::write(root.path().join("publicator.toml"), "tags='tags.txt'\n").unwrap();
-    let digest = publicator::images::file_sha512(&image).unwrap();
-    fs::write(root.path().join("publications.json"), json!([{
-        "uuid":"00000000-0000-4000-8000-000000000001", "state":"DESCRIBED", "title":"Title", "description":"Description",
-        "submissionTimestamp":1700000000, "apparitionTimestampIfDifferentThanSubmission":1700002800,
-        "files":[{"basename":"art.png","sha512sum":digest}],
-        "apparitions":[{"platformName":"deviantart","state":"unpublished","tiers":[],"galleries":[]}]
-    }]).to_string()).unwrap();
-    let worker = root.path().join("worker.sh");
-    fs::write(&worker, "#!/bin/sh\nif [ \"$1\" = \"--check-steps\" ]; then exit 0; fi\nwhile IFS= read -r line; do case \"$line\" in *'\"type\":\"open\"'*) echo '{\"protocol\":1,\"type\":\"ready\"}' ;; *'\"type\":\"submit\"'*) attempt=$(printf '%s' \"$line\" | sed -n 's/.*\"attempt_id\":\"\\([^\"]*\\)\".*/\\1/p'); echo \"{\\\"protocol\\\":1,\\\"type\\\":\\\"failed\\\",\\\"attempt_id\\\":\\\"$attempt\\\",\\\"uuid\\\":\\\"00000000-0000-4000-8000-000000000001\\\",\\\"error\\\":\\\"fake failure\\\"}\" ;; *'\"type\":\"close\"'*) exit 0 ;; esac; done\n").unwrap();
-    fs::set_permissions(&worker, fs::Permissions::from_mode(0o755)).unwrap();
-    let skill = root.path().join("skill.md");
-    fs::write(&skill, "fixture skill").unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_publicator"))
-        .current_dir(root.path())
-        .env("PUBLICATOR_WORKER", &worker)
-        .env("PUBLICATOR_SKILL", &skill)
-        .args(["da-publish", "--data-dir", root.path().to_str().unwrap()])
-        .output()
-        .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         !output.status.success(),

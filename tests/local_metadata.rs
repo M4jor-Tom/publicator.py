@@ -19,13 +19,10 @@ fn local_client_for_test(server: &Server) -> (MetadataClient, tempfile::TempDir)
     let executable = dir.path().join("llmfit");
     let report =
         json!({"models":[{"name":"google/gemma-4-26B-A4B-it","fit_level":"Good","notes":[]}]});
-    std::fs::write(
+    common::executable::write_executable(
         &executable,
-        format!("#!/bin/sh\nprintf '%s' '{}'\n", report),
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        &format!("#!/bin/sh\nprintf '%s' '{}'\n", report),
+    );
     (
         MetadataClient::new(
             reqwest::Client::new(),
@@ -184,17 +181,14 @@ async fn llmfit_good_too_tight_and_unassessable_verdicts_are_distinct() {
     ] {
         let dir = tempfile::tempdir().unwrap();
         let exe = dir.path().join("llmfit");
-        std::fs::write(
+        common::executable::write_executable(
             &exe,
-            format!(
+            &format!(
                 "#!/bin/sh\nprintf '%s' '{}'\n{}\n",
                 stdout,
                 if exit { "exit 0" } else { "exit 1" }
             ),
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let client = MetadataClient::new(reqwest::Client::new(), Endpoints::default(), exe);
         let fit = client.local_fit(&model_option()).await.unwrap();
         assert_eq!(fit.fit, expected);

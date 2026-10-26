@@ -119,6 +119,36 @@ impl Application {
         expected_ids: Option<&[String]>,
     ) -> Result<BatchReport> {
         validate_request(request)?;
+        let ids = self.admit_marked(request.source, expected_ids)?;
+        if ids.is_empty() {
+            return Ok(BatchReport::default());
+        }
+        let _lease = Lease {
+            busy: &self.busy,
+            ids: ids.clone(),
+        };
+        self.preflight_local(request).await?;
+        let mut report = BatchReport::default();
+        let mut preferred: Option<String> = None;
+        for uuid in ids {
+            let result = self
+                .generate_marked_record(&uuid, request, &mut preferred)
+                .await;
+            match result {
+                Ok(()) => {
+                    report.succeeded += 1;
+                    report.results.push(RecordResult {
+                        uuid,
+                        saved: true,
+                        error: None,
+                    });
+                }
+                Err(error) => record_batch_error(&mut report, uuid, error)?,
+            }
+        }
+        Ok(report)
+    }
+    fn admit_marked(&self, source: Source, expected_ids: Option<&[String]>) -> Result<Vec<String>> {
         let _op = self.operation.lock().unwrap();
         let rows = self.store.read()?;
         if *self.publishing.lock().unwrap() {
@@ -139,59 +169,36 @@ impl Application {
                 "marked batch changed while local install consent was pending".into(),
             ));
         }
-        ids = batch_ids(ids, request.source);
+        ids = batch_ids(ids, source);
         if ids.is_empty() {
-            return Ok(BatchReport::default());
+            return Ok(ids);
         }
         self.reserve(ids.clone())?;
-        drop(_op);
-        let _lease = Lease {
-            busy: &self.busy,
-            ids: ids.clone(),
-        };
-        self.preflight_local(request).await?;
-        let mut report = BatchReport::default();
-        let mut preferred: Option<String> = None;
-        for uuid in ids {
-            let result = async {
-                let rows = self.store.read()?;
-                let row = lookup(&rows, &uuid)?;
-                let image = artwork(&self.store, row)?;
-                let generated = self
-                    .generate_provider(&image, request, preferred.as_deref())
-                    .await;
-                match generated {
-                    Ok(g) => {
-                        if preferred.is_none() {
-                            preferred = Some(g.model_used.clone());
-                        }
-                        workflow::merge_generated_markers(
-                            &self.store,
-                            &uuid,
-                            &WorkflowMetadata {
-                                title: g.metadata.title,
-                                description: g.metadata.description,
-                            },
-                        )?;
-                        Ok(())
-                    }
-                    Err(provider_error) => Err(provider_error),
-                }
-            }
-            .await;
-            match result {
-                Ok(()) => {
-                    report.succeeded += 1;
-                    report.results.push(RecordResult {
-                        uuid,
-                        saved: true,
-                        error: None,
-                    });
-                }
-                Err(error) => record_batch_error(&mut report, uuid, error)?,
-            }
+        Ok(ids)
+    }
+    async fn generate_marked_record(
+        &self,
+        uuid: &str,
+        request: &GenerationRequest,
+        preferred: &mut Option<String>,
+    ) -> Result<()> {
+        let rows = self.store.read()?;
+        let row = lookup(&rows, uuid)?;
+        let image = artwork(&self.store, row)?;
+        let generated = self
+            .generate_provider(&image, request, preferred.as_deref())
+            .await?;
+        if preferred.is_none() {
+            *preferred = Some(generated.model_used.clone());
         }
-        Ok(report)
+        workflow::merge_generated_markers(
+            &self.store,
+            uuid,
+            &WorkflowMetadata {
+                title: generated.metadata.title,
+                description: generated.metadata.description,
+            },
+        )
     }
     fn reserve(&self, ids: Vec<String>) -> Result<()> {
         let mut busy = self.busy.lock().unwrap();

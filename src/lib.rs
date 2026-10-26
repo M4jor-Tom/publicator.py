@@ -15,3 +15,7 @@ pub mod store;
 #[cfg(feature = "desktop")]
 pub mod ui;
 pub mod workflow;
+
+#[cfg(test)]
+#[path = "../tests/common/executable.rs"]
+mod executable_fixture;

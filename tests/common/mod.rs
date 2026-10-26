@@ -15,6 +15,8 @@ pub fn row(n: u64, state: &str) -> Value {
     json!({"uuid": id(n), "state": state, "title": "Title", "description": "Description",
         "submissionTimestamp": 1_700_000_000, "files": [{"basename": format!("{n}.png"), "sha512sum": "0".repeat(128)}], "apparitions": []})
 }
+pub mod executable;
+
 pub fn epoch(s: &str) -> i64 {
     chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp()
 }

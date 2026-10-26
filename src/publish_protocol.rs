@@ -94,46 +94,58 @@ impl WorkerCommand {
             return Err(format!("unsupported worker protocol {protocol}"));
         }
         if let Self::Submit(job) = self {
-            if uuid::Uuid::parse_str(&job.attempt_id).is_err()
-                || uuid::Uuid::parse_str(&job.uuid).is_err()
-                || job.title.is_empty()
-                || job.description.is_empty()
-            {
-                return Err("invalid publish job identifiers or metadata".into());
+            job.validate()?;
+        }
+        Ok(())
+    }
+}
+
+impl PublishJob {
+    fn validate(&self) -> Result<(), String> {
+        if uuid::Uuid::parse_str(&self.attempt_id).is_err()
+            || uuid::Uuid::parse_str(&self.uuid).is_err()
+            || self.title.is_empty()
+            || self.description.is_empty()
+        {
+            return Err("invalid publish job identifiers or metadata".into());
+        }
+        if self
+            .image_path
+            .extension()
+            .is_some_and(|ext| ext.to_string_lossy().eq_ignore_ascii_case("webp"))
+        {
+            return Err("WebP is not accepted by DeviantArt".into());
+        }
+
+        self.schedule.validate()
+    }
+}
+
+impl ScheduleParts {
+    fn wall_time(&self) -> Result<chrono::NaiveDateTime, String> {
+        if self.minute != 0 {
+            return Err("invalid schedule parts".into());
+        }
+        chrono::NaiveDate::from_ymd_opt(self.year, self.month, self.day)
+            .and_then(|date| date.and_hms_opt(self.hour, self.minute, 0))
+            .ok_or_else(|| "invalid schedule parts".to_string())
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        let wall_time = self.wall_time()?;
+        let zone = self
+            .timezone
+            .parse::<chrono_tz::Tz>()
+            .map_err(|_| "invalid schedule timezone".to_string())?;
+        let expected = match zone.from_local_datetime(&wall_time) {
+            chrono::LocalResult::Single(dt) => Some(dt.timestamp()),
+            chrono::LocalResult::Ambiguous(first, second) => {
+                Some(first.timestamp().min(second.timestamp()))
             }
-            if job
-                .image_path
-                .extension()
-                .is_some_and(|ext| ext.to_string_lossy().eq_ignore_ascii_case("webp"))
-            {
-                return Err("WebP is not accepted by DeviantArt".into());
-            }
-            let s = &job.schedule;
-            if s.minute != 0
-                || !(1..=12).contains(&s.month)
-                || !(1..=31).contains(&s.day)
-                || s.hour > 23
-                || chrono::NaiveDate::from_ymd_opt(s.year, s.month, s.day).is_none()
-            {
-                return Err("invalid schedule parts".into());
-            }
-            let zone = s
-                .timezone
-                .parse::<chrono_tz::Tz>()
-                .map_err(|_| "invalid schedule timezone".to_string())?;
-            let wall_time = chrono::NaiveDate::from_ymd_opt(s.year, s.month, s.day)
-                .and_then(|date| date.and_hms_opt(s.hour, s.minute, 0))
-                .ok_or_else(|| "invalid schedule parts".to_string())?;
-            let expected = match zone.from_local_datetime(&wall_time) {
-                chrono::LocalResult::Single(dt) => Some(dt.timestamp()),
-                chrono::LocalResult::Ambiguous(first, second) => {
-                    Some(first.timestamp().min(second.timestamp()))
-                }
-                chrono::LocalResult::None => None,
-            };
-            if expected != Some(s.epoch) {
-                return Err("schedule epoch does not match wall time".into());
-            }
+            chrono::LocalResult::None => None,
+        };
+        if expected != Some(self.epoch) {
+            return Err("schedule epoch does not match wall time".into());
         }
         Ok(())
     }
@@ -167,4 +179,34 @@ pub fn read_frame<R: std::io::BufRead>(reader: &mut R) -> Result<Option<WorkerCo
     let command: WorkerCommand = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     command.validate()?;
     Ok(Some(command))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn schedule_validation_rejects_invalid_parts_before_the_timezone() {
+        for (month, day, hour, minute) in [
+            (0, 1, 0, 0),
+            (13, 1, 0, 0),
+            (1, 0, 0, 0),
+            (1, 32, 0, 0),
+            (2, 29, 0, 0),
+            (4, 31, 0, 0),
+            (1, 1, 24, 0),
+            (1, 1, 0, 1),
+        ] {
+            let schedule = ScheduleParts {
+                epoch: 0,
+                timezone: "invalid".into(),
+                year: 2023,
+                month,
+                day,
+                hour,
+                minute,
+            };
+            assert_eq!(schedule.validate().unwrap_err(), "invalid schedule parts");
+        }
+    }
 }

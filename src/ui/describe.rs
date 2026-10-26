@@ -32,21 +32,7 @@ pub(super) fn preview_tasks(state: &mut App, start: usize, end: usize) -> Task<M
             if state.describe_previews.contains_key(&uuid) {
                 return None;
             }
-            let basename = row
-                .get("files")?
-                .as_array()?
-                .first()?
-                .get("basename")?
-                .as_str()?
-                .to_owned();
-            let sha = row
-                .get("files")?
-                .as_array()?
-                .first()?
-                .get("sha512sum")
-                .or_else(|| row.get("files")?.as_array()?.first()?.get("sha512sumHex"))?
-                .as_str()?
-                .to_owned();
+            let (basename, sha) = preview_identity(row)?;
             Some((uuid, basename, sha))
         })
         .take(capacity)
@@ -80,6 +66,17 @@ pub(super) fn preview_tasks(state: &mut App, start: usize, end: usize) -> Task<M
     Task::batch(tasks)
 }
 
+fn preview_identity(row: &Value) -> Option<(String, String)> {
+    let file = row.get("files")?.as_array()?.first()?;
+    let basename = file.get("basename")?.as_str()?.to_owned();
+    let sha = file
+        .get("sha512sum")
+        .or_else(|| file.get("sha512sumHex"))?
+        .as_str()?
+        .to_owned();
+    Some((basename, sha))
+}
+
 pub fn view(state: &App) -> Element<'_, Message> {
     let mut source_controls = row![text("Provider")].spacing(8);
     for source in crate::metadata::available_sources() {
@@ -107,30 +104,7 @@ pub fn view(state: &App) -> Element<'_, Message> {
     ]
     .spacing(12);
     if state.source == Source::Local {
-        let fit = state.local_fit_status();
-        if let Some(status) = fit {
-            let reason: String = status.fit.reason.chars().take(512).collect();
-            content = content.push(text(format!(
-                "Local fit: {} — {}. {}",
-                status.fit.level,
-                if reason.is_empty() {
-                    "No additional fit notes"
-                } else {
-                    &reason
-                },
-                if !status.fit.fit {
-                    "This model does not fit this host."
-                } else if !status.available {
-                    "Ollama is unavailable; generation cannot continue."
-                } else if status.installed {
-                    "Model is installed."
-                } else {
-                    "Model is not installed; installation requires confirmation."
-                }
-            )));
-        } else {
-            content = content.push(text("Checking local model fit…"));
-        }
+        content = content.push(local_fit_view(state));
     }
     let mut cards = column![].spacing(12);
     for row in ordered_rows(
@@ -143,85 +117,7 @@ pub fn view(state: &App) -> Element<'_, Message> {
         let Some(uuid) = row.get("uuid").and_then(Value::as_str).map(str::to_owned) else {
             continue;
         };
-        let (saved_title, saved_description) = super::row_metadata(row);
-        let (title, description) = state
-            .drafts
-            .get(&uuid)
-            .map(|draft| (draft.title().to_owned(), draft.description().to_owned()))
-            .unwrap_or((saved_title, saved_description));
-        let busy = state.busy_uuids.contains(&uuid);
-        let title_uuid = uuid.clone();
-        let mut card = column![
-            text(uuid.clone()),
-            text_input("Title", &title)
-                .on_input(move |value| Message::Edited {
-                    uuid: title_uuid.clone(),
-                    field: super::drafts::Field::Title,
-                    text: value
-                })
-                .on_submit(Message::SaveDraft(uuid.clone())),
-        ]
-        .spacing(5);
-        if let Some(editor) = state.description_editors.get(&uuid) {
-            let description_uuid = uuid.clone();
-            card = card.push(
-                iced::widget::text_editor(editor)
-                    .placeholder("Description")
-                    .height(Length::Fixed(120.0))
-                    .on_action(move |action| Message::DescriptionAction {
-                        uuid: description_uuid.clone(),
-                        action,
-                    }),
-            );
-        } else {
-            card = card.push(text(description.clone()));
-        }
-        if state.revealed_publication() == Some(uuid.as_str()) {
-            card = card.push(text("Opened from Calendar"));
-        }
-        let dirty_title = state
-            .drafts
-            .get(&uuid)
-            .is_some_and(|d| d.is_field_dirty(super::drafts::Field::Title));
-        let dirty_description = state
-            .drafts
-            .get(&uuid)
-            .is_some_and(|d| d.is_field_dirty(super::drafts::Field::Description));
-        let preview: Element<'_, Message> = match state.describe_previews.get(&uuid) {
-            Some(Some(Ok(path))) => {
-                iced::widget::image(iced::widget::image::Handle::from_path(path))
-                    .width(Length::Fixed(160.0))
-                    .height(Length::Fixed(160.0))
-                    .into()
-            }
-            Some(Some(Err(error))) => text(format!("Preview unavailable: {error}")).into(),
-            _ => text("Preview loads when this card is visible").into(),
-        };
-        card = card.push(preview);
-        card = card.push(text(format!(
-            "Title: {}; description: {}",
-            if dirty_title { "unsaved" } else { "saved" },
-            if dirty_description {
-                "unsaved"
-            } else {
-                "saved"
-            }
-        )));
-        card = card.push(
-            row![
-                button("Save draft").on_press(Message::SaveDraft(uuid.clone())),
-                button("Approve metadata").on_press(Message::ApproveMetadata(uuid.clone())),
-                button("Return to Schedule").on_press(Message::ReturnToSchedule(uuid.clone())),
-                button("Generate one").on_press(Message::GenerateOne(uuid.clone())),
-            ]
-            .spacing(6),
-        );
-        if busy {
-            card = card.push(text("Generating and saving…"));
-        } else if title.contains(GENERATE_MARKER) || description.contains(GENERATE_MARKER) {
-            card = card.push(text("Marked for generation"));
-        }
-        cards = cards.push(card);
+        cards = cards.push(metadata_card(state, row, uuid));
     }
     content = content.push(
         scrollable(cards)
@@ -245,29 +141,127 @@ pub fn view(state: &App) -> Element<'_, Message> {
     content.into()
 }
 
-fn ordered_rows<'a>(rows: &'a [Value], target: Option<&str>) -> Vec<&'a Value> {
-    let mut rows = rows
-        .iter()
-        .filter(|row| phase(row).ok() == Some(Phase::Scheduled))
-        .collect::<Vec<_>>();
-    if let Some(target) = target
-        && let Some(index) = rows
-            .iter()
-            .position(|row| row.get("uuid").and_then(Value::as_str) == Some(target))
-    {
-        rows.swap(0, index);
+fn local_fit_view(state: &App) -> Element<'_, Message> {
+    let Some(status) = state.local_fit_status() else {
+        return text("Checking local model fit…").into();
+    };
+    let reason: String = status.fit.reason.chars().take(512).collect();
+    let availability = if !status.fit.fit {
+        "This model does not fit this host."
+    } else if !status.available {
+        "Ollama is unavailable; generation cannot continue."
+    } else if status.installed {
+        "Model is installed."
+    } else {
+        "Model is not installed; installation requires confirmation."
+    };
+    text(format!(
+        "Local fit: {} — {}. {}",
+        status.fit.level,
+        if reason.is_empty() {
+            "No additional fit notes"
+        } else {
+            &reason
+        },
+        availability
+    ))
+    .into()
+}
+
+fn metadata_preview<'a>(state: &'a App, uuid: &str) -> Element<'a, Message> {
+    match state.describe_previews.get(uuid) {
+        Some(Some(Ok(path))) => iced::widget::image(iced::widget::image::Handle::from_path(path))
+            .width(Length::Fixed(160.0))
+            .height(Length::Fixed(160.0))
+            .into(),
+        Some(Some(Err(error))) => text(format!("Preview unavailable: {error}")).into(),
+        _ => text("Preview loads when this card is visible").into(),
     }
-    rows
+}
+
+fn metadata_card<'a>(state: &'a App, row: &Value, uuid: String) -> Element<'a, Message> {
+    let (saved_title, saved_description) = super::row_metadata(row);
+    let (title, description) = state
+        .drafts
+        .get(&uuid)
+        .map(|draft| (draft.title().to_owned(), draft.description().to_owned()))
+        .unwrap_or((saved_title, saved_description));
+    let busy = state.busy_uuids.contains(&uuid);
+    let title_uuid = uuid.clone();
+    let mut card = column![
+        text(uuid.clone()),
+        text_input("Title", &title)
+            .on_input(move |value| Message::Edited {
+                uuid: title_uuid.clone(),
+                field: super::drafts::Field::Title,
+                text: value
+            })
+            .on_submit(Message::SaveDraft(uuid.clone())),
+    ]
+    .spacing(5);
+    if let Some(editor) = state.description_editors.get(&uuid) {
+        let description_uuid = uuid.clone();
+        card = card.push(
+            iced::widget::text_editor(editor)
+                .placeholder("Description")
+                .height(Length::Fixed(120.0))
+                .on_action(move |action| Message::DescriptionAction {
+                    uuid: description_uuid.clone(),
+                    action,
+                }),
+        );
+    } else {
+        card = card.push(text(description.clone()));
+    }
+    if state.revealed_publication() == Some(uuid.as_str()) {
+        card = card.push(text("Opened from Calendar"));
+    }
+    let dirty_title = state
+        .drafts
+        .get(&uuid)
+        .is_some_and(|d| d.is_field_dirty(super::drafts::Field::Title));
+    let dirty_description = state
+        .drafts
+        .get(&uuid)
+        .is_some_and(|d| d.is_field_dirty(super::drafts::Field::Description));
+    let preview = metadata_preview(state, &uuid);
+    card = card.push(preview);
+    card = card.push(text(format!(
+        "Title: {}; description: {}",
+        if dirty_title { "unsaved" } else { "saved" },
+        if dirty_description {
+            "unsaved"
+        } else {
+            "saved"
+        }
+    )));
+    card = card.push(
+        row![
+            button("Save draft").on_press(Message::SaveDraft(uuid.clone())),
+            button("Approve metadata").on_press(Message::ApproveMetadata(uuid.clone())),
+            button("Return to Schedule").on_press(Message::ReturnToSchedule(uuid.clone())),
+            button("Generate one").on_press(Message::GenerateOne(uuid.clone())),
+        ]
+        .spacing(6),
+    );
+    if busy {
+        card = card.push(text("Generating and saving…"));
+    } else if title.contains(GENERATE_MARKER) || description.contains(GENERATE_MARKER) {
+        card = card.push(text("Marked for generation"));
+    }
+    card.into()
+}
+
+fn ordered_rows<'a>(rows: &'a [Value], target: Option<&str>) -> Vec<&'a Value> {
+    super::revealed_rows(
+        rows.iter()
+            .filter(|row| phase(row).ok() == Some(Phase::Scheduled)),
+        target,
+    )
 }
 
 pub(super) fn scroll_to_target() -> Task<Message> {
-    iced::widget::operation::scroll_to(
-        SCROLL_ID,
-        iced::widget::operation::AbsoluteOffset {
-            x: None,
-            y: Some(0.0),
-        },
-    )
+    super::scroll_to_publication(SCROLL_ID)
 }
 
 #[cfg(test)]

@@ -1,13 +1,14 @@
-use std::{fs, os::unix::fs::PermissionsExt, process::Command};
+use std::{fs, process::Command};
+
+#[path = "common/executable.rs"]
+mod executable_fixture;
 
 fn fake_command_worker(root: &std::path::Path) -> std::path::PathBuf {
     let worker = root.join("worker");
-    fs::write(
+    executable_fixture::write_executable(
         &worker,
         "#!/bin/sh\nexec python -m publicator_da.worker \"$@\"\n",
-    )
-    .unwrap();
-    fs::set_permissions(&worker, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     worker
 }
 

@@ -289,9 +289,8 @@ fn merging_both_markers_with_valid_pair_advances_to_described() {
     );
 }
 
-#[test]
-fn provider_result_merges_only_fields_still_marked_after_concurrent_edit() {
-    let f = Arc::new(Fixture::new());
+fn merge_after_manual_edit(pair: Metadata, patch: MetadataPatch) -> Fixture {
+    let f = Fixture::new();
     let mut publication = row(1, "SCHEDULED");
     publication["title"] = json!(GENERATE_MARKER);
     publication["description"] = json!(GENERATE_MARKER);
@@ -299,33 +298,33 @@ fn provider_result_merges_only_fields_still_marked_after_concurrent_edit() {
     let started = Arc::new(Barrier::new(2));
     let release = Arc::new(Barrier::new(2));
     let worker = {
-        let (f, started, release) = (Arc::clone(&f), Arc::clone(&started), Arc::clone(&release));
+        let (store, started, release) =
+            (f.store.clone(), Arc::clone(&started), Arc::clone(&release));
         std::thread::spawn(move || {
             started.wait();
             release.wait();
-            merge_generated_markers(
-                &f.store,
-                &id(1),
-                &Metadata {
-                    title: "AI title".into(),
-                    description: "AI description".into(),
-                },
-            )
-            .unwrap();
+            merge_generated_markers(&store, &id(1), &pair).unwrap();
         })
     };
-    started.wait(); // Provider has started and is blocked before returning its generated pair.
-    save_metadata(
-        &f.store,
-        &id(1),
-        &MetadataPatch {
+    started.wait(); // Provider is blocked before returning its generated pair.
+    save_metadata(&f.store, &id(1), &patch).unwrap();
+    release.wait();
+    worker.join().unwrap();
+    f
+}
+
+#[test]
+fn provider_result_merges_only_fields_still_marked_after_concurrent_edit() {
+    let f = merge_after_manual_edit(
+        Metadata {
+            title: "AI title".into(),
+            description: "AI description".into(),
+        },
+        MetadataPatch {
             title: Some("New manual title".into()),
             description: None,
         },
-    )
-    .unwrap();
-    release.wait();
-    worker.join().unwrap();
+    );
     let saved = f.store.read().unwrap();
     assert_eq!(saved[0]["title"], "New manual title");
     assert_eq!(saved[0]["description"], "AI description");
@@ -334,41 +333,16 @@ fn provider_result_merges_only_fields_still_marked_after_concurrent_edit() {
 
 #[test]
 fn provider_result_preserves_a_newer_manual_description_and_generates_title() {
-    let f = Arc::new(Fixture::new());
-    let mut publication = row(1, "SCHEDULED");
-    publication["title"] = json!(GENERATE_MARKER);
-    publication["description"] = json!(GENERATE_MARKER);
-    f.write(json!([publication]));
-    let started = Arc::new(Barrier::new(2));
-    let release = Arc::new(Barrier::new(2));
-    let worker = {
-        let (f, started, release) = (Arc::clone(&f), Arc::clone(&started), Arc::clone(&release));
-        std::thread::spawn(move || {
-            started.wait();
-            release.wait();
-            merge_generated_markers(
-                &f.store,
-                &id(1),
-                &Metadata {
-                    title: "AI title".into(),
-                    description: "Stale AI description".into(),
-                },
-            )
-            .unwrap();
-        })
-    };
-    started.wait();
-    save_metadata(
-        &f.store,
-        &id(1),
-        &MetadataPatch {
+    let f = merge_after_manual_edit(
+        Metadata {
+            title: "AI title".into(),
+            description: "Stale AI description".into(),
+        },
+        MetadataPatch {
             title: None,
             description: Some("Concurrent draft".into()),
         },
-    )
-    .unwrap();
-    release.wait();
-    worker.join().unwrap();
+    );
     let saved = f.store.read().unwrap();
     assert_eq!(saved[0]["title"], "AI title");
     assert_eq!(saved[0]["description"], "Concurrent draft");
@@ -377,41 +351,16 @@ fn provider_result_preserves_a_newer_manual_description_and_generates_title() {
 
 #[test]
 fn blocked_provider_persists_remaining_marked_field_after_blank_manual_edit() {
-    let f = Arc::new(Fixture::new());
-    let mut publication = row(1, "SCHEDULED");
-    publication["title"] = json!(GENERATE_MARKER);
-    publication["description"] = json!(GENERATE_MARKER);
-    f.write(json!([publication]));
-    let started = Arc::new(Barrier::new(2));
-    let release = Arc::new(Barrier::new(2));
-    let worker = {
-        let (f, started, release) = (Arc::clone(&f), Arc::clone(&started), Arc::clone(&release));
-        std::thread::spawn(move || {
-            started.wait();
-            release.wait();
-            merge_generated_markers(
-                &f.store,
-                &id(1),
-                &Metadata {
-                    title: "AI title".into(),
-                    description: "AI description".into(),
-                },
-            )
-            .unwrap();
-        })
-    };
-    started.wait();
-    save_metadata(
-        &f.store,
-        &id(1),
-        &MetadataPatch {
+    let f = merge_after_manual_edit(
+        Metadata {
+            title: "AI title".into(),
+            description: "AI description".into(),
+        },
+        MetadataPatch {
             title: Some("".into()),
             description: None,
         },
-    )
-    .unwrap();
-    release.wait();
-    worker.join().unwrap();
+    );
     let saved = f.store.read().unwrap();
     assert_eq!(saved[0]["title"], "");
     assert_eq!(saved[0]["description"], "AI description");
@@ -420,41 +369,16 @@ fn blocked_provider_persists_remaining_marked_field_after_blank_manual_edit() {
 
 #[test]
 fn blocked_stale_provider_result_does_not_approve_manual_edits() {
-    let f = Arc::new(Fixture::new());
-    let mut publication = row(1, "SCHEDULED");
-    publication["title"] = json!(GENERATE_MARKER);
-    publication["description"] = json!(GENERATE_MARKER);
-    f.write(json!([publication]));
-    let started = Arc::new(Barrier::new(2));
-    let release = Arc::new(Barrier::new(2));
-    let worker = {
-        let (f, started, release) = (Arc::clone(&f), Arc::clone(&started), Arc::clone(&release));
-        std::thread::spawn(move || {
-            started.wait();
-            release.wait();
-            merge_generated_markers(
-                &f.store,
-                &id(1),
-                &Metadata {
-                    title: "Stale AI title".into(),
-                    description: "Stale AI description".into(),
-                },
-            )
-            .unwrap();
-        })
-    };
-    started.wait();
-    save_metadata(
-        &f.store,
-        &id(1),
-        &MetadataPatch {
+    let f = merge_after_manual_edit(
+        Metadata {
+            title: "Stale AI title".into(),
+            description: "Stale AI description".into(),
+        },
+        MetadataPatch {
             title: Some("New manual title".into()),
             description: Some("New manual description".into()),
         },
-    )
-    .unwrap();
-    release.wait();
-    worker.join().unwrap();
+    );
     let saved = f.store.read().unwrap();
     assert_eq!(saved[0]["title"], "New manual title");
     assert_eq!(saved[0]["description"], "New manual description");

@@ -2,7 +2,7 @@ use serde_json::Value;
 use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, mpsc},
     thread,
     time::Duration,
 };
@@ -21,6 +21,23 @@ pub struct Server {
 
 impl Server {
     pub fn start(replies: Vec<Reply>) -> Self {
+        Self::start_gated(replies, None)
+    }
+
+    pub fn start_paused(reply: Reply) -> (Self, mpsc::Receiver<()>, mpsc::Sender<()>) {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        (
+            Self::start_gated(vec![reply], Some((started_tx, release_rx))),
+            started_rx,
+            release_tx,
+        )
+    }
+
+    fn start_gated(
+        replies: Vec<Reply>,
+        mut gate: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(false).unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -41,6 +58,10 @@ impl Server {
                     .lock()
                     .unwrap()
                     .push(serde_json::json!({"path": path, "body": body}));
+                if let Some((started, release)) = gate.take() {
+                    started.send(()).unwrap();
+                    release.recv().unwrap();
+                }
                 let reason = if reply.status == 200 { "OK" } else { "Error" };
                 write!(
                     stream,
@@ -59,6 +80,10 @@ impl Server {
             thread: Some(thread),
         }
     }
+    pub fn finish(mut self) {
+        self.thread.take().unwrap().join().unwrap();
+    }
+
     pub fn url(&self) -> &str {
         &self.url
     }

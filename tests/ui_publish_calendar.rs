@@ -2,6 +2,40 @@
 mod common;
 
 #[cfg(feature = "desktop")]
+fn default_application(
+    store: std::sync::Arc<publicator::store::Store>,
+) -> publicator::application::Application {
+    use publicator::{
+        application::Application,
+        metadata::{Endpoints, MetadataClient},
+    };
+    Application::new(
+        store,
+        MetadataClient::new(
+            reqwest::Client::new(),
+            Endpoints::default(),
+            "llmfit".into(),
+        ),
+    )
+}
+
+#[cfg(feature = "desktop")]
+fn loaded_default_app(f: &common::Fixture, row: serde_json::Value) -> publicator::ui::App {
+    use publicator::ui::{App, Message, UiOptions};
+    use std::{sync::Arc, time::Duration};
+    f.write(serde_json::json!([row.clone()]));
+    let (mut app, _) = App::from_application(
+        Arc::new(default_application(Arc::new(f.store.clone()))),
+        UiOptions {
+            openrouter_model: None,
+            ai_timeout: Duration::from_secs(1),
+        },
+    );
+    let _ = app.update(Message::LoadFinished(Ok(vec![row])));
+    app
+}
+
+#[cfg(feature = "desktop")]
 #[test]
 fn selection_is_partial_when_only_one_pending_cell_is_checked() {
     use publicator::ui::publish::{SelectionState, selection_state};
@@ -14,43 +48,17 @@ fn selection_is_partial_when_only_one_pending_cell_is_checked() {
 #[tokio::test]
 async fn publish_checkbox_persists_registered_target_through_ui_task() {
     use iced_runtime::{Action, futures::futures::StreamExt};
-    use publicator::{
-        application::Application,
-        config::{Config, Paths},
-        metadata::{Endpoints, MetadataClient},
-        ui::{App, Message, UiOptions},
-    };
-    use std::{sync::Arc, time::Duration};
+    use publicator::ui::Message;
+    use std::sync::Arc;
 
-    let root = tempfile::tempdir().unwrap();
-    let paths = Paths::resolve(Some(root.path()), None).unwrap();
-    let store = Arc::new(publicator::store::Store::new(paths, Config::default()).unwrap());
+    let f = common::Fixture::new();
+    let store = Arc::new(f.store.clone());
     let row = serde_json::json!({
         "uuid":"00000000-0000-4000-8000-000000000001", "state":"DESCRIBED",
         "title":"Title", "description":"Description", "submissionTimestamp":1700000000,
         "files":[{"basename":"art.png","sha512sum":"0".repeat(128)}], "apparitions":[]
     });
-    std::fs::write(
-        &store.paths().json,
-        serde_json::to_vec(&vec![row.clone()]).unwrap(),
-    )
-    .unwrap();
-    let application = Arc::new(Application::new(
-        store.clone(),
-        MetadataClient::new(
-            reqwest::Client::new(),
-            Endpoints::default(),
-            "llmfit".into(),
-        ),
-    ));
-    let (mut app, _) = App::from_application(
-        application,
-        UiOptions {
-            openrouter_model: None,
-            ai_timeout: Duration::from_secs(1),
-        },
-    );
-    let _ = app.update(Message::LoadFinished(Ok(vec![row])));
+    let mut app = loaded_default_app(&f, row);
     let task = app.update(Message::SelectCell {
         key: "00000000-0000-4000-8000-000000000001:deviantart".into(),
         selected: true,
@@ -83,9 +91,7 @@ async fn publish_checkbox_persists_registered_target_through_ui_task() {
 async fn publish_dispatch_rejects_a_stale_saved_cell_set_before_worker_start() {
     use iced_runtime::{Action, futures::futures::StreamExt};
     use publicator::{
-        application::Application,
         config::{Config, Paths},
-        metadata::{Endpoints, MetadataClient},
         publishing::Publisher,
         ui::{App, Message, UiOptions},
     };
@@ -106,15 +112,7 @@ async fn publish_dispatch_rejects_a_stale_saved_cell_set_before_worker_start() {
     )
     .unwrap();
     let application = Arc::new(
-        Application::new(
-            store.clone(),
-            MetadataClient::new(
-                reqwest::Client::new(),
-                Endpoints::default(),
-                "llmfit".into(),
-            ),
-        )
-        .with_publisher(Publisher::new(
+        default_application(store.clone()).with_publisher(Publisher::new(
             root.path().join("no-worker"),
             root.path().join("no-skill"),
         )),
@@ -309,21 +307,16 @@ fn publishing_ui_app(
 
 #[cfg(feature = "desktop")]
 fn fake_publisher_worker(f: &common::Fixture, body: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let worker = f.path("worker.sh");
-    std::fs::write(
+    common::executable::write_executable(
         &worker,
-        format!(
+        &format!(
             r#"#!/bin/sh
 [ "$1" = "--check-steps" ] && exit 0
 {body}
 "#
         ),
-    )
-    .unwrap();
-    let mut permissions = std::fs::metadata(&worker).unwrap().permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&worker, permissions).unwrap();
+    );
     worker
 }
 
@@ -333,52 +326,26 @@ fn options_app() -> (
     std::sync::Arc<publicator::store::Store>,
     tempfile::TempDir,
 ) {
-    use publicator::{
-        application::Application,
-        config::{Config, Paths},
-        metadata::{Endpoints, MetadataClient},
-        ui::{App, UiOptions},
-    };
-    use std::{sync::Arc, time::Duration};
-    let root = tempfile::tempdir().unwrap();
-    let paths = Paths::resolve(Some(root.path()), None).unwrap();
+    use publicator::config::Config;
+    use std::sync::Arc;
     let config = Config {
         tiers: vec!["Gold".into(), "Silver".into()],
         galleries: vec!["Art".into(), "Featured".into()],
         ..Config::default()
     };
-    let store = Arc::new(publicator::store::Store::new(paths, config).unwrap());
+    let f = common::Fixture::with_config(config);
+    let store = Arc::new(f.store.clone());
     let row = serde_json::json!({
         "uuid":"00000000-0000-4000-8000-000000000009", "state":"DESCRIBED",
         "title":"Title", "description":"Description", "submissionTimestamp":1700000000,
         "files":[{"basename":"art.png","sha512sum":"0".repeat(128)}],
         "apparitions":[{"platformName":"deviantart","state":"unpublished","priceIfNotFree":2.5,"tiers":["Gold"],"galleries":["Art"]}]
     });
-    std::fs::write(
-        &store.paths().json,
-        serde_json::to_vec(&vec![row.clone()]).unwrap(),
-    )
-    .unwrap();
-    let application = Arc::new(Application::new(
-        store.clone(),
-        MetadataClient::new(
-            reqwest::Client::new(),
-            Endpoints::default(),
-            "llmfit".into(),
-        ),
-    ));
-    let (mut app, _) = App::from_application(
-        application,
-        UiOptions {
-            openrouter_model: None,
-            ai_timeout: Duration::from_secs(1),
-        },
-    );
-    let _ = app.update(publicator::ui::Message::LoadFinished(Ok(vec![row])));
+    let mut app = loaded_default_app(&f, row);
     let _ = app.update(publicator::ui::Message::PublishLocksFinished(Ok(
         std::collections::HashSet::new(),
     )));
-    (app, store, root)
+    (app, store, f.root)
 }
 
 #[cfg(feature = "desktop")]
@@ -400,20 +367,12 @@ fn scheduled_jump_app() -> (
 }
 
 #[cfg(feature = "desktop")]
-#[tokio::test]
-async fn close_cancel_stops_after_current_receipt_without_dropping_publisher_task() {
-    use iced_runtime::{Action, futures::futures::StreamExt};
-    use publicator::ui::Message;
-    use std::time::Duration;
-
-    let f = publishing_fixture();
-    f.write(serde_json::json!([
-        pending_publication(&f, 32),
-        pending_publication(&f, 33)
-    ]));
-    let started = f.path("cancel-worker-started");
-    let release = f.path("cancel-worker-release");
-    let calls = f.path("cancel-worker-calls");
+fn held_publisher_worker(
+    f: &common::Fixture,
+    calls: &std::path::Path,
+    started: &std::path::Path,
+    release: &std::path::Path,
+) -> std::path::PathBuf {
     let body = format!(
         r#"while IFS= read -r line; do
 kind=$(printf '%s' "$line" | jq -r .type)
@@ -433,27 +392,55 @@ done"#,
         started.display(),
         release.display()
     );
-    let worker = fake_publisher_worker(&f, &body);
+    fake_publisher_worker(f, &body)
+}
+
+#[cfg(feature = "desktop")]
+async fn wait_for_worker_gate<S>(actions: &mut S, started: &std::path::Path)
+where
+    S: iced::futures::Stream<Item = iced_runtime::Action<publicator::ui::Message>> + Unpin,
+{
+    use iced_runtime::{Action, futures::futures::StreamExt};
+    loop {
+        tokio::select! {
+            _ = async {
+                while !started.exists() {
+                    tokio::task::yield_now().await;
+                }
+            } => break,
+            action = actions.next() => match action {
+                Some(Action::Output(message)) => panic!("publish ended before the gate: {message:?}"),
+                Some(_) => {},
+                None => panic!("publish task ended before the fake worker gate"),
+            }
+        }
+    }
+}
+
+#[cfg(feature = "desktop")]
+#[tokio::test]
+async fn close_cancel_stops_after_current_receipt_without_dropping_publisher_task() {
+    use iced_runtime::{Action, futures::futures::StreamExt};
+    use publicator::ui::Message;
+    use std::time::Duration;
+
+    let f = publishing_fixture();
+    f.write(serde_json::json!([
+        pending_publication(&f, 32),
+        pending_publication(&f, 33)
+    ]));
+    let started = f.path("cancel-worker-started");
+    let release = f.path("cancel-worker-release");
+    let calls = f.path("cancel-worker-calls");
+    let worker = held_publisher_worker(&f, &calls, &started, &release);
     let (mut app, store, init) = publishing_ui_app(&f, &worker);
     dispatch_ui_task(&mut app, init).await;
     let task = app.update(Message::PublishSelected);
     let mut actions = iced_runtime::task::into_stream(task).expect("publish task started");
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            tokio::select! {
-                _ = async {
-                    while !started.exists() {
-                        tokio::task::yield_now().await;
-                    }
-                } => break,
-                action = actions.next() => match action {
-                    Some(Action::Output(message)) => panic!("publish ended before the gate: {message:?}"),
-                    Some(_) => {},
-                    None => panic!("publish task ended before the fake worker gate"),
-                }
-            }
-        }
-    })
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for_worker_gate(&mut actions, &started),
+    )
     .await
     .expect("first delivery reached the controlled worker gate");
 
@@ -503,46 +490,15 @@ async fn duplicate_publish_during_a_held_delivery_never_starts_a_second_worker()
     let started = f.path("duplicate-worker-started");
     let release = f.path("duplicate-worker-release");
     let calls = f.path("duplicate-worker-calls");
-    let body = format!(
-        r#"while IFS= read -r line; do
-kind=$(printf '%s' "$line" | jq -r .type)
-case "$kind" in
-open) echo '{{"protocol":1,"type":"ready"}}' ;;
-submit)
-  uuid=$(printf '%s' "$line" | jq -r .uuid)
-  attempt=$(printf '%s' "$line" | jq -r .attempt_id)
-  echo "$uuid" >> '{}'
-  if [ ! -e '{}' ]; then touch '{}'; while [ ! -e '{}' ]; do sleep 0.01; done; fi
-  printf '{{"protocol":1,"type":"scheduled","attempt_id":"%s","uuid":"%s","url":"https://example.test/%s"}}\n' "$attempt" "$uuid" "$uuid" ;;
-close) exit 0 ;;
-esac
-done"#,
-        calls.display(),
-        started.display(),
-        started.display(),
-        release.display()
-    );
-    let worker = fake_publisher_worker(&f, &body);
+    let worker = held_publisher_worker(&f, &calls, &started, &release);
     let (mut app, store, init) = publishing_ui_app(&f, &worker);
     dispatch_ui_task(&mut app, init).await;
     let first = app.update(Message::PublishSelected);
     let mut first_actions = iced_runtime::task::into_stream(first).expect("first publish task");
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            tokio::select! {
-                _ = async {
-                    while !started.exists() {
-                        tokio::task::yield_now().await;
-                    }
-                } => break,
-                action = first_actions.next() => match action {
-                    Some(Action::Output(message)) => panic!("first publish ended before the gate: {message:?}"),
-                    Some(_) => {},
-                    None => panic!("first publish task ended before the worker gate"),
-                }
-            }
-        }
-    })
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for_worker_gate(&mut first_actions, &started),
+    )
     .await
     .expect("first worker reached gate");
 
@@ -685,22 +641,10 @@ done"#,
     dispatch_ui_task(&mut app, init).await;
     let task = app.update(Message::PublishSelected);
     let mut actions = iced_runtime::task::into_stream(task).expect("publish task started");
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            tokio::select! {
-                _ = async {
-                    while !started.exists() {
-                        tokio::task::yield_now().await;
-                    }
-                } => break,
-                action = actions.next() => match action {
-                    Some(Action::Output(message)) => panic!("publish ended before the gate: {message:?}"),
-                    Some(_) => {},
-                    None => panic!("publish task ended before the fake worker gate"),
-                }
-            }
-        }
-    })
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for_worker_gate(&mut actions, &started),
+    )
     .await
     .expect("fake worker reached the controlled in-flight delivery");
 
@@ -726,7 +670,8 @@ done"#,
     assert!(
         followup
             .iter()
-            .any(|message| matches!(message, Message::PublishStatusesFinished(Ok(_))))
+            .any(|message| matches!(message, Message::PublishStatusesFinished(Ok(_)))),
+        "publisher status refresh failed after cleanup: {followup:?}"
     );
     let saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&store.paths().json).unwrap()).unwrap();
@@ -1273,15 +1218,9 @@ done"#,
 }
 
 #[cfg(feature = "desktop")]
-#[tokio::test]
-async fn scheduled_reconciliation_refuses_changed_metadata_and_keeps_newer_fields_and_receipt() {
-    use publicator::{
-        publish_journal::ReconcileOutcome, publishing::PublishCellState, ui::Message,
-    };
-    let f = publishing_fixture();
-    f.write(serde_json::json!([pending_publication(&f, 1)]));
-    let worker = fake_publisher_worker(
-        &f,
+fn unknown_publisher_worker(f: &common::Fixture) -> std::path::PathBuf {
+    fake_publisher_worker(
+        f,
         r#"while IFS= read -r line; do
 kind=$(printf '%s' "$line" | jq -r .type)
 case "$kind" in
@@ -1294,10 +1233,25 @@ submit)
 close) exit 0 ;;
 esac
 done"#,
-    );
+    )
+}
+
+#[cfg(feature = "desktop")]
+#[tokio::test]
+async fn scheduled_reconciliation_refuses_changed_metadata_and_keeps_newer_fields_and_receipt() {
+    use publicator::{
+        publish_journal::ReconcileOutcome, publishing::PublishCellState, ui::Message,
+    };
+    let f = publishing_fixture();
+    f.write(serde_json::json!([pending_publication(&f, 1)]));
+    let worker = unknown_publisher_worker(&f);
     let (mut app, store, init) = publishing_ui_app(&f, &worker);
     dispatch_ui_task(&mut app, init).await;
-    dispatch_ui_message(&mut app, Message::PublishSelected).await;
+    let published = dispatch_ui_message(&mut app, Message::PublishSelected).await;
+    assert!(
+        !app.publish_attempts().is_empty(),
+        "unknown worker must leave an attempt for reconciliation: {published:?}"
+    );
     let attempt = app.publish_attempts()[0].clone();
     store
         .mutate(|rows| {
@@ -1357,21 +1311,7 @@ async fn verified_scheduled_reconciliation_accepts_optional_actual_http_url() {
         pending_publication(&f, 1),
         pending_publication(&f, 2)
     ]));
-    let worker = fake_publisher_worker(
-        &f,
-        r#"while IFS= read -r line; do
-kind=$(printf '%s' "$line" | jq -r .type)
-case "$kind" in
-open) echo '{"protocol":1,"type":"ready"}' ;;
-submit)
-  uuid=$(printf '%s' "$line" | jq -r .uuid)
-  attempt=$(printf '%s' "$line" | jq -r .attempt_id)
-  printf '{"protocol":1,"type":"unknown","attempt_id":"%s","uuid":"%s","error":"confirmation lost"}\n' "$attempt" "$uuid"
-  ;;
-close) exit 0 ;;
-esac
-done"#,
-    );
+    let worker = unknown_publisher_worker(&f);
     let (mut app, store, init) = publishing_ui_app(&f, &worker);
     dispatch_ui_task(&mut app, init).await;
     dispatch_ui_message(&mut app, Message::PublishSelected).await;
@@ -1553,31 +1493,18 @@ fn capture_url_without_opening(url: &str) -> Result<(), String> {
 #[cfg(feature = "desktop")]
 #[tokio::test]
 async fn actual_url_message_dispatches_valid_http_url_and_refuses_invalid_full_url() {
-    use publicator::{
-        application::Application,
-        config::{Config, Paths},
-        metadata::{Endpoints, MetadataClient},
-        ui::{App, Message, UiOptions},
-    };
+    use publicator::ui::{App, Message, UiOptions};
     use std::{sync::Arc, time::Duration};
 
-    let root = tempfile::tempdir().unwrap();
-    let paths = Paths::resolve(Some(root.path()), None).unwrap();
-    let store = Arc::new(publicator::store::Store::new(paths, Config::default()).unwrap());
+    let f = common::Fixture::new();
+    let store = Arc::new(f.store.clone());
     let mut row = common::row(1, "APPEARED");
     row["apparitions"] = serde_json::json!([{
         "platformName":"deviantart", "state":"published_or_scheduled",
         "url":"https://example.test/actual?x=1"
     }]);
     std::fs::write(&store.paths().json, serde_json::to_vec(&vec![row]).unwrap()).unwrap();
-    let application = Arc::new(Application::new(
-        store,
-        MetadataClient::new(
-            reqwest::Client::new(),
-            Endpoints::default(),
-            "llmfit".into(),
-        ),
-    ));
+    let application = Arc::new(default_application(store));
     let (mut app, init) = App::from_application_with_url_opener(
         application,
         UiOptions {
@@ -1607,9 +1534,7 @@ async fn actual_url_message_dispatches_valid_http_url_and_refuses_invalid_full_u
 async fn configured_prompt_archive_resolves_pick_and_calendar_off_thread_and_missing_art_is_recorded()
  {
     use publicator::{
-        application::Application,
         config::{Config, PromptConfig, PromptGrammar},
-        metadata::{Endpoints, MetadataClient},
         prompts::PromptMatch,
         ui::{App, Message, Tab, UiOptions},
     };
@@ -1673,14 +1598,7 @@ async fn configured_prompt_archive_resolves_pick_and_calendar_off_thread_and_mis
          "apparitions":[{"platformName":"old-platform","state":"unpublished"}]}
     ]));
     let store = Arc::new(f.store.clone());
-    let application = Arc::new(Application::new(
-        store,
-        MetadataClient::new(
-            reqwest::Client::new(),
-            Endpoints::default(),
-            "llmfit".into(),
-        ),
-    ));
+    let application = Arc::new(default_application(store));
     let (mut app, init) = App::from_application(
         application,
         UiOptions {

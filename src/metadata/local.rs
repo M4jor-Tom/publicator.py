@@ -45,41 +45,7 @@ impl MetadataClient {
             Ok(Err(e)) => return Ok(unavailable(e.to_string())),
             Err(_) => return Ok(unavailable("llmfit timed out".into())),
         };
-        let parsed: Value = match serde_json::from_slice(&output.stdout) {
-            Ok(v) => v,
-            Err(e) => return Ok(unavailable(e.to_string())),
-        };
-        let row = parsed
-            .get("models")
-            .and_then(Value::as_array)
-            .and_then(|xs| {
-                xs.iter()
-                    .find(|x| x.get("name").and_then(Value::as_str) == Some(&model.llmfit_name))
-            });
-        let Some(row) = row else {
-            return Ok(unavailable("llmfit model missing from report".into()));
-        };
-        let Some(level) = row.get("fit_level").and_then(Value::as_str) else {
-            return Ok(unavailable("llmfit fit_level missing".into()));
-        };
-        let reason = match row.get("notes") {
-            Some(Value::Array(xs)) => xs
-                .iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join("; "),
-            Some(Value::String(s)) => s.clone(),
-            _ => String::new(),
-        };
-        Ok(Fit {
-            fit: level == "Good",
-            level: level.into(),
-            reason: if level != "Good" && reason.is_empty() {
-                format!("llmfit fit_level: {level}")
-            } else {
-                reason
-            },
-        })
+        Ok(parse_fit_report(&output.stdout, model))
     }
     pub async fn local_status(
         &self,
@@ -259,5 +225,43 @@ fn unavailable(reason: String) -> Fit {
         fit: false,
         level: "Unavailable".into(),
         reason,
+    }
+}
+
+fn parse_fit_report(stdout: &[u8], model: &ModelOption) -> Fit {
+    let parsed: Value = match serde_json::from_slice(stdout) {
+        Ok(v) => v,
+        Err(e) => return unavailable(e.to_string()),
+    };
+    let row = parsed
+        .get("models")
+        .and_then(Value::as_array)
+        .and_then(|xs| {
+            xs.iter()
+                .find(|x| x.get("name").and_then(Value::as_str) == Some(&model.llmfit_name))
+        });
+    let Some(row) = row else {
+        return unavailable("llmfit model missing from report".into());
+    };
+    let Some(level) = row.get("fit_level").and_then(Value::as_str) else {
+        return unavailable("llmfit fit_level missing".into());
+    };
+    let reason = match row.get("notes") {
+        Some(Value::Array(xs)) => xs
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join("; "),
+        Some(Value::String(s)) => s.clone(),
+        _ => String::new(),
+    };
+    Fit {
+        fit: level == "Good",
+        level: level.into(),
+        reason: if level != "Good" && reason.is_empty() {
+            format!("llmfit fit_level: {level}")
+        } else {
+            reason
+        },
     }
 }

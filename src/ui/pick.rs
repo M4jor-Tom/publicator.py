@@ -208,32 +208,7 @@ pub fn view(state: &App) -> Element<'_, Message> {
                 .on_toggle(move |_| Message::SearchPath(path.clone())),
         );
     }
-    let mut cards = column![].spacing(10);
-    if let Some(matches) = &state.prompt_search {
-        if exact_prompt_heading_visible(&state.prompt_lineage, &matches.exact) {
-            cards = cards.push(text("Exact archived prompt matches"));
-        }
-        for candidate in &matches.exact {
-            cards = cards.push(candidate_card(state, candidate));
-        }
-        if !matches.maybe.is_empty() {
-            cards = cards.push(text(
-                "Possible lineage matches — prompt may be from this archive",
-            ));
-            for candidate in &matches.maybe {
-                cards = cards.push(candidate_card(state, candidate));
-            }
-        }
-        if matches.truncated {
-            cards = cards.push(text(
-                "More matches exist; narrow the prompt text or lineage",
-            ));
-        }
-    } else {
-        for candidate in &state.candidates {
-            cards = cards.push(candidate_card(state, candidate));
-        }
-    }
+    let mut cards = candidate_cards(state);
     if let Some(candidate) = &state.pending_delete {
         cards = cards.push(
             row![
@@ -271,6 +246,36 @@ pub fn view(state: &App) -> Element<'_, Message> {
                 }),
         )
         .into()
+}
+
+fn candidate_cards(state: &App) -> iced::widget::Column<'_, Message> {
+    let mut cards = column![].spacing(10);
+    if let Some(matches) = &state.prompt_search {
+        if exact_prompt_heading_visible(&state.prompt_lineage, &matches.exact) {
+            cards = cards.push(text("Exact archived prompt matches"));
+        }
+        for candidate in &matches.exact {
+            cards = cards.push(candidate_card(state, candidate));
+        }
+        if !matches.maybe.is_empty() {
+            cards = cards.push(text(
+                "Possible lineage matches — prompt may be from this archive",
+            ));
+            for candidate in &matches.maybe {
+                cards = cards.push(candidate_card(state, candidate));
+            }
+        }
+        if matches.truncated {
+            cards = cards.push(text(
+                "More matches exist; narrow the prompt text or lineage",
+            ));
+        }
+    } else {
+        for candidate in &state.candidates {
+            cards = cards.push(candidate_card(state, candidate));
+        }
+    }
+    cards
 }
 
 fn candidate_card<'a>(state: &'a App, candidate: &'a Candidate) -> Element<'a, Message> {

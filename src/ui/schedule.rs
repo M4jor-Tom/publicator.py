@@ -134,102 +134,109 @@ pub fn view(state: &App) -> Element<'_, Message> {
             .filter(|s| !s.is_empty())
             .unwrap_or("Untitled");
         if current == Some(Phase::Scheduled) {
-            let date = effective_schedule(row)
-                .and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0))
-                .map(|date| {
-                    date.with_timezone(&timezone(config).unwrap_or(chrono_tz::UTC))
-                        .format("%Y-%m-%d %H:%M %Z")
-                        .to_string()
-                })
-                .unwrap_or_else(|| "Date unavailable".into());
-            let mut card = column![text(format!("{title} — {date}"))].spacing(4);
-            if state.revealed_publication() == Some(uuid.as_str()) {
-                card = card.push(text("Opened from Calendar"));
-            }
-            cards = cards
-                .push(card.push(button("Return to Pick").on_press(Message::ReturnToPick(uuid))));
-            continue;
-        }
-        let (date, time) = date_parts(state, row);
-        let mut card =
-            column![text(format!("{title} — {uuid}")), text("Read-only presets")].spacing(5);
-        if state.revealed_publication() == Some(uuid.as_str()) {
-            card = card.push(text("Opened from Calendar"));
-        }
-        let date_uuid = uuid.clone();
-        let time_uuid = uuid.clone();
-        for profile in &configured_profiles {
-            let name = profile.name.clone();
-            let action_uuid = uuid.clone();
-            card = card.push(
-                button(text(format!(
-                    "{}: {} {:?} {:02}:00",
-                    profile.name, profile.per_slot, profile.weekday, profile.hour
-                )))
-                .on_press(Message::PresetDate {
-                    uuid: action_uuid,
-                    profile: name,
-                }),
-            );
-        }
-        let suggested = effective_schedule(row).is_some();
-        let mut controls = row![
-            text_input("YYYY-MM-DD", &date).on_input(move |value| Message::CustomDate {
-                uuid: date_uuid.clone(),
-                value
-            }),
-            text_input("HH:MM", &time).on_input(move |value| Message::CustomTime {
-                uuid: time_uuid.clone(),
-                value
-            }),
-            button("Save Custom").on_press(Message::SaveCustomDate(uuid.clone())),
-        ]
-        .spacing(6);
-        if suggested {
-            controls = controls
-                .push(button("Use suggestion").on_press(Message::SuggestedDate(uuid.clone())));
-            controls =
-                controls.push(button("Approve date").on_press(Message::ApproveDate(uuid.clone())));
+            cards = cards.push(scheduled_card(state, row, uuid, title));
         } else {
-            controls = controls.push(button("Use suggestion (unavailable)"));
-            controls = controls.push(button("Approve date (unavailable)"));
+            cards = cards.push(picked_card(state, row, uuid, title, &configured_profiles));
         }
-        card = card.push(controls);
-        card = card.push(text(if suggested {
-            "Suggested date available"
-        } else {
-            "No suggestion available; approval is disabled"
-        }));
-        cards = cards.push(card);
     }
     column![scrollable(cards).id(SCROLL_ID).height(Length::Fill)]
         .spacing(8)
         .into()
 }
 
-fn ordered_rows<'a>(rows: &'a [Value], target: Option<&str>) -> Vec<&'a Value> {
-    let mut rows = rows
-        .iter()
-        .filter(|row| matches!(phase(row), Ok(Phase::Picked | Phase::Scheduled)))
-        .collect::<Vec<_>>();
-    if let Some(target) = target
-        && let Some(index) = rows
-            .iter()
-            .position(|row| row.get("uuid").and_then(Value::as_str) == Some(target))
-    {
-        rows.swap(0, index);
+fn scheduled_card<'a>(
+    state: &'a App,
+    row: &Value,
+    uuid: String,
+    title: &str,
+) -> Element<'a, Message> {
+    let date = effective_schedule(row)
+        .and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0))
+        .map(|date| {
+            date.with_timezone(
+                &timezone(state.application.store().config()).unwrap_or(chrono_tz::UTC),
+            )
+            .format("%Y-%m-%d %H:%M %Z")
+            .to_string()
+        })
+        .unwrap_or_else(|| "Date unavailable".into());
+    let mut card = column![text(format!("{title} — {date}"))].spacing(4);
+    if state.revealed_publication() == Some(uuid.as_str()) {
+        card = card.push(text("Opened from Calendar"));
     }
-    rows
+    card.push(button("Return to Pick").on_press(Message::ReturnToPick(uuid)))
+        .into()
+}
+
+fn picked_card<'a>(
+    state: &'a App,
+    row: &Value,
+    uuid: String,
+    title: &str,
+    configured_profiles: &[crate::scheduling::Profile],
+) -> Element<'a, Message> {
+    let (date, time) = date_parts(state, row);
+    let mut card = column![text(format!("{title} — {uuid}")), text("Read-only presets")].spacing(5);
+    if state.revealed_publication() == Some(uuid.as_str()) {
+        card = card.push(text("Opened from Calendar"));
+    }
+    let date_uuid = uuid.clone();
+    let time_uuid = uuid.clone();
+    for profile in configured_profiles {
+        let name = profile.name.clone();
+        let action_uuid = uuid.clone();
+        card = card.push(
+            button(text(format!(
+                "{}: {} {:?} {:02}:00",
+                profile.name, profile.per_slot, profile.weekday, profile.hour
+            )))
+            .on_press(Message::PresetDate {
+                uuid: action_uuid,
+                profile: name,
+            }),
+        );
+    }
+    let suggested = effective_schedule(row).is_some();
+    let mut controls = row![
+        text_input("YYYY-MM-DD", &date).on_input(move |value| Message::CustomDate {
+            uuid: date_uuid.clone(),
+            value
+        }),
+        text_input("HH:MM", &time).on_input(move |value| Message::CustomTime {
+            uuid: time_uuid.clone(),
+            value
+        }),
+        button("Save Custom").on_press(Message::SaveCustomDate(uuid.clone())),
+    ]
+    .spacing(6);
+    if suggested {
+        controls =
+            controls.push(button("Use suggestion").on_press(Message::SuggestedDate(uuid.clone())));
+        controls =
+            controls.push(button("Approve date").on_press(Message::ApproveDate(uuid.clone())));
+    } else {
+        controls = controls.push(button("Use suggestion (unavailable)"));
+        controls = controls.push(button("Approve date (unavailable)"));
+    }
+    card = card.push(controls);
+    card = card.push(text(if suggested {
+        "Suggested date available"
+    } else {
+        "No suggestion available; approval is disabled"
+    }));
+    card.into()
+}
+
+fn ordered_rows<'a>(rows: &'a [Value], target: Option<&str>) -> Vec<&'a Value> {
+    super::revealed_rows(
+        rows.iter()
+            .filter(|row| matches!(phase(row), Ok(Phase::Picked | Phase::Scheduled))),
+        target,
+    )
 }
 
 pub(super) fn scroll_to_target() -> Task<Message> {
-    iced::widget::operation::scroll_to(
-        SCROLL_ID,
-        iced::widget::operation::AbsoluteOffset {
-            x: None,
-            y: Some(0.0),
-        },
-    )
+    super::scroll_to_publication(SCROLL_ID)
 }
 
 #[cfg(test)]

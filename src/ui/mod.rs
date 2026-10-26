@@ -68,14 +68,17 @@ fn publish_keyboard_event(
     if status == iced::event::Status::Captured {
         return Some(Message::PublishKeyboardExit);
     }
+    if key == Named::Tab && modifiers == iced::keyboard::Modifiers::SHIFT {
+        return Some(Message::PublishKeyboardNext { reverse: true });
+    }
+    if !modifiers.is_empty() {
+        return None;
+    }
     match key {
-        Named::F6 if modifiers.is_empty() => Some(Message::PublishKeyboardToggle),
-        Named::Tab if modifiers.is_empty() => Some(Message::PublishKeyboardNext { reverse: false }),
-        Named::Tab if modifiers == iced::keyboard::Modifiers::SHIFT => {
-            Some(Message::PublishKeyboardNext { reverse: true })
-        }
-        Named::Space if modifiers.is_empty() => Some(Message::PublishKeyboardToggleCell),
-        Named::Escape if modifiers.is_empty() => Some(Message::PublishKeyboardExit),
+        Named::F6 => Some(Message::PublishKeyboardToggle),
+        Named::Tab => Some(Message::PublishKeyboardNext { reverse: false }),
+        Named::Space => Some(Message::PublishKeyboardToggleCell),
+        Named::Escape => Some(Message::PublishKeyboardExit),
         _ => None,
     }
 }
@@ -499,21 +502,7 @@ impl App {
             .iter()
             .find(|attempt| attempt.uuid == uuid && attempt.blocks_retry())
         {
-            let detail = if !attempt.database_matches {
-                "receipt belongs to a different publication database".into()
-            } else if let Some(error) = &attempt.current_error {
-                format!("{}: {error}", attempt.reason())
-            } else if attempt.current_matches == Some(false) {
-                format!(
-                    "{}; approved snapshot differs from current publication",
-                    attempt.reason()
-                )
-            } else {
-                match &attempt.state {
-                    AttemptState::Unknown { error } => error.clone(),
-                    _ => attempt.reason().into(),
-                }
-            };
+            let detail = blocked_attempt_detail(attempt);
             PublishCellOutcome {
                 cell,
                 state: PublishCellState::Unknown,
@@ -526,7 +515,15 @@ impl App {
                 state: PublishCellState::Success,
                 detail: None,
             }
-        } else if let Some(attempt) = self.publish_attempts.iter().find(|attempt| {
+        } else {
+            self.pending_cell_outcome(cell)
+        };
+        Some(outcome)
+    }
+
+    fn pending_cell_outcome(&self, cell: PublishCell) -> PublishCellOutcome {
+        let uuid = cell.uuid.as_str();
+        if let Some(attempt) = self.publish_attempts.iter().find(|attempt| {
             attempt.uuid == uuid && matches!(&attempt.state, AttemptState::SafeFailed { .. })
         }) {
             let detail = match &attempt.state {
@@ -554,8 +551,7 @@ impl App {
                 state: PublishCellState::Unattempted,
                 detail: None,
             }
-        };
-        Some(outcome)
+        }
     }
 
     fn load_task(application: Arc<CoreApplication>) -> Task<Message> {
@@ -606,46 +602,128 @@ impl App {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::LoadFinished(Ok(rows)) => {
-                self.description_editors.retain(|uuid, _| {
-                    rows.iter()
-                        .any(|row| row.get("uuid").and_then(Value::as_str) == Some(uuid))
-                });
-                for row in &rows {
-                    let Some(uuid) = row.get("uuid").and_then(Value::as_str) else {
-                        continue;
-                    };
-                    let description = row.get("description").and_then(Value::as_str).unwrap_or("");
-                    let editor = self
-                        .description_editors
-                        .entry(uuid.to_owned())
-                        .or_insert_with(|| {
-                            iced::widget::text_editor::Content::with_text(description)
-                        });
-                    if !self
-                        .drafts
-                        .get(uuid)
-                        .is_some_and(|draft| draft.is_field_dirty(Field::Description))
-                    {
-                        *editor = iced::widget::text_editor::Content::with_text(description);
-                    }
-                }
-                self.publications = Some(rows);
-                self.refresh_keyboard_publish_focus();
-                self.load_error = None;
-                self.search_authorized = true;
-                self.calendar_preparing = false;
-                self.calendar_prepared = false;
-                self.calendar_error = None;
-                self.calendar_artwork.clear();
-                self.calendar_previews.clear();
-                if self.active_tab == Tab::Describe {
-                    return describe::preview_tasks(self, 0, 4);
-                }
-                if self.active_tab == Tab::Calendar {
-                    return calendar::prepare_task(self);
-                }
-            }
+            Message::LoadFinished(..)
+            | Message::PublishLocksFinished(..)
+            | Message::PublishStatusesFinished(..) => self.update_load(message),
+            Message::Navigate(..)
+            | Message::CloseRequested
+            | Message::ConfirmDiscard
+            | Message::KeepEditing
+            | Message::Refresh
+            | Message::RetrySave
+            | Message::Tick
+            | Message::JumpToPublication(..) => self.update_navigation(message),
+            Message::PublishKeyboardToggle
+            | Message::PublishKeyboardNext { .. }
+            | Message::PublishKeyboardToggleCell
+            | Message::PublishKeyboardExit => self.update_keyboard(message),
+            Message::SelectSource(..)
+            | Message::SelectModel(..)
+            | Message::ConfirmLocalInstall
+            | Message::CancelLocalInstall
+            | Message::LocalFitFinished { .. }
+            | Message::GenerationFinished { .. } => self.update_generation(message),
+            Message::SaveDraft(..)
+            | Message::ApproveMetadata(..)
+            | Message::ReturnToSchedule(..)
+            | Message::GenerateOne(..)
+            | Message::GenerateMarked
+            | Message::DescriptionAction { .. }
+            | Message::Edited { .. }
+            | Message::SaveFinished { .. } => self.update_metadata(message),
+            Message::SelectCell { .. }
+            | Message::SelectAll(..)
+            | Message::PublishSelected
+            | Message::CancelAfterCurrent
+            | Message::CloseCancelPublish
+            | Message::CloseWait
+            | Message::PublishFinished(..) => self.update_selection(message),
+            message => self.update_workflow(message),
+        }
+    }
+
+    fn update_workflow(&mut self, message: Message) -> Task<Message> {
+        match message {
+            Message::OptionPriceChanged { .. }
+            | Message::OptionTierChanged { .. }
+            | Message::OptionGalleryChanged { .. }
+            | Message::SaveOptions(..)
+            | Message::OptionsSaved { .. } => self.update_options(message),
+            Message::ReconcileUrlChanged { .. }
+            | Message::ReconcileAttempt { .. }
+            | Message::ReconcileFinished { .. }
+            | Message::OpenActualUrl(..)
+            | Message::UrlOpened { .. } => self.update_reconciliation(message),
+            Message::SearchLimit(..)
+            | Message::SearchPath(..)
+            | Message::PromptQueryChanged(..)
+            | Message::PromptLineageChanged(..)
+            | Message::Search => self.update_search(message),
+            Message::SearchFinished { .. }
+            | Message::PromptSearchFinished { .. }
+            | Message::PromptMatchesFinished(..) => self.update_search_results(message),
+            Message::PreviewFinished { .. }
+            | Message::PreviewViewport { .. }
+            | Message::DescribeViewport { .. }
+            | Message::DescribePreviewFinished { .. }
+            | Message::CalendarPrepared(..)
+            | Message::CalendarPreviewFinished { .. }
+            | Message::CalendarViewport { .. } => self.update_previews(message),
+            Message::Pick(..)
+            | Message::PickFinished(..)
+            | Message::AskDelete(..)
+            | Message::ConfirmDelete
+            | Message::CancelDelete
+            | Message::WorkflowFinished { .. } => self.update_pick(message),
+            Message::CustomDate { .. }
+            | Message::CustomTime { .. }
+            | Message::SaveCustomDate(..)
+            | Message::PresetDate { .. }
+            | Message::SuggestedDate(..)
+            | Message::ApproveDate(..)
+            | Message::ReturnToPick(..) => self.update_schedule(message),
+            Message::LoadFinished(..)
+            | Message::PublishLocksFinished(..)
+            | Message::PublishStatusesFinished(..)
+            | Message::Navigate(..)
+            | Message::CloseRequested
+            | Message::ConfirmDiscard
+            | Message::KeepEditing
+            | Message::Refresh
+            | Message::RetrySave
+            | Message::Tick
+            | Message::JumpToPublication(..)
+            | Message::PublishKeyboardToggle
+            | Message::PublishKeyboardNext { .. }
+            | Message::PublishKeyboardToggleCell
+            | Message::PublishKeyboardExit
+            | Message::SelectSource(..)
+            | Message::SelectModel(..)
+            | Message::ConfirmLocalInstall
+            | Message::CancelLocalInstall
+            | Message::LocalFitFinished { .. }
+            | Message::GenerationFinished { .. }
+            | Message::SaveDraft(..)
+            | Message::ApproveMetadata(..)
+            | Message::ReturnToSchedule(..)
+            | Message::GenerateOne(..)
+            | Message::GenerateMarked
+            | Message::DescriptionAction { .. }
+            | Message::Edited { .. }
+            | Message::SaveFinished { .. }
+            | Message::SelectCell { .. }
+            | Message::SelectAll(..)
+            | Message::PublishSelected
+            | Message::CancelAfterCurrent
+            | Message::CloseCancelPublish
+            | Message::CloseWait
+            | Message::PublishFinished(..) => unreachable!("message handled by primary dispatcher"),
+        }
+    }
+
+    fn update_load(&mut self, message: Message) -> Task<Message> {
+        match message {
+            Message::LoadFinished(Ok(rows)) => return self.on_load_finished_loaded(rows),
             Message::LoadFinished(Err(error)) => {
                 self.next_search_request();
                 self.publications = None;
@@ -663,43 +741,27 @@ impl App {
                 self.refresh_keyboard_publish_focus();
             }
             Message::PublishStatusesFinished(Ok(attempts)) => {
-                self.publish_locks = Some(
-                    attempts
-                        .iter()
-                        .filter(|attempt| attempt.blocks_retry())
-                        .map(|attempt| attempt.uuid.clone())
-                        .collect(),
-                );
-                self.publish_lock_error = None;
-                self.publish_attempts = attempts;
-                self.refresh_keyboard_publish_focus();
-                if self.pending_close {
-                    if self.any_dirty() {
-                        return self.save_next_dirty();
-                    }
-                    if self.publish_options.values().any(|options| options.dirty) {
-                        return self.save_next_options();
-                    }
-                    self.pending_close = false;
-                    return iced::exit();
-                }
+                return self.on_publish_statuses_finished_ready(attempts);
             }
             Message::PublishStatusesFinished(Err(error)) => {
-                self.publish_locks = None;
-                self.publish_lock_error = Some(error);
-                self.publish_attempts.clear();
-                self.refresh_keyboard_publish_focus();
-                if self.pending_close {
-                    if self.any_dirty() {
-                        return self.save_next_dirty();
-                    }
-                    if self.publish_options.values().any(|options| options.dirty) {
-                        return self.save_next_options();
-                    }
-                    self.pending_close = false;
-                    return iced::exit();
-                }
+                return self.on_publish_statuses_finished_failed(error);
             }
+            _ => unreachable!("message routed to load handler"),
+        }
+        Task::none()
+    }
+
+    fn refresh(&mut self) -> Task<Message> {
+        if self.any_dirty() || self.publish_options.values().any(|options| options.dirty) {
+            self.result = Some("Save or explicitly discard drafts before refresh.".into());
+        } else {
+            return self.reload_task();
+        }
+        Task::none()
+    }
+
+    fn update_navigation(&mut self, message: Message) -> Task<Message> {
+        match message {
             Message::Navigate(tab) => {
                 self.publish_keyboard_mode = false;
                 self.publish_keyboard_focus = None;
@@ -707,140 +769,76 @@ impl App {
                 self.pending_jump = None;
                 return self.navigate(tab);
             }
-            Message::PublishKeyboardToggle => {
-                if self.active_tab != Tab::Publish {
-                    return Task::none();
-                }
-                if self.publish_keyboard_mode {
-                    self.publish_keyboard_mode = false;
-                    self.publish_keyboard_focus = None;
-                } else {
-                    self.publish_keyboard_mode = true;
-                    self.publish_keyboard_focus = self.keyboard_publish_cells().first().cloned();
-                }
+            Message::JumpToPublication(uuid) => return self.jump_to_publication(uuid),
+            Message::CloseRequested => return self.on_close_requested(),
+            Message::ConfirmDiscard => {
+                self.drafts.clear();
+                self.publish_options.clear();
+                self.pending_publish = false;
+                self.pending_navigation = None;
+                self.pending_jump = None;
+                self.pending_close = false;
+                return iced::exit();
             }
+            Message::KeepEditing => self.pending_close = false,
+            Message::Refresh => return self.refresh(),
+            Message::RetrySave => return self.save_next_dirty(),
+            Message::Tick => return self.autosave_due(),
+            _ => unreachable!("message routed to navigation handler"),
+        }
+        Task::none()
+    }
+
+    fn update_keyboard(&mut self, message: Message) -> Task<Message> {
+        match message {
+            Message::PublishKeyboardToggle => return self.on_publish_keyboard_toggle(),
             Message::PublishKeyboardNext { reverse } => {
-                if !self.publish_keyboard_mode {
-                    return Task::none();
-                }
-                let cells = self.keyboard_publish_cells();
-                if cells.is_empty() {
-                    self.publish_keyboard_focus = None;
-                    return Task::none();
-                }
-                let current = self
-                    .publish_keyboard_focus
-                    .as_ref()
-                    .and_then(|uuid| cells.iter().position(|cell| cell == uuid));
-                let next = match (current, reverse) {
-                    (Some(index), false) => (index + 1) % cells.len(),
-                    (Some(index), true) => (index + cells.len() - 1) % cells.len(),
-                    (None, false) => 0,
-                    (None, true) => cells.len() - 1,
-                };
-                self.publish_keyboard_focus = Some(cells[next].clone());
+                return self.on_publish_keyboard_next(reverse);
             }
-            Message::PublishKeyboardToggleCell => {
-                if !self.publish_keyboard_mode || self.active_tab != Tab::Publish {
-                    return Task::none();
-                }
-                let Some(uuid) = self.publish_keyboard_focus.clone() else {
-                    return Task::none();
-                };
-                if self.busy || self.publish_active || self.selection_locked(Some(&uuid)) {
-                    self.publish_result = Some(format!(
-                        "Cannot change {uuid} — DeviantArt while publishing state is locked"
-                    ));
-                    return Task::none();
-                }
-                let Some(publication) = self.publication(&uuid) else {
-                    self.publish_keyboard_focus = None;
-                    return Task::none();
-                };
-                if !matches!(phase(publication), Ok(Phase::Described | Phase::Appeared)) {
-                    return Task::none();
-                }
-                let apparition = publication
-                    .get("apparitions")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .find(|apparition| {
-                        apparition.get("platformName").and_then(Value::as_str) == Some("deviantart")
-                    });
-                let selected = match apparition
-                    .and_then(|apparition| apparition.get("state"))
-                    .and_then(Value::as_str)
-                {
-                    None => true,
-                    Some("unpublished") => false,
-                    Some("published_or_scheduled") => {
-                        self.publish_result = Some(format!(
-                            "{uuid} — DeviantArt is already successful and locked"
-                        ));
-                        return Task::none();
-                    }
-                    Some(_) => return Task::none(),
-                };
-                return self.update(Message::SelectCell {
-                    key: format!("{uuid}:deviantart"),
-                    selected,
-                });
-            }
+            Message::PublishKeyboardToggleCell => return self.on_publish_keyboard_toggle_cell(),
             Message::PublishKeyboardExit => {
                 self.publish_keyboard_mode = false;
                 self.publish_keyboard_focus = None;
             }
-            Message::SelectSource(source)
-                if self.pending_local_consent.is_none() && self.pending_generation.is_none() =>
-            {
-                self.local_status_request = self.local_status_request.wrapping_add(1);
-                self.source = source;
-                self.local_fit = None;
-                if source == Source::Local {
-                    return self.local_fit_task(None, None, false);
-                }
-            }
-            Message::SelectSource(_) => {}
-            Message::SelectModel(model)
-                if self.pending_local_consent.is_none()
-                    && self.pending_generation.is_none()
-                    && VISION_MODELS.contains(&model) =>
-            {
-                self.local_status_request = self.local_status_request.wrapping_add(1);
-                self.model = model;
-                self.local_fit = None;
-                if self.source == Source::Local {
-                    return self.local_fit_task(None, None, false);
-                }
-            }
-            Message::SelectModel(_) => {}
-            Message::SaveDraft(uuid) => return self.save_uuid(&uuid),
-            Message::ApproveMetadata(uuid) => return self.approve_metadata(uuid),
-            Message::ReturnToSchedule(uuid) => return self.return_to_schedule(uuid),
-            Message::GenerateOne(uuid) => return self.request_generation(uuid),
-            Message::GenerateMarked => return self.request_batch_generation(),
-            Message::ConfirmLocalInstall => {
-                if let Some(consent) = self.pending_local_consent.take()
-                    && consent.request_id == self.local_status_request
-                    && self.source == Source::Local
-                    && self.model == consent.model
-                {
-                    if let Some(batch_selection) = consent.batch_selection {
-                        if self.marked_generation_ids() == batch_selection {
-                            return self
-                                .confirm_generation(consent.selection, Some(batch_selection));
-                        }
-                        self.pending_local_consent = None;
-                        self.result = Some(
-                            "Marked batch changed while local install consent was pending".into(),
-                        );
-                        return Task::none();
-                    } else {
-                        return self.confirm_generation(consent.selection, None);
-                    }
-                }
-            }
+            _ => unreachable!("message routed to keyboard handler"),
+        }
+        Task::none()
+    }
+
+    fn select_source(&mut self, source: Source) -> Task<Message> {
+        if self.pending_local_consent.is_some() || self.pending_generation.is_some() {
+            return Task::none();
+        }
+        self.local_status_request = self.local_status_request.wrapping_add(1);
+        self.source = source;
+        self.local_fit = None;
+        if source == Source::Local {
+            return self.local_fit_task(None, None, false);
+        }
+        Task::none()
+    }
+
+    fn select_model(&mut self, model: ModelOption) -> Task<Message> {
+        if self.pending_local_consent.is_some()
+            || self.pending_generation.is_some()
+            || !VISION_MODELS.contains(&model)
+        {
+            return Task::none();
+        }
+        self.local_status_request = self.local_status_request.wrapping_add(1);
+        self.model = model;
+        self.local_fit = None;
+        if self.source == Source::Local {
+            return self.local_fit_task(None, None, false);
+        }
+        Task::none()
+    }
+
+    fn update_generation(&mut self, message: Message) -> Task<Message> {
+        match message {
+            Message::SelectSource(source) => return self.select_source(source),
+            Message::SelectModel(model) => return self.select_model(model),
+            Message::ConfirmLocalInstall => return self.on_confirm_local_install(),
             Message::CancelLocalInstall => {
                 self.pending_local_consent = None;
                 self.local_status_request = self.local_status_request.wrapping_add(1);
@@ -853,169 +851,42 @@ impl App {
                 generate,
                 result,
             } => {
-                if request_id != self.local_status_request
-                    || self.source != Source::Local
-                    || self.model != model
-                {
-                    return Task::none();
-                }
-                match result {
-                    Ok(status) => {
-                        let needs_consent = crate::metadata::consent_required(&status);
-                        let can_generate = status.fit.fit && status.available;
-                        self.local_fit = Some(status);
-                        if generate && needs_consent {
-                            self.pending_local_consent = Some(LocalInstallConsent {
-                                request_id,
-                                model,
-                                selection,
-                                batch_selection,
-                            });
-                        } else if generate && can_generate {
-                            return self.continue_local_generation(selection, batch_selection);
-                        }
-                    }
-                    Err(error) => {
-                        self.local_fit = None;
-                        self.result = Some(format!("Could not assess local model fit: {error}"));
-                    }
-                }
-            }
-            Message::GenerationFinished { uuid, result } => {
-                if let Some(uuid) = uuid {
-                    self.busy_uuids.remove(&uuid);
-                } else {
-                    self.busy_uuids.clear();
-                }
-                self.busy = false;
-                self.result = Some(match result {
-                    Ok(message) => message,
-                    Err(error) => format!("Generation failed: {error}"),
-                });
-                return self.reload_task();
-            }
-            Message::DescriptionAction { uuid, action } => {
-                if self.busy_uuids.contains(&uuid) {
-                    return Task::none();
-                }
-                let Some(editor) = self.description_editors.get_mut(&uuid) else {
-                    return Task::none();
-                };
-                editor.perform(action);
-                let text = editor.text();
-                return self.update(Message::Edited {
-                    uuid,
-                    field: Field::Description,
-                    text,
-                });
-            }
-            Message::Edited { uuid, field, text } => {
-                if self.busy_uuids.contains(&uuid) {
-                    return Task::none();
-                }
-                let current = self
-                    .drafts
-                    .get(&uuid)
-                    .map(|draft| (draft.title().to_owned(), draft.description().to_owned()))
-                    .or_else(|| self.publication(&uuid).map(row_metadata));
-                if let Some((title, description)) = current {
-                    let draft = self
-                        .drafts
-                        .entry(uuid)
-                        .or_insert_with(|| Draft::new(title, description));
-                    draft.edit(field, text, self.started.elapsed().as_millis() as u64);
-                }
-            }
-            Message::Tick => return self.autosave_due(),
-            Message::SaveFinished { uuid, sent, result } => {
-                if let Some(draft) = self.drafts.get_mut(&uuid) {
-                    match result {
-                        Ok(()) => {
-                            draft.saved(&sent);
-                            self.result = Some(format!("Saved metadata for {uuid}"));
-                        }
-                        Err(error) => {
-                            draft.failed(&sent);
-                            self.result = Some(format!("Save failed for {uuid}: {error}"));
-                            self.pending_navigation = None;
-                            self.pending_jump = None;
-                            self.pending_publish = false;
-                            self.pending_generation = None;
-                            self.pending_generation_batch = None;
-                            self.pending_approval = None;
-                            self.pending_return = None;
-                            self.pending_close = false;
-                            self.busy = false;
-                            return Task::none();
-                        }
-                    }
-                }
-                self.busy = false;
-                if self.drafts.values().any(Draft::is_saving) {
-                    return Task::none();
-                }
-                if self.any_dirty() {
-                    return self.save_next_dirty();
-                }
-                if let Some(uuid) = self.pending_generation.take() {
-                    let install = std::mem::take(&mut self.pending_generation_install);
-                    let batch = self.pending_generation_batch.take();
-                    return self.start_generation(
-                        (!uuid.is_empty()).then_some(uuid),
-                        install,
-                        batch,
-                    );
-                }
-                if let Some(uuid) = self.pending_approval.take() {
-                    return self.approve_metadata(uuid);
-                }
-                if let Some(uuid) = self.pending_return.take() {
-                    return self.return_to_schedule(uuid);
-                }
-                if (self.pending_navigation.is_some() || self.pending_publish || self.pending_close)
-                    && self.publish_options.values().any(|options| options.dirty)
-                {
-                    return self.save_next_options();
-                }
-                if let Some(tab) = self.pending_navigation.take() {
-                    if self.any_dirty() {
-                        self.pending_navigation = Some(tab);
-                        return self.save_next_dirty();
-                    }
-                    let reveal = self.pending_jump.take();
-                    return self.activate_tab(tab, reveal);
-                }
-                if self.pending_publish && !self.any_dirty() {
-                    self.pending_publish = false;
-                    return self.publish_selected_task();
-                }
-                if self.pending_close && !self.any_dirty() {
-                    return iced::exit();
-                }
-                if self.any_dirty() {
-                    return self.save_next_dirty();
-                }
-            }
-            Message::SelectCell { key, selected } => {
-                let Some((uuid, platform)) = key.rsplit_once(':') else {
-                    return Task::none();
-                };
-                if platform != "deviantart" {
-                    return Task::none();
-                }
-                if !selected && self.selection_locked(Some(uuid)) {
-                    self.publish_result = Some(
-                        "Reconcile the unresolved attempt before deselecting this delivery".into(),
-                    );
-                    return Task::none();
-                }
-                return Self::select_publish_task(
-                    self.application.clone(),
-                    Some(uuid.to_owned()),
-                    Some(platform.to_owned()),
-                    selected,
+                return self.on_local_fit_finished(
+                    request_id,
+                    model,
+                    selection,
+                    batch_selection,
+                    generate,
+                    result,
                 );
             }
+            Message::GenerationFinished { uuid, result } => {
+                return self.on_generation_finished(uuid, result);
+            }
+            _ => unreachable!("message routed to generation handler"),
+        }
+        Task::none()
+    }
+
+    fn update_metadata(&mut self, message: Message) -> Task<Message> {
+        match message {
+            Message::SaveDraft(uuid) => self.save_uuid(&uuid),
+            Message::ApproveMetadata(uuid) => self.approve_metadata(uuid),
+            Message::ReturnToSchedule(uuid) => self.return_to_schedule(uuid),
+            Message::GenerateOne(uuid) => self.request_generation(uuid),
+            Message::GenerateMarked => self.request_batch_generation(),
+            Message::DescriptionAction { uuid, action } => self.on_description_action(uuid, action),
+            Message::Edited { uuid, field, text } => self.on_edited(uuid, field, text),
+            Message::SaveFinished { uuid, sent, result } => {
+                self.on_save_finished(uuid, sent, result)
+            }
+            _ => unreachable!("message routed to metadata handler"),
+        }
+    }
+
+    fn update_selection(&mut self, message: Message) -> Task<Message> {
+        match message {
+            Message::SelectCell { key, selected } => return self.on_select_cell(key, selected),
             Message::SelectAll(selected) => {
                 if !selected && self.selection_locked(None) {
                     self.publish_result = Some(
@@ -1025,158 +896,55 @@ impl App {
                 }
                 return Self::select_publish_task(self.application.clone(), None, None, selected);
             }
-            Message::PublishSelected => {
-                if self.publish_locks.is_none() || self.publish_lock_error.is_some() {
-                    self.publish_result = Some(
-                        self.publish_lock_error
-                            .clone()
-                            .unwrap_or_else(|| "Checking unresolved publish attempts".into()),
-                    );
-                    return Task::none();
-                }
-                if self
-                    .publish_locks
-                    .as_ref()
-                    .is_some_and(|locks| !locks.is_empty())
-                {
-                    self.publish_result =
-                        Some("Reconcile unresolved attempts before retrying".into());
-                    return Task::none();
-                }
-                if self.any_dirty() {
-                    self.pending_publish = true;
-                    return self.save_next_dirty();
-                }
-                if self.publish_options.values().any(|options| options.dirty) {
-                    self.pending_publish = true;
-                    return self.save_next_options();
-                }
-                return self.publish_selected_task();
-            }
+            Message::PublishSelected => return self.on_publish_selected(),
             Message::CancelAfterCurrent | Message::CloseCancelPublish => self
                 .publish_cancel
                 .store(true, std::sync::atomic::Ordering::SeqCst),
             Message::CloseWait => {}
-            Message::PublishFinished(completion) => {
-                self.publish_active = false;
-                self.publish_diagnostic = completion.diagnostics;
-                match completion.result {
-                    Ok(report) => {
-                        self.publish_outcomes = report
-                            .outcomes
-                            .iter()
-                            .cloned()
-                            .map(|outcome| (outcome.cell.clone(), outcome))
-                            .collect();
-                        self.publish_result = Some(format!(
-                            "Published {}; failed {}; unknown {}; unattempted{}{}",
-                            report.published,
-                            report.failed,
-                            report.unknown,
-                            report.unattempted,
-                            report
-                                .error
-                                .map(|error| format!(" — {error}"))
-                                .unwrap_or_default()
-                        ));
-                    }
-                    Err(error) => {
-                        self.publish_result = Some(format!("Publishing stopped: {error}"));
-                    }
-                }
-                self.publish_locks = None;
-                self.publish_lock_error = Some("Refreshing publication and receipt state".into());
-                return self.reload_task();
-            }
+            Message::PublishFinished(completion) => return self.on_publish_finished(completion),
+            _ => unreachable!("message routed to selection handler"),
+        }
+        Task::none()
+    }
+
+    fn update_options(&mut self, message: Message) -> Task<Message> {
+        match message {
             Message::OptionPriceChanged { uuid, value } => {
-                self.publish_keyboard_mode = false;
-                self.publish_keyboard_focus = None;
-                if self.options_locked(&uuid) {
-                    return Task::none();
-                }
-                self.ensure_publish_options(&uuid);
-                if let Some(options) = self.publish_options.get_mut(&uuid) {
-                    options.price = value;
-                    options.dirty = true;
-                    options.error = None;
-                }
+                self.on_option_price_changed(uuid, value)
             }
             Message::OptionTierChanged {
                 uuid,
                 value,
                 selected,
-            } => {
-                self.publish_keyboard_mode = false;
-                self.publish_keyboard_focus = None;
-                if self.options_locked(&uuid)
-                    || !self.application.store().config().tiers.contains(&value)
-                {
-                    return Task::none();
-                }
-                self.ensure_publish_options(&uuid);
-                if let Some(options) = self.publish_options.get_mut(&uuid) {
-                    set_option(&mut options.tiers, value, selected);
-                    options.dirty = true;
-                    options.error = None;
-                }
-            }
+            } => self.on_option_tier_changed(uuid, value, selected),
             Message::OptionGalleryChanged {
                 uuid,
                 value,
                 selected,
-            } => {
-                self.publish_keyboard_mode = false;
-                self.publish_keyboard_focus = None;
-                if self.options_locked(&uuid)
-                    || !self.application.store().config().galleries.contains(&value)
-                {
-                    return Task::none();
-                }
-                self.ensure_publish_options(&uuid);
-                if let Some(options) = self.publish_options.get_mut(&uuid) {
-                    set_option(&mut options.galleries, value, selected);
-                    options.dirty = true;
-                    options.error = None;
-                }
-            }
-            Message::SaveOptions(uuid) => return self.save_options_task(uuid),
-            Message::OptionsSaved { uuid, result } => {
-                self.busy = false;
-                if let Some(options) = self.publish_options.get_mut(&uuid) {
-                    match result {
-                        Ok(()) => {
-                            self.publish_options.remove(&uuid);
-                            self.result = Some(format!("Saved publishing options for {uuid}"));
-                        }
-                        Err(error) => {
-                            options.error = Some(error.clone());
-                            self.result =
-                                Some(format!("Publishing options were not saved: {error}"));
-                            self.pending_publish = false;
-                            self.pending_navigation = None;
-                            self.pending_close = false;
-                            self.pending_jump = None;
-                            return Task::none();
-                        }
-                    }
-                }
-                if self.publish_options.values().any(|options| options.dirty) {
-                    return self.save_next_options();
-                }
-                if self.pending_publish {
-                    self.pending_publish = false;
-                    return self.publish_selected_task();
-                }
-                if let Some(tab) = self.pending_navigation.take() {
-                    let reveal = self.pending_jump.take();
-                    return self.activate_tab(tab, reveal);
-                }
-                if self.pending_close {
-                    self.pending_close = false;
-                    return iced::exit();
-                }
-                return self.reload_task();
-            }
+            } => self.on_option_gallery_changed(uuid, value, selected),
+            Message::SaveOptions(uuid) => self.save_options_task(uuid),
+            Message::OptionsSaved { uuid, result } => self.on_options_saved(uuid, result),
+            _ => unreachable!("message routed to options handler"),
+        }
+    }
+
+    fn on_reconcile_finished(
+        &mut self,
+        attempt_id: String,
+        result: Result<(), String>,
+    ) -> Task<Message> {
+        self.busy = false;
+        self.publish_locks = None;
+        self.publish_attempts.clear();
+        self.publish_result = Some(match result {
+            Ok(()) => format!("Reconciled publish attempt {attempt_id}"),
+            Err(error) => format!("Reconciliation refused; receipt retained: {error}"),
+        });
+        self.reload_task()
+    }
+
+    fn update_reconciliation(&mut self, message: Message) -> Task<Message> {
+        match message {
             Message::ReconcileUrlChanged { attempt_id, value } => {
                 self.publish_keyboard_mode = false;
                 self.publish_keyboard_focus = None;
@@ -1185,131 +953,46 @@ impl App {
             Message::ReconcileAttempt {
                 attempt_id,
                 outcome,
-            } => {
-                if self.publish_active || self.busy {
-                    return Task::done(Message::ReconcileFinished {
-                        attempt_id,
-                        result: Err("reconciliation is busy".into()),
-                    });
-                }
-                if !self
-                    .publish_attempts
-                    .iter()
-                    .any(|attempt| attempt.attempt_id == attempt_id && attempt.blocks_retry())
-                {
-                    return Task::done(Message::ReconcileFinished {
-                        attempt_id,
-                        result: Err("publish attempt is no longer unresolved".into()),
-                    });
-                }
-                self.busy = true;
-                self.publish_result = Some("Reconciling the verified publishing outcome…".into());
-                let application = self.application.clone();
-                let reconcile_id = attempt_id.clone();
-                return Task::perform(
-                    async move {
-                        tokio::task::spawn_blocking(move || {
-                            let journal = crate::publish_journal::PublishJournal::new(
-                                &application.store().paths().data_dir,
-                            )?;
-                            journal.reconcile(application.store(), &reconcile_id, outcome)
-                        })
-                        .await
-                        .unwrap_or_else(|error| Err(crate::error::Error::Config(error.to_string())))
-                        .map_err(|error| error.to_string())
-                    },
-                    move |result| Message::ReconcileFinished { attempt_id, result },
-                );
-            }
+            } => return self.on_reconcile_attempt(attempt_id, outcome),
             Message::ReconcileFinished { attempt_id, result } => {
-                self.busy = false;
-                self.publish_locks = None;
-                self.publish_attempts.clear();
-                self.publish_result = Some(match result {
-                    Ok(()) => format!("Reconciled publish attempt {attempt_id}"),
-                    Err(error) => format!("Reconciliation refused; receipt retained: {error}"),
-                });
-                return self.reload_task();
+                return self.on_reconcile_finished(attempt_id, result);
             }
-            Message::OpenActualUrl(url) => {
-                let opener = self.url_opener;
-                let application = self.application.clone();
-                let result_url = url.clone();
-                return Task::perform(
-                    async move {
-                        tokio::task::spawn_blocking(move || {
-                            let rows = application
-                                .store()
-                                .read()
-                                .map_err(|error| error.to_string())?;
-                            calendar::open_stored_actual_url_with(&rows, &url, opener)
-                        })
-                        .await
-                        .unwrap_or_else(|error| Err(format!("could not open actual URL: {error}")))
-                    },
-                    move |result| Message::UrlOpened {
-                        url: result_url,
-                        result,
-                    },
-                );
-            }
+            Message::OpenActualUrl(url) => return self.on_open_actual_url(url),
             Message::UrlOpened { url, result } => {
                 self.result = Some(match result {
                     Ok(()) => format!("Opened actual URL: {url}"),
                     Err(error) => format!("Could not open actual URL: {error}"),
                 });
             }
-            Message::JumpToPublication(uuid) => return self.jump_to_publication(uuid),
-            Message::CloseRequested => {
-                if self.publish_active {
-                    self.pending_close = true;
-                    self.result = Some("Publishing is active. Wait or cancel after the current delivery before closing.".into());
-                    return Task::none();
-                }
-                if self.any_dirty() {
-                    self.pending_close = true;
-                    self.result = Some("Saving drafts before close…".into());
-                    return self.save_next_dirty();
-                }
-                if self.publish_options.values().any(|options| options.dirty) {
-                    self.pending_close = true;
-                    return self.save_next_options();
-                }
-                return iced::exit();
-            }
-            Message::ConfirmDiscard => {
-                self.drafts.clear();
-                self.publish_options.clear();
-                self.pending_publish = false;
-                self.pending_navigation = None;
-                self.pending_jump = None;
-                self.pending_close = false;
-                return iced::exit();
-            }
-            Message::KeepEditing => self.pending_close = false,
-            Message::Refresh => {
-                if self.any_dirty() || self.publish_options.values().any(|options| options.dirty) {
-                    self.result = Some("Save or explicitly discard drafts before refresh.".into());
-                } else {
-                    return self.reload_task();
-                }
-            }
-            Message::RetrySave => return self.save_next_dirty(),
+            _ => unreachable!("message routed to reconciliation handler"),
+        }
+        Task::none()
+    }
+
+    fn search_path(&mut self, path: String) -> Task<Message> {
+        if self.search_paths.contains(&path) {
+            self.next_search_request();
+            self.search_paths.retain(|p| p != &path);
+        } else if self.application.store().config().publicable.contains(&path) {
+            self.next_search_request();
+            self.search_paths.push(path);
+        }
+        Task::none()
+    }
+
+    fn search_limit_changed(&mut self, limit: usize) {
+        if [0, 25, 50, 75, 100].contains(&limit) && self.search_limit != limit {
+            self.next_search_request();
+            self.search_limit = limit;
+        }
+    }
+
+    fn update_search(&mut self, message: Message) -> Task<Message> {
+        match message {
             Message::SearchLimit(limit) => {
-                if [0, 25, 50, 75, 100].contains(&limit) && self.search_limit != limit {
-                    self.next_search_request();
-                    self.search_limit = limit;
-                }
+                self.search_limit_changed(limit);
             }
-            Message::SearchPath(path) => {
-                if self.search_paths.contains(&path) {
-                    self.next_search_request();
-                    self.search_paths.retain(|p| p != &path);
-                } else if self.application.store().config().publicable.contains(&path) {
-                    self.next_search_request();
-                    self.search_paths.push(path);
-                }
-            }
+            Message::SearchPath(path) => return self.search_path(path),
             Message::PromptQueryChanged(query) => {
                 if self.prompt_query != query {
                     self.next_search_request();
@@ -1322,65 +1005,58 @@ impl App {
                     self.prompt_lineage = lineage;
                 }
             }
-            Message::Search => {
-                if self.search_authorized {
-                    let request_id = self.next_search_request();
-                    if self.prompt_archive.is_some()
-                        && (!self.prompt_query.trim().is_empty()
-                            || !self.prompt_lineage.trim().is_empty())
-                    {
-                        return pick::prompt_search_task(self, request_id);
-                    }
-                    return pick::search_task(self, request_id);
-                }
-            }
-            Message::SearchFinished {
-                request_id,
-                result: Ok(candidates),
-            } if request_id == self.search_request_id && self.search_authorized => {
-                self.prompt_search = None;
-                self.set_candidates(candidates);
-                self.result = Some(
-                    if self.candidates.len() == self.search_limit && self.search_limit > 0 {
-                        format!(
-                            "Found at least {} candidates; search limit reached",
-                            self.search_limit
-                        )
-                    } else {
-                        format!("Found {} candidates", self.candidates.len())
-                    },
-                );
-                return Task::batch([pick::preview_tasks(self, 0, 4), prompt_tasks(self)]);
-            }
-            Message::PromptSearchFinished {
-                request_id,
-                result: Ok(matches),
-            } if request_id == self.search_request_id && self.search_authorized => {
-                let candidates = matches
-                    .exact
-                    .iter()
-                    .chain(&matches.maybe)
-                    .cloned()
-                    .collect();
-                let summary = format!(
-                    "Prompt search: {} exact, {} lineage hints; {} nearest prompts skipped{}",
-                    matches.exact.len(),
-                    matches.maybe.len(),
-                    matches.skipped,
-                    if matches.truncated {
-                        "; results capped, narrow the query or lineage"
-                    } else {
-                        ""
-                    }
-                );
-                self.prompt_search = Some(matches);
-                self.set_candidates(candidates);
-                self.result = Some(summary);
-                return Task::batch([pick::preview_tasks(self, 0, 4), prompt_tasks(self)]);
-            }
+            Message::Search => return self.on_search(),
+            _ => unreachable!("message routed to search handler"),
+        }
+        Task::none()
+    }
+
+    fn update_search_results(&mut self, message: Message) -> Task<Message> {
+        let request_id = match &message {
+            Message::SearchFinished { request_id, .. }
+            | Message::PromptSearchFinished { request_id, .. } => Some(*request_id),
+            _ => None,
+        };
+        if request_id.is_some_and(|request_id| !self.search_result_current(request_id)) {
+            return Task::none();
+        }
+        match message {
+            Message::SearchFinished { result, .. } => self.search_finished(result),
+            Message::PromptSearchFinished { result, .. } => self.prompt_search_finished(result),
             Message::PromptMatchesFinished(matches) => {
                 self.prompt_matches.extend(matches);
+                Task::none()
             }
+            _ => unreachable!("message routed to search results handler"),
+        }
+    }
+
+    fn search_finished(&mut self, result: Result<Vec<Candidate>, String>) -> Task<Message> {
+        match result {
+            Ok(candidates) => self.on_search_finished_ready(candidates),
+            Err(error) => {
+                self.result = Some(format!("Search failed: {error}"));
+                Task::none()
+            }
+        }
+    }
+
+    fn prompt_search_finished(&mut self, result: Result<SearchMatches, String>) -> Task<Message> {
+        match result {
+            Ok(matches) => self.on_prompt_search_finished_ready(matches),
+            Err(error) => {
+                self.result = Some(format!("Prompt search failed: {error}"));
+                Task::none()
+            }
+        }
+    }
+
+    fn search_result_current(&self, request_id: u64) -> bool {
+        request_id == self.search_request_id && self.search_authorized
+    }
+
+    fn update_previews(&mut self, message: Message) -> Task<Message> {
+        match message {
             Message::CalendarPrepared(Ok(prepared)) => {
                 self.calendar_preparing = false;
                 self.calendar_prepared = true;
@@ -1416,21 +1092,29 @@ impl App {
             Message::DescribePreviewFinished { uuid, result } => {
                 self.describe_previews.insert(uuid, Some(result));
             }
-            Message::SearchFinished {
-                request_id,
-                result: Err(error),
-            } if request_id == self.search_request_id && self.search_authorized => {
-                self.result = Some(format!("Search failed: {error}"))
+            _ => unreachable!("message routed to previews handler"),
+        }
+        Task::none()
+    }
+
+    fn on_workflow_finished(
+        &mut self,
+        message: String,
+        result: Result<(), String>,
+    ) -> Task<Message> {
+        self.busy = false;
+        match result {
+            Ok(()) => {
+                self.result = Some(message);
+                return self.reload_task();
             }
-            Message::PromptSearchFinished {
-                request_id,
-                result: Err(error),
-            } if request_id == self.search_request_id && self.search_authorized => {
-                self.result = Some(format!("Prompt search failed: {error}"))
-            }
-            Message::SearchFinished { .. } | Message::PromptSearchFinished { .. } => {
-                return Task::none();
-            }
+            Err(error) => self.result = Some(format!("{message}: {error}")),
+        }
+        Task::none()
+    }
+
+    fn update_pick(&mut self, message: Message) -> Task<Message> {
+        match message {
             Message::Pick(candidate) => return pick::pick_task(self, candidate),
             Message::PickFinished(Ok(())) => {
                 self.busy = false;
@@ -1454,15 +1138,15 @@ impl App {
             Message::ConfirmDelete => return pick::delete_task(self),
             Message::CancelDelete => self.pending_delete = None,
             Message::WorkflowFinished { message, result } => {
-                self.busy = false;
-                match result {
-                    Ok(()) => {
-                        self.result = Some(message);
-                        return self.reload_task();
-                    }
-                    Err(error) => self.result = Some(format!("{message}: {error}")),
-                }
+                return self.on_workflow_finished(message, result);
             }
+            _ => unreachable!("message routed to pick handler"),
+        }
+        Task::none()
+    }
+
+    fn update_schedule(&mut self, message: Message) -> Task<Message> {
+        match message {
             Message::CustomDate { uuid, value } => {
                 let initial = self
                     .publication(&uuid)
@@ -1488,8 +1172,693 @@ impl App {
             }
             Message::ApproveDate(uuid) => return schedule::approve_task(self, uuid),
             Message::ReturnToPick(uuid) => return schedule::return_task(self, uuid),
+            _ => unreachable!("message routed to schedule handler"),
         }
         Task::none()
+    }
+
+    fn on_load_finished_loaded(&mut self, rows: Vec<Value>) -> Task<Message> {
+        self.description_editors.retain(|uuid, _| {
+            rows.iter()
+                .any(|row| row.get("uuid").and_then(Value::as_str) == Some(uuid))
+        });
+        for row in &rows {
+            let Some(uuid) = row.get("uuid").and_then(Value::as_str) else {
+                continue;
+            };
+            let description = row.get("description").and_then(Value::as_str).unwrap_or("");
+            let editor = self
+                .description_editors
+                .entry(uuid.to_owned())
+                .or_insert_with(|| iced::widget::text_editor::Content::with_text(description));
+            if !self
+                .drafts
+                .get(uuid)
+                .is_some_and(|draft| draft.is_field_dirty(Field::Description))
+            {
+                *editor = iced::widget::text_editor::Content::with_text(description);
+            }
+        }
+        self.publications = Some(rows);
+        self.refresh_keyboard_publish_focus();
+        self.load_error = None;
+        self.search_authorized = true;
+        self.calendar_preparing = false;
+        self.calendar_prepared = false;
+        self.calendar_error = None;
+        self.calendar_artwork.clear();
+        self.calendar_previews.clear();
+        if self.active_tab == Tab::Describe {
+            return describe::preview_tasks(self, 0, 4);
+        }
+        if self.active_tab == Tab::Calendar {
+            return calendar::prepare_task(self);
+        }
+        Task::none()
+    }
+
+    fn close_after_status_refresh(&mut self) -> Task<Message> {
+        if self.pending_close {
+            if self.any_dirty() {
+                return self.save_next_dirty();
+            }
+            if self.publish_options.values().any(|options| options.dirty) {
+                return self.save_next_options();
+            }
+            self.pending_close = false;
+            return iced::exit();
+        }
+        Task::none()
+    }
+
+    fn on_publish_statuses_finished_ready(
+        &mut self,
+        attempts: Vec<AttemptStatus>,
+    ) -> Task<Message> {
+        self.publish_locks = Some(
+            attempts
+                .iter()
+                .filter(|attempt| attempt.blocks_retry())
+                .map(|attempt| attempt.uuid.clone())
+                .collect(),
+        );
+        self.publish_lock_error = None;
+        self.publish_attempts = attempts;
+        self.refresh_keyboard_publish_focus();
+        self.close_after_status_refresh()
+    }
+
+    fn on_publish_statuses_finished_failed(&mut self, error: String) -> Task<Message> {
+        self.publish_locks = None;
+        self.publish_lock_error = Some(error);
+        self.publish_attempts.clear();
+        self.refresh_keyboard_publish_focus();
+        self.close_after_status_refresh()
+    }
+
+    fn on_publish_keyboard_toggle(&mut self) -> Task<Message> {
+        if self.active_tab != Tab::Publish {
+            return Task::none();
+        }
+        if self.publish_keyboard_mode {
+            self.publish_keyboard_mode = false;
+            self.publish_keyboard_focus = None;
+        } else {
+            self.publish_keyboard_mode = true;
+            self.publish_keyboard_focus = self.keyboard_publish_cells().first().cloned();
+        }
+        Task::none()
+    }
+
+    fn on_publish_keyboard_next(&mut self, reverse: bool) -> Task<Message> {
+        if !self.publish_keyboard_mode {
+            return Task::none();
+        }
+        let cells = self.keyboard_publish_cells();
+        if cells.is_empty() {
+            self.publish_keyboard_focus = None;
+            return Task::none();
+        }
+        let current = self
+            .publish_keyboard_focus
+            .as_ref()
+            .and_then(|uuid| cells.iter().position(|cell| cell == uuid));
+        let next = match (current, reverse) {
+            (Some(index), false) => (index + 1) % cells.len(),
+            (Some(index), true) => (index + cells.len() - 1) % cells.len(),
+            (None, false) => 0,
+            (None, true) => cells.len() - 1,
+        };
+        self.publish_keyboard_focus = Some(cells[next].clone());
+        Task::none()
+    }
+
+    fn on_publish_keyboard_toggle_cell(&mut self) -> Task<Message> {
+        if !self.publish_keyboard_mode || self.active_tab != Tab::Publish {
+            return Task::none();
+        }
+        let Some(uuid) = self.publish_keyboard_focus.clone() else {
+            return Task::none();
+        };
+        if self.options_locked(&uuid) {
+            self.publish_result = Some(format!(
+                "Cannot change {uuid} — DeviantArt while publishing state is locked"
+            ));
+            return Task::none();
+        }
+        let Some(publication) = self.publication(&uuid) else {
+            self.publish_keyboard_focus = None;
+            return Task::none();
+        };
+        if !matches!(phase(publication), Ok(Phase::Described | Phase::Appeared)) {
+            return Task::none();
+        }
+        let apparition = publication
+            .get("apparitions")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .find(|apparition| {
+                apparition.get("platformName").and_then(Value::as_str) == Some("deviantart")
+            });
+        let selected = match apparition
+            .and_then(|apparition| apparition.get("state"))
+            .and_then(Value::as_str)
+        {
+            None => true,
+            Some("unpublished") => false,
+            Some("published_or_scheduled") => {
+                self.publish_result = Some(format!(
+                    "{uuid} — DeviantArt is already successful and locked"
+                ));
+                return Task::none();
+            }
+            Some(_) => return Task::none(),
+        };
+        self.update(Message::SelectCell {
+            key: format!("{uuid}:deviantart"),
+            selected,
+        })
+    }
+
+    fn on_confirm_local_install(&mut self) -> Task<Message> {
+        if let Some(consent) = self.pending_local_consent.take()
+            && consent.request_id == self.local_status_request
+            && self.source == Source::Local
+            && self.model == consent.model
+        {
+            if let Some(batch_selection) = consent.batch_selection {
+                if self.marked_generation_ids() == batch_selection {
+                    return self.flush_then_generate(
+                        consent.selection,
+                        true,
+                        Some(batch_selection),
+                    );
+                }
+                self.pending_local_consent = None;
+                self.result =
+                    Some("Marked batch changed while local install consent was pending".into());
+                return Task::none();
+            } else {
+                return self.flush_then_generate(consent.selection, true, None);
+            }
+        }
+        Task::none()
+    }
+
+    fn local_fit_current(&self, request_id: u64, model: &ModelOption) -> bool {
+        request_id == self.local_status_request
+            && self.source == Source::Local
+            && &self.model == model
+    }
+
+    fn on_local_fit_finished(
+        &mut self,
+        request_id: u64,
+        model: ModelOption,
+        selection: Option<String>,
+        batch_selection: Option<Vec<String>>,
+        generate: bool,
+        result: Result<LocalStatus, String>,
+    ) -> Task<Message> {
+        if !self.local_fit_current(request_id, &model) {
+            return Task::none();
+        }
+        match result {
+            Ok(status) => {
+                let needs_consent = crate::metadata::consent_required(&status);
+                let can_generate = status.fit.fit && status.available;
+                self.local_fit = Some(status);
+                if generate && needs_consent {
+                    self.pending_local_consent = Some(LocalInstallConsent {
+                        request_id,
+                        model,
+                        selection,
+                        batch_selection,
+                    });
+                } else if generate && can_generate {
+                    return self.flush_then_generate(selection, false, batch_selection);
+                }
+            }
+            Err(error) => {
+                self.local_fit = None;
+                self.result = Some(format!("Could not assess local model fit: {error}"));
+            }
+        }
+        Task::none()
+    }
+
+    fn on_generation_finished(
+        &mut self,
+        uuid: Option<String>,
+        result: Result<String, String>,
+    ) -> Task<Message> {
+        if let Some(uuid) = uuid {
+            self.busy_uuids.remove(&uuid);
+        } else {
+            self.busy_uuids.clear();
+        }
+        self.busy = false;
+        self.result = Some(match result {
+            Ok(message) => message,
+            Err(error) => format!("Generation failed: {error}"),
+        });
+        self.reload_task()
+    }
+
+    fn on_description_action(
+        &mut self,
+        uuid: String,
+        action: iced::widget::text_editor::Action,
+    ) -> Task<Message> {
+        if self.busy_uuids.contains(&uuid) {
+            return Task::none();
+        }
+        let Some(editor) = self.description_editors.get_mut(&uuid) else {
+            return Task::none();
+        };
+        editor.perform(action);
+        let text = editor.text();
+        self.update(Message::Edited {
+            uuid,
+            field: Field::Description,
+            text,
+        })
+    }
+
+    fn on_edited(&mut self, uuid: String, field: Field, text: String) -> Task<Message> {
+        if self.busy_uuids.contains(&uuid) {
+            return Task::none();
+        }
+        let current = self
+            .drafts
+            .get(&uuid)
+            .map(|draft| (draft.title().to_owned(), draft.description().to_owned()))
+            .or_else(|| self.publication(&uuid).map(row_metadata));
+        if let Some((title, description)) = current {
+            let draft = self
+                .drafts
+                .entry(uuid)
+                .or_insert_with(|| Draft::new(title, description));
+            draft.edit(field, text, self.started.elapsed().as_millis() as u64);
+        }
+        Task::none()
+    }
+
+    fn continue_after_options(&mut self) -> Task<Message> {
+        if let Some(tab) = self.pending_navigation.take() {
+            if self.any_dirty() {
+                self.pending_navigation = Some(tab);
+                return self.save_next_dirty();
+            }
+            let reveal = self.pending_jump.take();
+            return self.activate_tab(tab, reveal);
+        }
+        if self.pending_publish && !self.any_dirty() {
+            self.pending_publish = false;
+            return self.publish_selected_task();
+        }
+        if self.pending_close && !self.any_dirty() {
+            return iced::exit();
+        }
+        if self.any_dirty() {
+            return self.save_next_dirty();
+        }
+        Task::none()
+    }
+
+    fn continue_after_drafts(&mut self) -> Task<Message> {
+        if (self.pending_navigation.is_some() || self.pending_publish || self.pending_close)
+            && self.publish_options.values().any(|options| options.dirty)
+        {
+            return self.save_next_options();
+        }
+        self.continue_after_options()
+    }
+
+    fn on_save_finished(
+        &mut self,
+        uuid: String,
+        sent: SentDraft,
+        result: Result<(), String>,
+    ) -> Task<Message> {
+        if let Some(draft) = self.drafts.get_mut(&uuid) {
+            match result {
+                Ok(()) => {
+                    draft.saved(&sent);
+                    self.result = Some(format!("Saved metadata for {uuid}"));
+                }
+                Err(error) => {
+                    draft.failed(&sent);
+                    self.result = Some(format!("Save failed for {uuid}: {error}"));
+                    self.pending_navigation = None;
+                    self.pending_jump = None;
+                    self.pending_publish = false;
+                    self.pending_generation = None;
+                    self.pending_generation_batch = None;
+                    self.pending_approval = None;
+                    self.pending_return = None;
+                    self.pending_close = false;
+                    self.busy = false;
+                    return Task::none();
+                }
+            }
+        }
+        self.continue_after_metadata_save()
+    }
+
+    fn continue_after_metadata_save(&mut self) -> Task<Message> {
+        self.busy = false;
+        if self.drafts.values().any(Draft::is_saving) {
+            return Task::none();
+        }
+        if self.any_dirty() {
+            return self.save_next_dirty();
+        }
+        if let Some(uuid) = self.pending_generation.take() {
+            let install = std::mem::take(&mut self.pending_generation_install);
+            let batch = self.pending_generation_batch.take();
+            return self.start_generation((!uuid.is_empty()).then_some(uuid), install, batch);
+        }
+        if let Some(uuid) = self.pending_approval.take() {
+            return self.approve_metadata(uuid);
+        }
+        if let Some(uuid) = self.pending_return.take() {
+            return self.return_to_schedule(uuid);
+        }
+        self.continue_after_drafts()
+    }
+
+    fn on_select_cell(&mut self, key: String, selected: bool) -> Task<Message> {
+        let Some((uuid, platform)) = key.rsplit_once(':') else {
+            return Task::none();
+        };
+        if platform != "deviantart" {
+            return Task::none();
+        }
+        if !selected && self.selection_locked(Some(uuid)) {
+            self.publish_result =
+                Some("Reconcile the unresolved attempt before deselecting this delivery".into());
+            return Task::none();
+        }
+        Self::select_publish_task(
+            self.application.clone(),
+            Some(uuid.to_owned()),
+            Some(platform.to_owned()),
+            selected,
+        )
+    }
+
+    fn on_publish_selected(&mut self) -> Task<Message> {
+        if self.publish_locks.is_none() || self.publish_lock_error.is_some() {
+            self.publish_result = Some(
+                self.publish_lock_error
+                    .clone()
+                    .unwrap_or_else(|| "Checking unresolved publish attempts".into()),
+            );
+            return Task::none();
+        }
+        if self
+            .publish_locks
+            .as_ref()
+            .is_some_and(|locks| !locks.is_empty())
+        {
+            self.publish_result = Some("Reconcile unresolved attempts before retrying".into());
+            return Task::none();
+        }
+        if self.any_dirty() {
+            self.pending_publish = true;
+            return self.save_next_dirty();
+        }
+        if self.publish_options.values().any(|options| options.dirty) {
+            self.pending_publish = true;
+            return self.save_next_options();
+        }
+        self.publish_selected_task()
+    }
+
+    fn on_publish_finished(&mut self, completion: PublishCompletion) -> Task<Message> {
+        self.publish_active = false;
+        self.publish_diagnostic = completion.diagnostics;
+        match completion.result {
+            Ok(report) => {
+                self.publish_outcomes = report
+                    .outcomes
+                    .iter()
+                    .cloned()
+                    .map(|outcome| (outcome.cell.clone(), outcome))
+                    .collect();
+                self.publish_result = Some(format!(
+                    "Published {}; failed {}; unknown {}; unattempted{}{}",
+                    report.published,
+                    report.failed,
+                    report.unknown,
+                    report.unattempted,
+                    report
+                        .error
+                        .map(|error| format!(" — {error}"))
+                        .unwrap_or_default()
+                ));
+            }
+            Err(error) => {
+                self.publish_result = Some(format!("Publishing stopped: {error}"));
+            }
+        }
+        self.publish_locks = None;
+        self.publish_lock_error = Some("Refreshing publication and receipt state".into());
+        self.reload_task()
+    }
+
+    fn on_option_price_changed(&mut self, uuid: String, value: String) -> Task<Message> {
+        self.publish_keyboard_mode = false;
+        self.publish_keyboard_focus = None;
+        if self.options_locked(&uuid) {
+            return Task::none();
+        }
+        self.ensure_publish_options(&uuid);
+        if let Some(options) = self.publish_options.get_mut(&uuid) {
+            options.price = value;
+            options.dirty = true;
+            options.error = None;
+        }
+        Task::none()
+    }
+
+    fn on_option_tier_changed(
+        &mut self,
+        uuid: String,
+        value: String,
+        selected: bool,
+    ) -> Task<Message> {
+        self.publish_keyboard_mode = false;
+        self.publish_keyboard_focus = None;
+        if self.options_locked(&uuid) || !self.application.store().config().tiers.contains(&value) {
+            return Task::none();
+        }
+        self.ensure_publish_options(&uuid);
+        if let Some(options) = self.publish_options.get_mut(&uuid) {
+            set_option(&mut options.tiers, value, selected);
+            options.dirty = true;
+            options.error = None;
+        }
+        Task::none()
+    }
+
+    fn on_option_gallery_changed(
+        &mut self,
+        uuid: String,
+        value: String,
+        selected: bool,
+    ) -> Task<Message> {
+        self.publish_keyboard_mode = false;
+        self.publish_keyboard_focus = None;
+        if self.options_locked(&uuid)
+            || !self.application.store().config().galleries.contains(&value)
+        {
+            return Task::none();
+        }
+        self.ensure_publish_options(&uuid);
+        if let Some(options) = self.publish_options.get_mut(&uuid) {
+            set_option(&mut options.galleries, value, selected);
+            options.dirty = true;
+            options.error = None;
+        }
+        Task::none()
+    }
+
+    fn on_options_saved(&mut self, uuid: String, result: Result<(), String>) -> Task<Message> {
+        self.busy = false;
+        if let Some(options) = self.publish_options.get_mut(&uuid) {
+            match result {
+                Ok(()) => {
+                    self.publish_options.remove(&uuid);
+                    self.result = Some(format!("Saved publishing options for {uuid}"));
+                }
+                Err(error) => {
+                    options.error = Some(error.clone());
+                    self.result = Some(format!("Publishing options were not saved: {error}"));
+                    self.pending_publish = false;
+                    self.pending_navigation = None;
+                    self.pending_close = false;
+                    self.pending_jump = None;
+                    return Task::none();
+                }
+            }
+        }
+        if self.publish_options.values().any(|options| options.dirty) {
+            return self.save_next_options();
+        }
+        if self.pending_publish {
+            self.pending_publish = false;
+            return self.publish_selected_task();
+        }
+        if let Some(tab) = self.pending_navigation.take() {
+            let reveal = self.pending_jump.take();
+            return self.activate_tab(tab, reveal);
+        }
+        if self.pending_close {
+            self.pending_close = false;
+            return iced::exit();
+        }
+        self.reload_task()
+    }
+
+    fn on_reconcile_attempt(
+        &mut self,
+        attempt_id: String,
+        outcome: ReconcileOutcome,
+    ) -> Task<Message> {
+        if self.publish_active || self.busy {
+            return Task::done(Message::ReconcileFinished {
+                attempt_id,
+                result: Err("reconciliation is busy".into()),
+            });
+        }
+        if !self
+            .publish_attempts
+            .iter()
+            .any(|attempt| attempt.attempt_id == attempt_id && attempt.blocks_retry())
+        {
+            return Task::done(Message::ReconcileFinished {
+                attempt_id,
+                result: Err("publish attempt is no longer unresolved".into()),
+            });
+        }
+        self.busy = true;
+        self.publish_result = Some("Reconciling the verified publishing outcome…".into());
+        let application = self.application.clone();
+        let reconcile_id = attempt_id.clone();
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let journal = crate::publish_journal::PublishJournal::new(
+                        &application.store().paths().data_dir,
+                    )?;
+                    journal.reconcile(application.store(), &reconcile_id, outcome)
+                })
+                .await
+                .unwrap_or_else(|error| Err(crate::error::Error::Config(error.to_string())))
+                .map_err(|error| error.to_string())
+            },
+            move |result| Message::ReconcileFinished { attempt_id, result },
+        )
+    }
+
+    fn on_open_actual_url(&mut self, url: String) -> Task<Message> {
+        let opener = self.url_opener;
+        let application = self.application.clone();
+        let result_url = url.clone();
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let rows = application
+                        .store()
+                        .read()
+                        .map_err(|error| error.to_string())?;
+                    calendar::open_stored_actual_url_with(&rows, &url, opener)
+                })
+                .await
+                .unwrap_or_else(|error| Err(format!("could not open actual URL: {error}")))
+            },
+            move |result| Message::UrlOpened {
+                url: result_url,
+                result,
+            },
+        )
+    }
+
+    fn on_close_requested(&mut self) -> Task<Message> {
+        if self.publish_active {
+            self.pending_close = true;
+            self.result = Some(
+                "Publishing is active. Wait or cancel after the current delivery before closing."
+                    .into(),
+            );
+            return Task::none();
+        }
+        if self.any_dirty() {
+            self.pending_close = true;
+            self.result = Some("Saving drafts before close…".into());
+            return self.save_next_dirty();
+        }
+        if self.publish_options.values().any(|options| options.dirty) {
+            self.pending_close = true;
+            return self.save_next_options();
+        }
+        iced::exit()
+    }
+
+    fn on_search(&mut self) -> Task<Message> {
+        if self.search_authorized {
+            let request_id = self.next_search_request();
+            if self.prompt_archive.is_some()
+                && (!self.prompt_query.trim().is_empty() || !self.prompt_lineage.trim().is_empty())
+            {
+                return pick::prompt_search_task(self, request_id);
+            }
+            return pick::search_task(self, request_id);
+        }
+        Task::none()
+    }
+
+    fn on_search_finished_ready(&mut self, candidates: Vec<Candidate>) -> Task<Message> {
+        self.prompt_search = None;
+        self.set_candidates(candidates);
+        self.result = Some(
+            if self.candidates.len() == self.search_limit && self.search_limit > 0 {
+                format!(
+                    "Found at least {} candidates; search limit reached",
+                    self.search_limit
+                )
+            } else {
+                format!("Found {} candidates", self.candidates.len())
+            },
+        );
+        Task::batch([pick::preview_tasks(self, 0, 4), prompt_tasks(self)])
+    }
+
+    fn on_prompt_search_finished_ready(&mut self, matches: SearchMatches) -> Task<Message> {
+        let candidates = matches
+            .exact
+            .iter()
+            .chain(&matches.maybe)
+            .cloned()
+            .collect();
+        let summary = format!(
+            "Prompt search: {} exact, {} lineage hints; {} nearest prompts skipped{}",
+            matches.exact.len(),
+            matches.maybe.len(),
+            matches.skipped,
+            if matches.truncated {
+                "; results capped, narrow the query or lineage"
+            } else {
+                ""
+            }
+        );
+        self.prompt_search = Some(matches);
+        self.set_candidates(candidates);
+        self.result = Some(summary);
+        Task::batch([pick::preview_tasks(self, 0, 4), prompt_tasks(self)])
     }
 
     fn set_candidates(&mut self, candidates: Vec<Candidate>) {
@@ -1722,25 +2091,43 @@ impl App {
             .unwrap_or_else(Task::none)
     }
 
+    fn mark_options_save_error(&mut self, uuid: &str, error: &str) {
+        if let Some(options) = self.publish_options.get_mut(uuid) {
+            options.error = Some(error.into());
+        }
+        self.pending_publish = false;
+        self.pending_navigation = None;
+    }
+
+    fn options_save_error(&mut self, uuid: String, error: String) -> Task<Message> {
+        self.mark_options_save_error(&uuid, &error);
+        Task::done(Message::OptionsSaved {
+            uuid,
+            result: Err(error),
+        })
+    }
+
+    fn options_lock_error(&self, uuid: &str) -> Option<String> {
+        if self.publish_locks.is_none() || self.publish_lock_error.is_some() {
+            return Some(
+                self.publish_lock_error
+                    .clone()
+                    .unwrap_or_else(|| "Checking unresolved publish attempts".into()),
+            );
+        }
+        self.publish_locks
+            .as_ref()
+            .is_some_and(|locks| locks.contains(uuid))
+            .then(|| "Unresolved publish attempt must be reconciled before editing options".into())
+    }
+
     fn save_options_task(&mut self, uuid: String) -> Task<Message> {
         if self.busy {
-            if let Some(options) = self.publish_options.get_mut(&uuid) {
-                options.error = Some("Another operation is in progress".into());
-            }
-            self.pending_publish = false;
-            self.pending_navigation = None;
+            self.mark_options_save_error(&uuid, "Another operation is in progress");
             return Task::none();
         }
         if self.publish_active {
-            if let Some(options) = self.publish_options.get_mut(&uuid) {
-                options.error = Some("Publishing options are busy".into());
-            }
-            self.pending_publish = false;
-            self.pending_navigation = None;
-            return Task::done(Message::OptionsSaved {
-                uuid,
-                result: Err("Publishing options are busy".into()),
-            });
+            return self.options_save_error(uuid, "Publishing options are busy".into());
         }
         self.ensure_publish_options(&uuid);
         let Some(options) = self.publish_options.get(&uuid) else {
@@ -1749,66 +2136,17 @@ impl App {
         if !options.dirty {
             return Task::none();
         }
-        let price = if options.price.trim().is_empty() {
-            Some(None)
-        } else {
-            match options.price.trim().parse::<f64>() {
-                Ok(price) if price.is_finite() && price >= 0.0 => Some(Some(price)),
-                _ => {
-                    if let Some(options) = self.publish_options.get_mut(&uuid) {
-                        options.error =
-                            Some("Price must be blank or a finite nonnegative number".into());
-                    }
-                    self.pending_publish = false;
-                    self.pending_navigation = None;
-                    return Task::done(Message::OptionsSaved {
-                        uuid,
-                        result: Err("Price must be blank or a finite nonnegative number".into()),
-                    });
-                }
-            }
+        let price = match parse_option_price(&options.price) {
+            Ok(price) => Some(price),
+            Err(error) => return self.options_save_error(uuid, error),
         };
         let options = crate::workflow::PlatformOptions {
             price,
             tiers: Some(options.tiers.clone()),
             galleries: Some(options.galleries.clone()),
         };
-        if self.publish_locks.is_none() || self.publish_lock_error.is_some() {
-            if let Some(draft) = self.publish_options.get_mut(&uuid) {
-                draft.error = Some(
-                    self.publish_lock_error
-                        .clone()
-                        .unwrap_or_else(|| "Checking unresolved publish attempts".into()),
-                );
-            }
-            self.pending_publish = false;
-            self.pending_navigation = None;
-            return Task::done(Message::OptionsSaved {
-                uuid,
-                result: Err(self
-                    .publish_lock_error
-                    .clone()
-                    .unwrap_or_else(|| "Checking unresolved publish attempts".into())),
-            });
-        }
-        if self
-            .publish_locks
-            .as_ref()
-            .is_some_and(|locks| locks.contains(&uuid))
-        {
-            if let Some(draft) = self.publish_options.get_mut(&uuid) {
-                draft.error = Some(
-                    "Unresolved publish attempt must be reconciled before editing options".into(),
-                );
-            }
-            self.pending_publish = false;
-            self.pending_navigation = None;
-            return Task::done(Message::OptionsSaved {
-                uuid,
-                result: Err(
-                    "Unresolved publish attempt must be reconciled before editing options".into(),
-                ),
-            });
+        if let Some(error) = self.options_lock_error(&uuid) {
+            return self.options_save_error(uuid, error);
         }
         self.busy = true;
         let application = self.application.clone();
@@ -1992,45 +2330,7 @@ impl App {
             self.pending_return = Some(uuid.clone());
             return self.save_uuid(&uuid);
         }
-        let application = self.application.clone();
-        self.busy = true;
-        Task::perform(
-            async move {
-                tokio::task::spawn_blocking(move || {
-                    application.mutate(Some(&uuid), |store| {
-                        workflow::return_to_scheduling(store, &uuid)
-                    })
-                })
-                .await
-                .unwrap_or_else(|error| Err(crate::error::Error::Config(error.to_string())))
-                .map_err(|error| error.to_string())
-            },
-            |result| Message::WorkflowFinished {
-                message: "Returned to scheduling".into(),
-                result,
-            },
-        )
-    }
-
-    fn confirm_generation(
-        &mut self,
-        selection: Option<String>,
-        batch_selection: Option<Vec<String>>,
-    ) -> Task<Message> {
-        if let Some(uuid) = selection.as_deref() {
-            if self.drafts.get(uuid).is_some_and(Draft::is_dirty) {
-                self.pending_generation = Some(uuid.to_owned());
-                self.pending_generation_install = true;
-                self.pending_generation_batch = batch_selection;
-                return self.save_uuid(uuid);
-            }
-        } else if self.any_dirty() {
-            self.pending_generation = Some(String::new());
-            self.pending_generation_install = true;
-            self.pending_generation_batch = batch_selection;
-            return self.save_next_dirty();
-        }
-        self.start_generation(selection, true, batch_selection)
+        schedule::return_task(self, uuid)
     }
 
     fn request_generation(&mut self, uuid: String) -> Task<Message> {
@@ -2115,25 +2415,26 @@ impl App {
         )
     }
 
-    fn continue_local_generation(
+    fn flush_then_generate(
         &mut self,
         selection: Option<String>,
+        install_missing: bool,
         batch_selection: Option<Vec<String>>,
     ) -> Task<Message> {
         if let Some(uuid) = selection.as_deref() {
             if self.drafts.get(uuid).is_some_and(Draft::is_dirty) {
                 self.pending_generation = Some(uuid.to_owned());
-                self.pending_generation_install = false;
+                self.pending_generation_install = install_missing;
                 self.pending_generation_batch = batch_selection;
                 return self.save_uuid(uuid);
             }
         } else if self.any_dirty() {
             self.pending_generation = Some(String::new());
-            self.pending_generation_install = false;
+            self.pending_generation_install = install_missing;
             self.pending_generation_batch = batch_selection;
             return self.save_next_dirty();
         }
-        self.start_generation(selection, false, batch_selection)
+        self.start_generation(selection, install_missing, batch_selection)
     }
 
     fn start_generation(
@@ -2152,20 +2453,7 @@ impl App {
         if let Some(uuid) = &selection {
             self.busy_uuids.insert(uuid.clone());
         } else {
-            self.busy_uuids.extend(
-                self.publications
-                    .as_deref()
-                    .unwrap_or_default()
-                    .iter()
-                    .filter(|row| {
-                        phase(row).ok() == Some(Phase::Scheduled)
-                            && ["title", "description"].iter().any(|key| {
-                                row.get(*key).and_then(Value::as_str)
-                                    == Some(crate::model::GENERATE_MARKER)
-                            })
-                    })
-                    .filter_map(|row| row.get("uuid").and_then(Value::as_str).map(str::to_owned)),
-            );
+            self.busy_uuids.extend(self.marked_generation_ids());
         }
         self.busy = true;
         let completion_uuid = selection.clone();
@@ -2220,20 +2508,7 @@ impl App {
         ])
     }
 
-    fn view(&self) -> Element<'_, Message> {
-        if let Some(error) = &self.load_error {
-            return container(
-                column![text("Unable to load publications"), text(error)].spacing(12),
-            )
-            .padding(24)
-            .into();
-        }
-        let Some(rows) = &self.publications else {
-            return container(text("Loading publications…")).padding(24).into();
-        };
-        if !self.search_authorized {
-            return container(text("Loading publications…")).padding(24).into();
-        }
+    fn loaded_view(&self, rows: &[Value]) -> Element<'_, Message> {
         let tabs = row(Tab::ALL.into_iter().map(|(tab, label)| {
             let control = button(label);
             if tab == self.active_tab {
@@ -2249,21 +2524,13 @@ impl App {
             text(format!("{} publications", rows.len()))
         ]
         .spacing(16);
-        if self.active_tab == Tab::Pick {
-            content = content.push(pick::view(self));
-        }
-        if self.active_tab == Tab::Schedule {
-            content = content.push(schedule::view(self));
-        }
-        if self.active_tab == Tab::Describe {
-            content = content.push(describe::view(self));
-        }
-        if self.active_tab == Tab::Publish {
-            content = content.push(publish::view(self));
-        }
-        if self.active_tab == Tab::Calendar {
-            content = content.push(calendar::view(self));
-        }
+        content = content.push(match self.active_tab {
+            Tab::Pick => pick::view(self),
+            Tab::Schedule => schedule::view(self),
+            Tab::Describe => describe::view(self),
+            Tab::Publish => publish::view(self),
+            Tab::Calendar => calendar::view(self),
+        });
         if let Some(result) = &self.result {
             content = content.push(text(result));
         }
@@ -2287,6 +2554,23 @@ impl App {
             .spacing(8),
         );
         container(content).padding(24).into()
+    }
+
+    fn view(&self) -> Element<'_, Message> {
+        if let Some(error) = &self.load_error {
+            return container(
+                column![text("Unable to load publications"), text(error)].spacing(12),
+            )
+            .padding(24)
+            .into();
+        }
+        let Some(rows) = &self.publications else {
+            return container(text("Loading publications…")).padding(24).into();
+        };
+        if !self.search_authorized {
+            return container(text("Loading publications…")).padding(24).into();
+        }
+        self.loaded_view(rows)
     }
 }
 
@@ -2389,6 +2673,59 @@ fn tab_name(tab: Tab) -> &'static str {
         .unwrap_or("Pick")
 }
 
+fn parse_option_price(price: &str) -> Result<Option<f64>, String> {
+    if price.trim().is_empty() {
+        return Ok(None);
+    }
+    match price.trim().parse::<f64>() {
+        Ok(price) if price.is_finite() && price >= 0.0 => Ok(Some(price)),
+        _ => Err("Price must be blank or a finite nonnegative number".into()),
+    }
+}
+
+fn blocked_attempt_detail(attempt: &AttemptStatus) -> String {
+    if !attempt.database_matches {
+        "receipt belongs to a different publication database".into()
+    } else if let Some(error) = &attempt.current_error {
+        format!("{}: {error}", attempt.reason())
+    } else if attempt.current_matches == Some(false) {
+        format!(
+            "{}; approved snapshot differs from current publication",
+            attempt.reason()
+        )
+    } else {
+        match &attempt.state {
+            AttemptState::Unknown { error } => error.clone(),
+            _ => attempt.reason().into(),
+        }
+    }
+}
+
+fn revealed_rows<'a>(
+    rows: impl Iterator<Item = &'a Value>,
+    target: Option<&str>,
+) -> Vec<&'a Value> {
+    let mut rows: Vec<_> = rows.collect();
+    if let Some(target) = target
+        && let Some(index) = rows
+            .iter()
+            .position(|row| row.get("uuid").and_then(Value::as_str) == Some(target))
+    {
+        rows.swap(0, index);
+    }
+    rows
+}
+
+fn scroll_to_publication(id: &'static str) -> Task<Message> {
+    iced::widget::operation::scroll_to(
+        id,
+        iced::widget::operation::AbsoluteOffset {
+            x: None,
+            y: Some(0.0),
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2397,6 +2734,7 @@ mod tests {
         metadata::{Endpoints, MetadataClient},
         store::Store,
     };
+    use iced_runtime::{Action, futures::futures::StreamExt};
 
     fn app() -> (App, tempfile::TempDir) {
         let root = tempfile::tempdir().unwrap();
@@ -2408,74 +2746,44 @@ mod tests {
             "llmfit".into(),
         );
         let application = Arc::new(CoreApplication::new(store, metadata));
-        (
-            App {
-                application,
-                _options: UiOptions {
-                    openrouter_model: None,
-                    ai_timeout: Duration::from_secs(300),
-                },
-                active_tab: Tab::Pick,
-                publications: Some(Vec::new()),
-                load_error: None,
-                search_authorized: true,
-                drafts: HashMap::new(),
-                busy: false,
-                result: None,
-                pending_navigation: None,
-                pending_close: false,
-                pending_jump: None,
-                revealed_publication: None,
-                started: Instant::now(),
-                search_request_id: 0,
-                search_limit: 25,
-                search_paths: Vec::new(),
-                prompt_query: String::new(),
-                prompt_lineage: String::new(),
-                prompt_search: None,
-                candidates: Vec::new(),
-                previews: HashMap::new(),
-                describe_previews: HashMap::new(),
-                description_editors: HashMap::new(),
-                pending_delete: None,
-                custom_dates: HashMap::new(),
-                source: Source::OpenRouter,
-                model: VISION_MODELS[0].clone(),
-                busy_uuids: HashSet::new(),
-                pending_generation: None,
-                pending_generation_install: false,
-                pending_generation_batch: None,
-                pending_approval: None,
-                pending_return: None,
-                pending_local_consent: None,
-                local_fit: None,
-                local_status_request: 0,
-                publish_result: None,
-                publish_diagnostic: None,
-                publish_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                publish_active: false,
-                pending_publish: false,
-                publish_options: HashMap::new(),
-                publish_keyboard_mode: false,
-                publish_keyboard_focus: None,
-                publish_locks: Some(HashSet::new()),
-                publish_lock_error: None,
-                publish_attempts: Vec::new(),
-                publish_outcomes: HashMap::new(),
-                last_publish_cells: HashSet::new(),
-                reconcile_urls: HashMap::new(),
-                prompt_archive: None,
-                prompt_archive_error: None,
-                prompt_matches: HashMap::new(),
-                calendar_preparing: false,
-                calendar_prepared: false,
-                calendar_error: None,
-                calendar_artwork: HashMap::new(),
-                calendar_previews: HashMap::new(),
-                url_opener: calendar::system_open_url,
+        let (mut app, _task) = App::new(
+            application,
+            UiOptions {
+                openrouter_model: None,
+                ai_timeout: Duration::from_secs(300),
             },
-            root,
-        )
+        );
+        app.publications = Some(Vec::new());
+        app.search_authorized = true;
+        app.publish_locks = Some(HashSet::new());
+        (app, root)
+    }
+
+    async fn run_task(task: Task<Message>) -> Vec<Message> {
+        let Some(mut actions) = iced_runtime::task::into_stream(task) else {
+            return Vec::new();
+        };
+        let mut messages = Vec::new();
+        while let Some(action) = actions.next().await {
+            if let Action::Output(message) = action {
+                messages.push(message);
+            }
+        }
+        messages
+    }
+
+    async fn dispatch(app: &mut App, task: Task<Message>) -> Vec<Message> {
+        let mut pending = run_task(task).await;
+        let mut messages = Vec::new();
+        while !pending.is_empty() {
+            let mut next = Vec::new();
+            for message in pending {
+                next.extend(run_task(app.update(message.clone())).await);
+                messages.push(message);
+            }
+            pending = next;
+        }
+        messages
     }
 
     fn key_event(key: Named, modifiers: iced::keyboard::Modifiers) -> iced::Event {
@@ -2529,32 +2837,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn publish_keyboard_navigation_uses_stable_cells_and_respects_locks() {
-        use iced_runtime::{Action, futures::futures::StreamExt};
         use serde_json::{Value, json};
-
-        async fn outputs(task: Task<Message>) -> Vec<Message> {
-            let Some(mut actions) = iced_runtime::task::into_stream(task) else {
-                return Vec::new();
-            };
-            let mut messages = Vec::new();
-            while let Some(action) = actions.next().await {
-                if let Action::Output(message) = action {
-                    messages.push(message);
-                }
-            }
-            messages
-        }
-
-        async fn dispatch(app: &mut App, task: Task<Message>) {
-            let mut pending = outputs(task).await;
-            while !pending.is_empty() {
-                let mut next = Vec::new();
-                for message in pending {
-                    next.extend(outputs(app.update(message)).await);
-                }
-                pending = next;
-            }
-        }
 
         let (mut app, _root) = app();
         let id = |suffix: u8| format!("00000000-0000-4000-8000-{suffix:012}");
@@ -2795,8 +3078,6 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn pick_prompt_search_filters_exact_text_and_orders_lineage_hints() {
-        use iced_runtime::{Action, futures::futures::StreamExt};
-
         async fn completion(task: Task<Message>) -> Message {
             let mut actions = iced_runtime::task::into_stream(task).expect("search task");
             while let Some(action) = actions.next().await {
@@ -3035,36 +3316,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn typed_uncertainty_with_worker_stderr_refreshes_receipt_and_store_through_ui() {
-        use iced_runtime::{Action, futures::futures::StreamExt};
         use serde_json::json;
-        use std::os::unix::fs::PermissionsExt;
-
-        async fn run_task(task: Task<Message>) -> Vec<Message> {
-            let Some(mut actions) = iced_runtime::task::into_stream(task) else {
-                return Vec::new();
-            };
-            let mut messages = Vec::new();
-            while let Some(action) = actions.next().await {
-                if let Action::Output(message) = action {
-                    messages.push(message);
-                }
-            }
-            messages
-        }
-
-        async fn dispatch(app: &mut App, task: Task<Message>) -> Vec<Message> {
-            let mut pending = run_task(task).await;
-            let mut messages = Vec::new();
-            while !pending.is_empty() {
-                let mut next = Vec::new();
-                for message in pending {
-                    next.extend(run_task(app.update(message.clone())).await);
-                    messages.push(message);
-                }
-                pending = next;
-            }
-            messages
-        }
 
         let root = tempfile::tempdir().unwrap();
         let data_dir = root.path();
@@ -3104,7 +3356,10 @@ mod tests {
         std::fs::write(&store.paths().json, serde_json::to_vec(&rows).unwrap()).unwrap();
         let calls = data_dir.join("calls.log");
         let worker = data_dir.join("worker.sh");
-        std::fs::write(&worker, format!(r#"#!/bin/sh
+        crate::executable_fixture::write_executable(
+            &worker,
+            &format!(
+                r#"#!/bin/sh
 [ "$1" = "--check-steps" ] && exit 0
 while IFS= read -r line; do
   kind=$(printf '%s' "$line" | jq -r .type)
@@ -3120,10 +3375,10 @@ while IFS= read -r line; do
     close) exit 0 ;;
   esac
 done
-"#, calls.display())).unwrap();
-        let mut permissions = std::fs::metadata(&worker).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&worker, permissions).unwrap();
+"#,
+                calls.display()
+            ),
+        );
         let application = Arc::new(
             CoreApplication::new(
                 store.clone(),

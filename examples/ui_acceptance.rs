@@ -1,3 +1,9 @@
+#[path = "../tests/common/executable.rs"]
+mod executable_fixture;
+use executable_fixture::write_executable;
+#[cfg(test)]
+use executable_fixture::write_executable_observed;
+
 use chrono::{Datelike, TimeZone};
 use publicator::{
     application::Application,
@@ -13,7 +19,6 @@ use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -154,17 +159,11 @@ fn fixture_rows(scenario: &str, dir: &Path) -> Vec<Value> {
     }
 }
 
-fn prompt_search_fixture(dir: &Path) -> (Vec<Value>, Config) {
-    let archive = dir.join("prompt-archive");
-    let picked = dir.join("pick");
-    fs::create_dir_all(archive.join("lineage")).unwrap();
-    fs::create_dir_all(&picked).unwrap();
-    let prompt = "MOONLIT EXACT PROMPT — <literal> 雪";
-    fs::write(archive.join("lineage/prompt.txt"), prompt).unwrap();
+fn initialize_prompt_archive(archive: &Path, name: &str, email: &str) {
     let git = |args: &[&str]| {
         let output = std::process::Command::new("git")
             .arg("-C")
-            .arg(&archive)
+            .arg(archive)
             .args(args)
             .output()
             .unwrap();
@@ -176,10 +175,24 @@ fn prompt_search_fixture(dir: &Path) -> (Vec<Value>, Config) {
         );
     };
     git(&["init", "-q"]);
-    git(&["config", "user.name", "Prompt Search Fixture"]);
-    git(&["config", "user.email", "prompt-search@example.invalid"]);
+    git(&["config", "user.name", name]);
+    git(&["config", "user.email", email]);
     git(&["add", "--all"]);
-    commit_prompt_archive_if_changed(&archive).expect("commit disposable prompt archive");
+    commit_prompt_archive_if_changed(archive).expect("commit disposable prompt archive");
+}
+
+fn prompt_search_fixture(dir: &Path) -> (Vec<Value>, Config) {
+    let archive = dir.join("prompt-archive");
+    let picked = dir.join("pick");
+    fs::create_dir_all(archive.join("lineage")).unwrap();
+    fs::create_dir_all(&picked).unwrap();
+    let prompt = "MOONLIT EXACT PROMPT — <literal> 雪";
+    fs::write(archive.join("lineage/prompt.txt"), prompt).unwrap();
+    initialize_prompt_archive(
+        &archive,
+        "Prompt Search Fixture",
+        "prompt-search@example.invalid",
+    );
     let prompt_config = PromptConfig {
         repo: "prompt-archive".into(),
         filename: r"(?P<lineage>[^_]+)_(?P<version>[0-9a-f]{40})\.png".into(),
@@ -254,25 +267,7 @@ fn calendar_fixture(dir: &Path) -> (Vec<Value>, Config) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, body).unwrap();
     }
-    let git = |args: &[&str]| {
-        let output = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&archive)
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "fixture git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    };
-    git(&["init", "-q"]);
-    git(&["config", "user.name", "Calendar Fixture"]);
-    git(&["config", "user.email", "calendar@example.invalid"]);
-    git(&["add", "--all"]);
-    commit_prompt_archive_if_changed(&archive).expect("commit disposable prompt archive");
+    initialize_prompt_archive(&archive, "Calendar Fixture", "calendar@example.invalid");
     let exact_digest = PromptGrammar::compile(&prompt_config)
         .unwrap()
         .digest(exact_text.as_bytes())
@@ -292,73 +287,8 @@ fn calendar_fixture(dir: &Path) -> (Vec<Value>, Config) {
     let zone: chrono_tz::Tz = "Pacific/Kiritimati".parse().unwrap();
     let local_now = chrono::Utc::now().with_timezone(&zone);
     let current_month = local_now.date_naive().with_day(1).unwrap();
-    let mut rows = Vec::new();
-    let mut manifest = Vec::new();
-    let mut uuid = 10_000u64;
-    for months_back in (0..=5).rev() {
-        let month = calendar_month_offset(current_month, -months_back);
-        let cluster = if months_back == 0 {
-            month
-        } else {
-            month.with_day(10).unwrap()
-        };
-        for (branch_index, (branch, digest)) in identities.iter().enumerate() {
-            let time = if months_back == 0 {
-                (0, 15 + branch_index as u32 * 20)
-            } else {
-                (8 + branch_index as u32, 0)
-            };
-            let timestamp = fixture_timestamp(zone, cluster, time.0, time.1);
-            let color = fixture_color(color_index);
-            color_index += 1;
-            let basename = format!("{branch}_calendar{uuid}_{digest}.png");
-            let path = history.join(&basename);
-            image(&path, color);
-            let title = if months_back == 0 && branch_index == 0 {
-                "Timezone boundary exact apparition".to_owned()
-            } else {
-                format!("Calendar {branch} history {uuid}")
-            };
-            let apparitions = if months_back == 0 && branch_index == 0 {
-                json!([
-                    {"platformName":"deviantart","state":"published_or_scheduled","url":"https://example.test/calendar-actual"},
-                    {"platformName":"historical-pixiv","state":"unpublished"}
-                ])
-            } else {
-                json!([{"platformName":format!("history-{branch}"),"state":"published_or_scheduled"}])
-            };
-            rows.push(calendar_publication(
-                uuid,
-                "APPEARED",
-                &title,
-                timestamp,
-                &basename,
-                Some(&path),
-                apparitions,
-            ));
-            manifest.push(json!({"uuid":format!("00000000-0000-4000-8000-{uuid:012}"),"title":title,"basename":basename,"rgb":color,"timestamp":timestamp,"prompt":branch}));
-            uuid += 1;
-        }
-        let date = month.with_day(24).unwrap();
-        let timestamp = fixture_timestamp(zone, date, 12, 0);
-        let color = fixture_color(color_index);
-        color_index += 1;
-        let basename = format!("exact_calendar{uuid}_{}.png", identities[0].1);
-        let path = history.join(&basename);
-        image(&path, color);
-        let title = format!("Calendar later-month event {uuid}");
-        rows.push(calendar_publication(
-            uuid,
-            "APPEARED",
-            &title,
-            timestamp,
-            &basename,
-            Some(&path),
-            json!([{"platformName":"historical-pixiv","state":"published_or_scheduled"}]),
-        ));
-        manifest.push(json!({"uuid":format!("00000000-0000-4000-8000-{uuid:012}"),"title":title,"basename":basename,"rgb":color,"timestamp":timestamp,"prompt":"exact"}));
-        uuid += 1;
-    }
+    let (mut rows, mut manifest, mut color_index, mut uuid) =
+        calendar_history(&history, &identities, current_month, zone, color_index);
 
     let current_day = local_now.date_naive();
     for (state, name, apparitions) in [
@@ -432,6 +362,90 @@ fn calendar_fixture(dir: &Path) -> (Vec<Value>, Config) {
         toml::Value::String("Pacific/Kiritimati".into()),
     );
     (rows, config)
+}
+
+fn calendar_history(
+    history: &Path,
+    identities: &[(&str, &str)],
+    current_month: chrono::NaiveDate,
+    zone: chrono_tz::Tz,
+    mut color_index: usize,
+) -> (Vec<Value>, Vec<Value>, usize, u64) {
+    let mut rows = Vec::new();
+    let mut manifest = Vec::new();
+    let mut uuid = 10_000u64;
+    for months_back in (0..=5).rev() {
+        let month = calendar_month_offset(current_month, -months_back);
+        let cluster = if months_back == 0 {
+            month
+        } else {
+            month.with_day(10).unwrap()
+        };
+        for (branch_index, (branch, digest)) in identities.iter().enumerate() {
+            let time = if months_back == 0 {
+                (0, 15 + branch_index as u32 * 20)
+            } else {
+                (8 + branch_index as u32, 0)
+            };
+            let timestamp = fixture_timestamp(zone, cluster, time.0, time.1);
+            let color = fixture_color(color_index);
+            color_index += 1;
+            let basename = format!("{branch}_calendar{uuid}_{digest}.png");
+            let path = history.join(&basename);
+            image(&path, color);
+            let (title, apparitions) =
+                calendar_history_label(months_back == 0 && branch_index == 0, branch, uuid);
+            rows.push(calendar_publication(
+                uuid,
+                "APPEARED",
+                &title,
+                timestamp,
+                &basename,
+                Some(&path),
+                apparitions,
+            ));
+            manifest.push(json!({"uuid":format!("00000000-0000-4000-8000-{uuid:012}"),"title":title,"basename":basename,"rgb":color,"timestamp":timestamp,"prompt":branch}));
+            uuid += 1;
+        }
+        let date = month.with_day(24).unwrap();
+        let timestamp = fixture_timestamp(zone, date, 12, 0);
+        let color = fixture_color(color_index);
+        color_index += 1;
+        let basename = format!("exact_calendar{uuid}_{}.png", identities[0].1);
+        let path = history.join(&basename);
+        image(&path, color);
+        let title = format!("Calendar later-month event {uuid}");
+        rows.push(calendar_publication(
+            uuid,
+            "APPEARED",
+            &title,
+            timestamp,
+            &basename,
+            Some(&path),
+            json!([{"platformName":"historical-pixiv","state":"published_or_scheduled"}]),
+        ));
+        manifest.push(json!({"uuid":format!("00000000-0000-4000-8000-{uuid:012}"),"title":title,"basename":basename,"rgb":color,"timestamp":timestamp,"prompt":"exact"}));
+        uuid += 1;
+    }
+
+    (rows, manifest, color_index, uuid)
+}
+
+fn calendar_history_label(boundary: bool, branch: &str, uuid: u64) -> (String, Value) {
+    if boundary {
+        (
+            "Timezone boundary exact apparition".into(),
+            json!([
+                {"platformName":"deviantart","state":"published_or_scheduled","url":"https://example.test/calendar-actual"},
+                {"platformName":"historical-pixiv","state":"unpublished"}
+            ]),
+        )
+    } else {
+        (
+            format!("Calendar {branch} history {uuid}"),
+            json!([{"platformName":format!("history-{branch}"),"state":"published_or_scheduled"}]),
+        )
+    }
 }
 
 fn fixture_color(index: usize) -> [u8; 3] {
@@ -539,13 +553,6 @@ fn load_fixture_settings(dir: &Path) -> FixtureSettings {
         .expect("parse fixture settings")
 }
 
-fn write_executable(path: &Path, content: &str) {
-    fs::write(path, content).expect("write fixture executable");
-    let mut permissions = fs::metadata(path).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions).unwrap();
-}
-
 fn write_llmfit(path: &Path, settings_path: &Path) {
     let settings_path = serde_json::to_string(&settings_path.to_string_lossy().as_ref()).unwrap();
     write_executable(
@@ -640,6 +647,18 @@ fn read_request(stream: &TcpStream) -> std::io::Result<(String, String, Vec<u8>)
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut request_line = String::new();
     reader.read_line(&mut request_line)?;
+    let content_length = read_content_length(&mut reader)?;
+    let mut body = vec![0; content_length.min(32 * 1024 * 1024)];
+    reader.read_exact(&mut body)?;
+    let mut parts = request_line.split_whitespace();
+    Ok((
+        parts.next().unwrap_or_default().to_owned(),
+        parts.next().unwrap_or_default().to_owned(),
+        body,
+    ))
+}
+
+fn read_content_length(reader: &mut impl BufRead) -> std::io::Result<usize> {
     let mut content_length = 0usize;
     loop {
         let mut header = String::new();
@@ -653,14 +672,7 @@ fn read_request(stream: &TcpStream) -> std::io::Result<(String, String, Vec<u8>)
             content_length = value.trim().parse().unwrap_or(0);
         }
     }
-    let mut body = vec![0; content_length.min(32 * 1024 * 1024)];
-    reader.read_exact(&mut body)?;
-    let mut parts = request_line.split_whitespace();
-    Ok((
-        parts.next().unwrap_or_default().to_owned(),
-        parts.next().unwrap_or_default().to_owned(),
-        body,
-    ))
+    Ok(content_length)
 }
 
 fn metadata_content(sequence: usize) -> String {
@@ -680,6 +692,26 @@ fn fake_response(
 ) -> (u16, Value, String) {
     let parsed = serde_json::from_slice::<Value>(request_body).unwrap_or(Value::Null);
     let model = parsed.get("model").and_then(Value::as_str);
+    response_delay(path, settings);
+    let mut state = calls.lock().unwrap();
+    state.sequence += 1;
+    let sequence = state.sequence;
+    let failed = response_failed(path, &mut state);
+    let (status, response) = response_payload(method, path, settings, sequence, failed);
+    let record = serde_json::json!({
+        "sequence": sequence,
+        "method": method,
+        "path": path,
+        "model": model,
+        "body_bytes": request_body.len(),
+        "status": status
+    });
+    let log = serde_json::to_string(&record).unwrap();
+    drop(state);
+    (status, response, log)
+}
+
+fn response_delay(path: &str, settings: &FixtureSettings) {
     let delay = if path == "/chat/completions" {
         settings.openrouter_delay_ms
     } else if path == "/api/chat" {
@@ -690,10 +722,10 @@ fn fake_response(
     if delay > 0 {
         thread::sleep(Duration::from_millis(delay));
     }
-    let mut state = calls.lock().unwrap();
-    state.sequence += 1;
-    let sequence = state.sequence;
-    let failed = match path {
+}
+
+fn response_failed(path: &str, state: &mut FakeCallState) -> bool {
+    match path {
         "/chat/completions" if state.openrouter_failures > 0 => {
             state.openrouter_failures -= 1;
             true
@@ -703,8 +735,17 @@ fn fake_response(
             true
         }
         _ => false,
-    };
-    let (status, response) = match (method, path) {
+    }
+}
+
+fn response_payload(
+    method: &str,
+    path: &str,
+    settings: &FixtureSettings,
+    sequence: usize,
+    failed: bool,
+) -> (u16, Value) {
+    match (method, path) {
         ("GET", "/api/tags") if !settings.ollama_available => (
             503,
             serde_json::json!({"error":{"message":"fixture Ollama unavailable"}}),
@@ -722,39 +763,42 @@ fn fake_response(
                 "supported_parameters":["response_format"]
             }]}),
         ),
-        ("POST", "/chat/completions") if failed => (
-            503,
-            serde_json::json!({"error":{"message":"disposable OpenRouter fixture failure"}}),
-        ),
-        ("POST", "/chat/completions") => (
-            200,
-            serde_json::json!({"choices":[{"message":{"content":metadata_content(sequence)}}]}),
-        ),
+        ("POST", "/chat/completions") => openrouter_response(sequence, failed),
         ("POST", "/api/pull") => (200, serde_json::json!({"status":"success"})),
-        ("POST", "/api/chat") if failed => (
-            503,
-            serde_json::json!({"error":{"message":"disposable Ollama fixture failure"}}),
-        ),
-        ("POST", "/api/chat") => (
-            200,
-            serde_json::json!({"message":{"content":metadata_content(sequence)}}),
-        ),
+        ("POST", "/api/chat") => local_response(sequence, failed),
         _ => (
             404,
             serde_json::json!({"error":{"message":"unknown fixture route"}}),
         ),
-    };
-    let record = serde_json::json!({
-        "sequence": sequence,
-        "method": method,
-        "path": path,
-        "model": model,
-        "body_bytes": request_body.len(),
-        "status": status
-    });
-    let log = serde_json::to_string(&record).unwrap();
-    drop(state);
-    (status, response, log)
+    }
+}
+
+fn openrouter_response(sequence: usize, failed: bool) -> (u16, Value) {
+    if failed {
+        (
+            503,
+            json!({"error":{"message":"disposable OpenRouter fixture failure"}}),
+        )
+    } else {
+        (
+            200,
+            json!({"choices":[{"message":{"content":metadata_content(sequence)}}]}),
+        )
+    }
+}
+
+fn local_response(sequence: usize, failed: bool) -> (u16, Value) {
+    if failed {
+        (
+            503,
+            json!({"error":{"message":"disposable Ollama fixture failure"}}),
+        )
+    } else {
+        (
+            200,
+            json!({"message":{"content":metadata_content(sequence)}}),
+        )
+    }
 }
 
 fn respond(
@@ -906,6 +950,61 @@ mod tests {
                 std::mem::discriminant(&archive.resolve_path(&calendar_path).unwrap())
             );
         }
+    }
+
+    #[test]
+    fn executable_fixture_survives_a_concurrent_fork_before_exec() {
+        use std::os::{
+            fd::AsRawFd,
+            unix::{fs::PermissionsExt, net::UnixStream, process::CommandExt},
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("script.sh");
+        let (mut parent, child_gate) = UnixStream::pair().unwrap();
+        parent
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        child_gate
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut forked = None;
+        write_executable_observed(&script, "#!/bin/sh\nprintf fixture-ok\n", || {
+            forked = Some(thread::spawn(move || {
+                let fd = child_gate.as_raw_fd();
+                let mut command = Command::new("true");
+                // Only async-signal-safe syscalls run between fork and exec.
+                unsafe {
+                    command.pre_exec(move || {
+                        let mut byte = 1u8;
+                        if libc::write(fd, (&byte as *const u8).cast(), 1) != 1 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        if libc::read(fd, (&mut byte as *mut u8).cast(), 1) != 1 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        Ok(())
+                    });
+                }
+                let status = command.status().unwrap();
+                assert!(status.success());
+            }));
+            parent
+                .read_exact(&mut [0])
+                .expect("child reached pre-exec gate");
+        });
+        let result = Command::new(&script).output();
+        // Release the forked process even if script execution failed.
+        parent.write_all(&[1]).unwrap();
+        forked.unwrap().join().unwrap();
+        let output =
+            result.expect("no writable script descriptor may survive in a concurrent child");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"fixture-ok");
+        assert_eq!(
+            fs::metadata(script).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
     }
 
     #[test]
