@@ -10,6 +10,26 @@
       # devShell adds pytest; the only shipped Python runtime is the browser worker.
       devPython = pyInterp.withPackages (ps: pyPkgs ps ++ [ ps.pytest ]);
       src = ./.;
+      # Upstream's static release avoids a second Rust toolchain/flake dependency tree.
+      jscpd = pkgs.stdenvNoCC.mkDerivation rec {
+        pname = "jscpd";
+        version = "5.4.2";
+        src = pkgs.fetchurl {
+          url = "https://github.com/kucherenko/jscpd/releases/download/v${version}/jscpd-linux-x64-musl.tar.gz";
+          hash = "sha256-XximtwtCEHgvw8QBx4C6mUondySc1E2X1vpGD2//RXA=";
+        };
+        sourceRoot = ".";
+        dontBuild = true;
+        dontStrip = true;
+        installPhase = ''install -Dm755 jscpd "$out/bin/jscpd"'';
+        doInstallCheck = true;
+        installCheckPhase = ''"$out/bin/jscpd" --version'';
+        meta = {
+          mainProgram = "jscpd";
+          license = pkgs.lib.licenses.mit;
+          sourceProvenance = [ pkgs.lib.sourceTypes.binaryNativeCode ];
+        };
+      };
       browsers = pkgs.playwright-driver.browsers;
       # Keep the worker and static skill independent of the source-tree store path.
       runtimeAssets = pkgs.runCommand "publicator-runtime-assets" { } ''
@@ -104,12 +124,24 @@
       };
     in {
       packages.${system} = {
+        inherit jscpd;
         publicator-core = rustCli;
         publicator-desktop = rustDesktop;
         publicator-rust-cli = rustCli;
         publicator-rust-desktop = rustDesktop;
       };
       apps.${system} = {
+        quality = {
+          type = "app";
+          program = "${pkgs.writeShellApplication {
+            name = "quality";
+            runtimeInputs = [ pkgs.git pkgs.nix ];
+            text = ''
+              cd "$(git rev-parse --show-toplevel)"
+              exec nix develop --command bash scripts/quality.sh "$@"
+            '';
+          }}/bin/quality";
+        };
         # `ui` is the native Iced frontend; browser publishing remains a CLI worker.
         ui = {
           type = "app";
@@ -147,6 +179,7 @@
         packages = [
           devPython pkgs.git pkgs.imagemagick pkgs.playwright-driver.browsers
           pkgs.ollama pkgs.llmfit pkgs.rustc pkgs.cargo pkgs.rustfmt pkgs.clippy
+          pkgs.rust-code-analysis jscpd
           pkgs.pkg-config pkgs.openssl pkgs.pcre2 pkgs.jq pkgs.curl pkgs.xvfb pkgs.xvfb-run pkgs.x11vnc
           pkgs.novnc pkgs.python312Packages.websockify pkgs.xdotool pkgs.xwininfo
           pkgs.xprop pkgs.xdpyinfo pkgs.wmctrl pkgs.openbox pkgs.nodejs pkgs.playwright-test

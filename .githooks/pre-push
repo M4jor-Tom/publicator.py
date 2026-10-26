@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+# A working-tree check must not approve different commits or uncommitted fixes.
+check=false
+head=$(git rev-parse HEAD)
+while read -r _local_ref local_oid _remote_ref _remote_oid; do
+    [[ "$local_oid" =~ ^0+$ ]] && continue
+    if [[ "$local_oid" != "$head" ]]; then
+        echo "Quality checks require pushing the checked-out commit; check out the branch being pushed." >&2
+        exit 1
+    fi
+    check=true
+done
+"$check" || exit 0
+if [[ -n "$(git status --porcelain)" ]]; then
+    echo "Quality checks require a clean working tree; commit or stash changes before pushing." >&2
+    exit 1
+fi
+exec nix run .#quality
