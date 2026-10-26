@@ -34,10 +34,10 @@ class BrowserSession:
             raise RuntimeError("no valid DeviantArt session; run the real Firefox login first")
         if self.work.exists():
             shutil.rmtree(self.work)
-        shutil.copytree(self.source, self.work,
-                        ignore=shutil.ignore_patterns("cache2", "startupCache", "thumbnails", "*.log"))
-        for name in ("lock", ".parentlock", "parent.lock", "compatibility.ini"):
-            (self.work / name).unlink(missing_ok=True)
+        shutil.copytree(self.source, self.work, ignore=shutil.ignore_patterns(
+            "cache2", "startupCache", "thumbnails", "*.log",
+            "lock", ".parentlock", "parent.lock", "compatibility.ini",
+        ))
         self.playwright = None
         self.context = None
         try:

@@ -167,13 +167,14 @@ def test_browser_session_rejects_same_name_foreign_root_before_playwright(tmp_pa
     assert sorted(path.name for path in work.iterdir()) == ["sentinel"]
 
 
-def test_work_profile_copy_dereferences_symlinks(tmp_path, monkeypatch):
+def test_work_profile_copy_dereferences_symlinks_and_skips_stale_lock(tmp_path, monkeypatch):
     source = tmp_path / ".deviantart-login"
     work = tmp_path / ".deviantart-session"
     external = tmp_path / "outside.sqlite"
     source.mkdir()
     external.write_text("source")
     (source / "linked.sqlite").symlink_to(external)
+    (source / "lock").symlink_to(tmp_path / "missing-lock-target")
     # Copy behavior is exercised through session construction after Playwright is faked.
     import sys
     from types import ModuleType, SimpleNamespace
@@ -192,6 +193,7 @@ def test_work_profile_copy_dereferences_symlinks(tmp_path, monkeypatch):
         assert not copied.is_symlink()
         copied.write_text("work")
         assert external.read_text() == "source"
+        assert not (work / "lock").is_symlink()
     finally:
         session.close()
 
