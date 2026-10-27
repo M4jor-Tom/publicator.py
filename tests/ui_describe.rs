@@ -6,7 +6,7 @@ use iced::Element;
 use publicator::{
     application::Application,
     metadata::{Endpoints, MetadataClient, Source, VISION_MODELS, available_sources},
-    ui::{App, Message, UiOptions, describe},
+    ui::{App, Message, Tab, UiOptions, describe, style::Viewport},
 };
 use serde_json::json;
 use std::{sync::Arc, time::Duration};
@@ -22,6 +22,32 @@ async fn run_tasks(task: iced::Task<Message>) -> Vec<Message> {
         }
     }
     messages
+}
+
+/// Runs `task` and every task its messages chain, as the Iced runtime would.
+async fn settle(app: &mut App, task: iced::Task<Message>) {
+    use iced::futures::StreamExt;
+    use iced_runtime::Action;
+    let mut tasks = vec![task];
+    while let Some(task) = tasks.pop() {
+        let Some(mut actions) = iced_runtime::task::into_stream(task) else {
+            continue;
+        };
+        while let Some(action) = actions.next().await {
+            if let Action::Output(message) = action {
+                tasks.push(app.update(message));
+            }
+        }
+    }
+}
+
+/// A one-column list viewport, so each card is its own row.
+fn column_at(offset: f32, height: f32) -> Viewport {
+    Viewport {
+        offset,
+        width: 300.0,
+        height,
+    }
 }
 
 async fn run_task(task: iced::Task<Message>) -> Message {
@@ -787,6 +813,7 @@ async fn previews_are_requested_for_initial_visible_cards_then_later_scrolled_ca
         },
     );
     let _ = app.update(Message::LoadFinished(Ok(f.store.read().unwrap())));
+    let _ = app.update(Message::Viewport(Tab::Pick, column_at(0.0, 700.0)));
     let candidates =
         publicator::ui::pick::search_candidates(&f.store, 25, &["images".into()]).unwrap();
     assert_eq!(candidates.len(), 10);
@@ -794,30 +821,18 @@ async fn previews_are_requested_for_initial_visible_cards_then_later_scrolled_ca
         request_id: 0,
         result: Ok(candidates),
     });
-    let messages = run_tasks(task).await;
-    for message in messages {
-        let _ = app.update(message);
-    }
+    settle(&mut app, task).await;
     let cache = f.path(".thumbs");
     let initial = std::fs::read_dir(&cache).unwrap().count();
     assert!(initial < 10);
-    let task = app.update(Message::PreviewViewport {
-        offset: 2300.0,
-        height: 700.0,
-    });
-    let messages = run_tasks(task).await;
-    for message in messages {
-        let _ = app.update(message);
-    }
+    let task = app.update(Message::Viewport(Tab::Pick, column_at(2800.0, 700.0)));
+    settle(&mut app, task).await;
     let after_scroll = std::fs::read_dir(&cache).unwrap().count();
     assert!(after_scroll > initial);
     assert!(
-        run_tasks(app.update(Message::PreviewViewport {
-            offset: 2300.0,
-            height: 700.0
-        }))
-        .await
-        .is_empty()
+        run_tasks(app.update(Message::Viewport(Tab::Pick, column_at(2800.0, 700.0))))
+            .await
+            .is_empty()
     );
     assert_eq!(std::fs::read_dir(&cache).unwrap().count(), after_scroll);
 }
@@ -840,34 +855,19 @@ async fn describe_previews_share_lazy_scroll_boundary() {
     f.write(json!(rows));
     assert_eq!(f.store.read().unwrap().len(), 10);
     let (mut app, _) = fixture_app(&f, "http://127.0.0.1:1".into());
-    let messages = run_tasks(app.update(Message::DescribeViewport {
-        offset: 0.0,
-        height: 600.0,
-    }))
-    .await;
-    for message in messages {
-        let _ = app.update(message);
-    }
+    let task = app.update(Message::Viewport(Tab::Describe, column_at(0.0, 600.0)));
+    settle(&mut app, task).await;
     let cache = f.path(".thumbs");
     let initial = std::fs::read_dir(&cache).unwrap().count();
     assert!(initial < 10);
-    let messages = run_tasks(app.update(Message::DescribeViewport {
-        offset: 2400.0,
-        height: 600.0,
-    }))
-    .await;
-    for message in messages {
-        let _ = app.update(message);
-    }
+    let task = app.update(Message::Viewport(Tab::Describe, column_at(2400.0, 600.0)));
+    settle(&mut app, task).await;
     let after_scroll = std::fs::read_dir(&cache).unwrap().count();
     assert!(after_scroll > initial);
     assert!(
-        run_tasks(app.update(Message::DescribeViewport {
-            offset: 2400.0,
-            height: 600.0,
-        }))
-        .await
-        .is_empty()
+        run_tasks(app.update(Message::Viewport(Tab::Describe, column_at(2400.0, 600.0))))
+            .await
+            .is_empty()
     );
     assert_eq!(std::fs::read_dir(cache).unwrap().count(), after_scroll);
 }

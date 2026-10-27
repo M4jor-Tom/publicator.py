@@ -1,4 +1,4 @@
-use super::{App, Message};
+use super::{App, Message, Tab, style};
 use crate::{
     model::{Phase, phase},
     publish_journal::{AttemptState, AttemptStatus, ReconcileOutcome},
@@ -6,11 +6,13 @@ use crate::{
 };
 use iced::{
     Element, Length, Task,
-    widget::{button, checkbox, column, row, scrollable, text, text_input},
+    widget::{button, checkbox, column, container, row, scrollable, table, text, text_input},
 };
 use serde_json::Value;
 
 const SCROLL_ID: &str = "publish-publications";
+/// Estimated table row height, for lazy thumbnails.
+pub(super) const ROW_HEIGHT: f32 = 200.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SelectionState {
@@ -32,8 +34,8 @@ pub fn selection_state(selected: &[bool]) -> SelectionState {
 
 pub fn view(state: &App) -> Element<'_, Message> {
     let mut content = column![
-        text("Publish"),
-        text("Cell keyboard: F6 enter/exit · Tab/Shift+Tab move · Space toggle · Esc exit"),
+        text("Cell keyboard: F6 enter/exit · Tab/Shift+Tab move · Space toggle · Esc exit")
+            .color(style::MUTED),
     ]
     .spacing(10);
     if state.publish_keyboard_mode {
@@ -45,22 +47,63 @@ pub fn view(state: &App) -> Element<'_, Message> {
         content = content.push(text(focus));
     }
     if let Some(error) = &state.publish_lock_error {
-        content = content.push(text(format!("Publish status unavailable: {error}")));
+        content =
+            content.push(text(format!("Publish status unavailable: {error}")).color(style::ERROR));
     }
 
-    let mut selections = Vec::new();
-    if let Some(rows) = &state.publications {
-        for publication in ordered_rows(rows, state.revealed_publication()) {
-            content = publication_cell(state, publication, content, &mut selections);
-        }
-    }
+    let rows: Vec<&Value> = state
+        .publications
+        .as_deref()
+        .map(|rows| ordered_rows(rows, state.revealed_publication()))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|publication| !matches!(delivery(publication), Delivery::Other))
+        .collect();
+    let selections: Vec<bool> = rows
+        .iter()
+        .filter_map(|publication| match delivery(publication) {
+            Delivery::Pending(da) => Some(da.is_some()),
+            _ => None,
+        })
+        .collect();
+    let mut list = column![
+        container(
+            table(
+                [
+                    table::column(text("Publication").font(style::BOLD), |publication| {
+                        summary(state, publication)
+                    })
+                    .width(Length::Fill),
+                    table::column(text("DeviantArt").font(style::BOLD), |publication| {
+                        platform_cell(state, publication)
+                    })
+                    .width(Length::Fill),
+                ],
+                rows,
+            )
+            .width(Length::Fill)
+            .padding(12)
+            .separator(1),
+        )
+        .style(style::cell)
+    ]
+    .spacing(12);
     for attempt in state.unresolved_publish_attempts() {
-        content = content.push(attempt_view(state, attempt));
+        list = list.push(
+            container(attempt_view(state, attempt))
+                .padding(12)
+                .width(Length::Fill)
+                .style(style::notice),
+        );
     }
     content = publish_actions(state, content, &selections);
-    scrollable(content)
-        .id(SCROLL_ID)
-        .height(Length::Fill)
+    content
+        .push(
+            scrollable(list)
+                .id(SCROLL_ID)
+                .height(Length::Fill)
+                .on_scroll(|viewport| Message::Viewport(Tab::Publish, viewport.into())),
+        )
         .into()
 }
 
@@ -97,7 +140,8 @@ fn publish_actions<'a>(
         content = content.push(text(result));
     }
     if let Some(diagnostic) = &state.publish_diagnostic {
-        content = content.push(text(format!("Worker diagnostic (stderr): {diagnostic}")));
+        content = content
+            .push(text(format!("Worker diagnostic (stderr): {diagnostic}")).color(style::ERROR));
     }
     content
 }
@@ -108,48 +152,69 @@ fn publish_disabled(state: &App, selections: &[bool]) -> bool {
         || !selections.iter().any(|selected| *selected)
 }
 
-fn publication_cell<'a>(
-    state: &'a App,
-    publication: &'a Value,
-    mut content: iced::widget::Column<'a, Message>,
-    selections: &mut Vec<bool>,
-) -> iced::widget::Column<'a, Message> {
+enum Delivery<'a> {
+    Locked,
+    Pending(Option<&'a Value>),
+    Other,
+}
+
+/// The DeviantArt apparition's delivery state; other states have no publish cell.
+fn delivery(publication: &Value) -> Delivery<'_> {
+    let da = publication
+        .get("apparitions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|apparition| {
+            apparition.get("platformName").and_then(Value::as_str) == Some("deviantart")
+        });
+    match da.and_then(|apparition| apparition.get("state").and_then(Value::as_str)) {
+        Some("published_or_scheduled") => Delivery::Locked,
+        Some("unpublished") | None => Delivery::Pending(da),
+        Some(_) => Delivery::Other,
+    }
+}
+
+fn summary<'a>(state: &'a App, publication: &'a Value) -> Element<'a, Message> {
     let uuid = publication
         .get("uuid")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let apparitions = publication
-        .get("apparitions")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
+    let title = publication
+        .get("title")
+        .and_then(Value::as_str)
         .unwrap_or_default();
-    let da = apparitions.iter().find(|apparition| {
-        apparition.get("platformName").and_then(Value::as_str) == Some("deviantart")
-    });
+    column![
+        style::art(state.row_previews.get(uuid), false, 90.0),
+        text(title).font(style::BOLD),
+        text(super::schedule::date_label(state, publication)).font(style::BOLD),
+    ]
+    .spacing(4)
+    .into()
+}
+
+fn platform_cell<'a>(state: &'a App, publication: &'a Value) -> Element<'a, Message> {
+    let uuid = publication
+        .get("uuid")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let label = format!("{uuid} — DeviantArt");
+    let mut cell = column![].spacing(6);
     if state.publish_keyboard_mode && state.publish_keyboard_focus.as_deref() == Some(uuid) {
-        content = content.push(text(format!("Keyboard focus → {label}")));
+        cell = cell.push(text(format!("Keyboard focus → {label}")).color(style::ACCENT));
     }
     if state.revealed_publication() == Some(uuid) {
-        content = content.push(text(format!("Opened from Calendar — {label}")));
+        cell = cell.push(style::warning(format!("Opened from Calendar — {label}")));
     }
-    let delivery_state = da.and_then(|apparition| apparition.get("state").and_then(Value::as_str));
     let outcome = state.publish_cell_outcome(uuid);
-    if delivery_state == Some("published_or_scheduled") {
-        content = content.push(text(format!(
-            "{label} — {}",
-            outcome_text(outcome.as_ref()).unwrap_or_else(|| "Published (locked)".into())
-        )));
-        return content;
-    }
-    if !matches!(delivery_state, Some("unpublished") | None) {
-        return content;
-    }
+    let Delivery::Pending(da) = delivery(publication) else {
+        let locked = outcome_text(outcome.as_ref()).unwrap_or_else(|| "Published (locked)".into());
+        return cell.push(checkbox(true).label(locked)).into();
+    };
     let checked = da.is_some();
-    selections.push(checked);
     let key = format!("{uuid}:deviantart");
-    let selection = checkbox(checked).label(label.clone());
-    content = content.push(if state.selection_locked(Some(uuid)) {
+    let selection = checkbox(checked).label(if checked { "Selected" } else { "Select" });
+    cell = cell.push(if state.selection_locked(Some(uuid)) {
         selection
     } else {
         selection.on_toggle(move |selected| Message::SelectCell {
@@ -158,16 +223,12 @@ fn publication_cell<'a>(
         })
     });
     if let Some(outcome) = &outcome {
-        content = content.push(text(format!(
-            "{} — {}",
-            label,
-            outcome_text(Some(outcome)).unwrap()
-        )));
+        cell = cell.push(text(outcome_text(Some(outcome)).unwrap()));
     }
     if let Some(apparition) = da {
-        content = content.push(options_view(state, uuid, apparition));
+        cell = cell.push(options_view(state, uuid, apparition));
     }
-    content
+    cell.into()
 }
 
 pub(super) fn ordered_rows<'a>(rows: &'a [Value], target: Option<&str>) -> Vec<&'a Value> {
@@ -212,12 +273,12 @@ fn attempt_view<'a>(state: &'a App, attempt: &'a AttemptStatus) -> Element<'a, M
         .map(String::as_str)
         .unwrap_or("");
     panel = panel.push(
-        text_input("Actual HTTP(S) URL (optional)", value).on_input(move |value| {
-            Message::ReconcileUrlChanged {
+        text_input("Actual HTTP(S) URL (optional)", value)
+            .on_input(move |value| Message::ReconcileUrlChanged {
                 attempt_id: attempt_id.clone(),
                 value,
-            }
-        }),
+            })
+            .style(style::input),
     );
     let actual_url = if value.trim().is_empty() {
         None
@@ -330,7 +391,7 @@ fn options_view<'a>(state: &'a App, uuid: &'a str, apparition: &'a Value) -> Ele
         .unwrap_or_default();
     let locked = state.options_locked(uuid);
     let mut panel = column![text("DeviantArt options")].spacing(4);
-    let price_input = text_input("Price (blank clears/free)", &price);
+    let price_input = text_input("Price (blank clears/free)", &price).style(style::input);
     panel = panel.push(if locked {
         price_input
     } else {

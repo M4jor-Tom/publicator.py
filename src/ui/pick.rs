@@ -1,12 +1,12 @@
-use super::{App, Message};
+use super::{App, Message, Tab, style};
 use crate::{
     application::Application,
     images::{self, Candidate, Search},
     prompts,
 };
 use iced::{
-    Element, Length, Task,
-    widget::{button, checkbox, column, row, scrollable, text, text_input},
+    Alignment, Element, Length, Task,
+    widget::{button, checkbox, column, container, pick_list, row, scrollable, text, text_input},
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -84,7 +84,17 @@ pub fn pick_candidate(
     application.mutate(None, |store| crate::workflow::pick(store, candidate, now))
 }
 
-pub(super) fn preview_tasks(app: &mut App, start: usize, end: usize) -> Task<Message> {
+const LIMITS: [usize; 5] = [0, 25, 50, 75, 100];
+const ROW_HEIGHT: f32 = 380.0;
+
+pub(super) fn preview_tasks(app: &mut App) -> Task<Message> {
+    let viewport = app.viewport(Tab::Pick);
+    let visible = style::visible_range(
+        viewport,
+        style::columns(viewport.width),
+        ROW_HEIGHT,
+        app.candidates.len(),
+    );
     let cache = app.application.store().paths().data_dir.join(".thumbs");
     let capacity = 4usize.saturating_sub(
         app.previews
@@ -95,8 +105,8 @@ pub(super) fn preview_tasks(app: &mut App, start: usize, end: usize) -> Task<Mes
     let candidates: Vec<_> = app
         .candidates
         .iter()
-        .skip(start)
-        .take(end.saturating_sub(start))
+        .skip(visible.start)
+        .take(visible.len())
         .filter(|candidate| !app.previews.contains_key(&candidate.path))
         .take(capacity)
         .cloned()
@@ -190,15 +200,16 @@ fn exact_prompt_heading_visible(lineage: &str, exact: &[Candidate]) -> bool {
 }
 
 pub fn view(state: &App) -> Element<'_, Message> {
-    let mut controls = row![
-        text("Limit"),
-        button("0").on_press(Message::SearchLimit(0)),
-        button("25").on_press(Message::SearchLimit(25)),
-        button("50").on_press(Message::SearchLimit(50)),
-        button("75").on_press(Message::SearchLimit(75)),
-        button("100").on_press(Message::SearchLimit(100))
+    let mut controls = column![
+        row![
+            text("Candidate limit"),
+            pick_list(LIMITS, Some(state.search_limit), Message::SearchLimit).style(style::select),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
+        text("Search paths"),
     ]
-    .spacing(6);
+    .spacing(8);
     for configured in &state.application.store().config().publicable {
         let selected = state.search_paths.contains(configured);
         let path = configured.clone();
@@ -208,114 +219,119 @@ pub fn view(state: &App) -> Element<'_, Message> {
                 .on_toggle(move |_| Message::SearchPath(path.clone())),
         );
     }
-    let mut cards = candidate_cards(state);
-    if let Some(candidate) = &state.pending_delete {
-        cards = cards.push(
-            row![
-                text(format!("Delete {}?", candidate.path.display())),
-                button("Confirm delete").on_press(Message::ConfirmDelete),
-                button("Cancel").on_press(Message::CancelDelete)
-            ]
-            .spacing(8),
-        );
-    }
-    let mut content = column![controls].spacing(12);
     if state.prompt_archive.is_some() {
-        content = content
+        controls = controls
             .push(text("Exact prompt text (optional)"))
             .push(
                 text_input("Search archived prompt text", &state.prompt_query)
-                    .on_input(Message::PromptQueryChanged),
+                    .on_input(Message::PromptQueryChanged)
+                    .style(style::input),
             )
             .push(text(
                 "Prompt lineage path (optional; includes possible matches)",
             ))
             .push(
                 text_input("e.g. prompts/lineage.txt", &state.prompt_lineage)
-                    .on_input(Message::PromptLineageChanged),
+                    .on_input(Message::PromptLineageChanged)
+                    .style(style::input),
             );
     }
-    content
-        .push(button("Search").on_press(Message::Search))
-        .push(
-            scrollable(cards)
-                .height(Length::Fill)
-                .on_scroll(|viewport| Message::PreviewViewport {
-                    offset: viewport.absolute_offset().y,
-                    height: viewport.bounds().height,
-                }),
-        )
+    controls = controls.push(button("Search").on_press(Message::Search));
+    let mut content = column![].spacing(16);
+    if let Some(candidate) = &state.pending_delete {
+        content = content.push(
+            container(
+                row![
+                    text(format!("Delete {}?", candidate.path.display())),
+                    button("Confirm delete").on_press(Message::ConfirmDelete),
+                    button("Cancel").on_press(Message::CancelDelete)
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            )
+            .padding(8)
+            .width(Length::Fill)
+            .style(style::notice),
+        );
+    }
+    content = candidate_groups(state, content, controls.into());
+    scrollable(content)
+        .height(Length::Fill)
+        .on_scroll(|viewport| Message::Viewport(Tab::Pick, viewport.into()))
         .into()
 }
 
-fn candidate_cards(state: &App) -> iced::widget::Column<'_, Message> {
-    let mut cards = column![].spacing(10);
-    if let Some(matches) = &state.prompt_search {
-        if exact_prompt_heading_visible(&state.prompt_lineage, &matches.exact) {
-            cards = cards.push(text("Exact archived prompt matches"));
-        }
-        for candidate in &matches.exact {
-            cards = cards.push(candidate_card(state, candidate));
-        }
-        if !matches.maybe.is_empty() {
-            cards = cards.push(text(
-                "Possible lineage matches — prompt may be from this archive",
-            ));
-            for candidate in &matches.maybe {
-                cards = cards.push(candidate_card(state, candidate));
-            }
-        }
-        if matches.truncated {
-            cards = cards.push(text(
-                "More matches exist; narrow the prompt text or lineage",
-            ));
-        }
-    } else {
-        for candidate in &state.candidates {
-            cards = cards.push(candidate_card(state, candidate));
-        }
+/// The search controls lead the first grid, as the web page's first grid cell.
+// ponytail: lineage groups are separate grids; visible_range treats them as one list.
+fn candidate_groups<'a>(
+    state: &'a App,
+    mut content: iced::widget::Column<'a, Message>,
+    controls: Element<'a, Message>,
+) -> iced::widget::Column<'a, Message> {
+    let banner = |label: &'static str| {
+        container(text(label))
+            .padding(6)
+            .width(Length::Fill)
+            .style(style::notice)
+    };
+    let Some(matches) = &state.prompt_search else {
+        let mut cards = vec![controls];
+        cards.extend(state.candidates.iter().map(|c| candidate_card(state, c)));
+        return content.push(style::cards(cards));
+    };
+    if exact_prompt_heading_visible(&state.prompt_lineage, &matches.exact) {
+        content = content.push(banner("Exact archived prompt matches"));
     }
-    cards
+    let mut cards = vec![controls];
+    cards.extend(matches.exact.iter().map(|c| candidate_card(state, c)));
+    content = content.push(style::cards(cards));
+    if !matches.maybe.is_empty() {
+        content = content
+            .push(banner(
+                "Possible lineage matches — prompt may be from this archive",
+            ))
+            .push(style::cards(
+                matches
+                    .maybe
+                    .iter()
+                    .map(|c| candidate_card(state, c))
+                    .collect(),
+            ));
+    }
+    if matches.truncated {
+        content = content.push(style::warning(
+            "More matches exist; narrow the prompt text or lineage",
+        ));
+    }
+    content
 }
 
 fn candidate_card<'a>(state: &'a App, candidate: &'a Candidate) -> Element<'a, Message> {
-    let candidate_pick = candidate.clone();
-    let candidate_delete = candidate.clone();
-    let preview: Element<'_, Message> = match state.previews.get(&candidate.path) {
-        None | Some(None) => text("Loading preview…").into(),
-        Some(Some(Ok(path))) => iced::widget::image(iced::widget::image::Handle::from_path(path))
-            .width(Length::Fixed(180.0))
-            .height(Length::Fixed(180.0))
-            .into(),
-        Some(Some(Err(_error))) if !candidate.path.exists() => text("Artwork missing").into(),
-        Some(Some(Err(error))) => text(format!("Preview unavailable: {error}")).into(),
-    };
+    let preview = state.previews.get(&candidate.path);
+    let missing = matches!(preview, Some(Some(Err(_)))) && !candidate.path.exists();
     let mut content = column![
-        row![
-            preview,
-            column![
-                text(
-                    candidate
-                        .path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("Artwork")
-                ),
-                button("Pick").on_press(Message::Pick(candidate_pick)),
-                button("Delete…").on_press(Message::AskDelete(candidate_delete)),
-            ]
-            .spacing(6),
-        ]
-        .spacing(10)
+        style::art(preview, missing, 240.0),
+        text(
+            candidate
+                .path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("Artwork")
+        ),
     ]
-    .spacing(6);
+    .spacing(8);
     if state.prompt_archive.is_some() || state.prompt_archive_error.is_some() {
         content = content.push(match state.prompt_match(&candidate.path) {
             Some(match_) => super::prompt::view(match_),
-            None => text("Resolving prompt…").into(),
+            None => text("Resolving prompt…").color(style::MUTED).into(),
         });
     }
-    content.into()
+    style::card(
+        content
+            .push(style::wide("Pick").on_press(Message::Pick(candidate.clone())))
+            .push(style::wide("Delete…").on_press(Message::AskDelete(candidate.clone()))),
+    )
+    .into()
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-use super::{App, Message};
+use super::{App, Message, style};
 use crate::{
     calendar::{self, Event},
     images,
@@ -10,6 +10,8 @@ use iced::{
     Element, Length, Task,
     widget::{button, column, container, row, scrollable, text},
 };
+
+const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
@@ -18,8 +20,6 @@ use std::{
 };
 
 const SCROLL_ID: &str = "calendar-events";
-// ponytail: 280px/event estimates visible cells; use widget bounds if tall day stacks miss previews.
-const EVENT_HEIGHT: f32 = 280.0;
 
 #[derive(Clone, Debug)]
 pub struct Preparation {
@@ -29,10 +29,11 @@ pub struct Preparation {
 
 pub fn view(state: &App) -> Element<'_, Message> {
     let rows = state.publications.as_deref().unwrap_or_default();
-    let mut content = column![text("Calendar")].spacing(8);
+    let mut content = column![].spacing(8).max_width(1100);
     if let Some(error) = &state.calendar_error {
-        content = content.push(text(format!("Calendar unavailable: {error}")));
-        return content.into();
+        return text(format!("Calendar unavailable: {error}"))
+            .color(style::ERROR)
+            .into();
     }
     let events = match calendar::timeline(rows) {
         Ok(events) => events,
@@ -52,18 +53,13 @@ pub fn view(state: &App) -> Element<'_, Message> {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
-    let current_month = DateTime::<Utc>::from_timestamp(now, 0).map(|instant| {
-        instant
-            .with_timezone(&zone)
-            .date_naive()
-            .with_day(1)
-            .unwrap()
-    });
-    content = content.push(text(format!("All apparition dates — {}", zone)));
+    let today = DateTime::<Utc>::from_timestamp(now, 0)
+        .map(|instant| instant.with_timezone(&zone).date_naive());
+    content = content.push(text(format!("All apparition dates — {zone}")).color(style::MUTED));
     match calendar::months(&events, zone, now) {
         Ok(months) => {
             for month in months {
-                content = content.push(month_view(state, &events, month, current_month, zone));
+                content = content.push(month_view(state, &events, month, today, now, zone));
             }
         }
         Err(error) => content = content.push(text(error.to_string())),
@@ -71,10 +67,6 @@ pub fn view(state: &App) -> Element<'_, Message> {
     scrollable(content)
         .id(SCROLL_ID)
         .height(Length::Fill)
-        .on_scroll(|viewport| Message::CalendarViewport {
-            offset: viewport.absolute_offset().y,
-            height: viewport.bounds().height,
-        })
         .into()
 }
 
@@ -82,43 +74,82 @@ fn month_view<'a>(
     state: &'a App,
     events: &[Event],
     month: NaiveDate,
-    current_month: Option<NaiveDate>,
+    today: Option<NaiveDate>,
+    now: i64,
     zone: chrono_tz::Tz,
 ) -> Element<'a, Message> {
-    let title = if Some(month) == current_month {
+    let current = today.and_then(|today| today.with_day(1)) == Some(month);
+    let title = if current {
         format!("{} — current month", month.format("%B %Y"))
     } else {
         month.format("%B %Y").to_string()
     };
     let days = days_in_month(month);
     let first_weekday = month.weekday().num_days_from_monday() as usize;
-    let mut section = column![text(title)].spacing(4);
-    let mut week = row![].spacing(4);
+    let blank = || {
+        container(text(""))
+            .width(Length::Fill)
+            .height(Length::Fixed(78.0))
+            .style(style::other_day)
+    };
+    let section = column![
+        text(title)
+            .font(style::BOLD)
+            .color(if current { style::TODAY } else { style::MUTED }),
+        row(WEEKDAYS.map(|day| text(day)
+            .size(12)
+            .color(style::MUTED)
+            .center()
+            .width(Length::Fill)
+            .into())),
+    ]
+    .spacing(4);
+    let mut weeks = column![];
+    let mut week = row![];
     for _ in 0..first_weekday {
-        week = week.push(container(text("")).width(Length::Fill));
+        week = week.push(blank());
     }
     for day in 1..=days {
         let date = month.with_day(day).unwrap();
-        let mut cell = column![text(day.to_string())].spacing(4);
+        let mut cell =
+            column![text(day.to_string()).size(11).color(iced::color!(0x777777))].spacing(2);
+        let mut expanded = false;
         for event in events
             .iter()
             .filter(|event| event_date(event, zone) == Some(date))
         {
-            cell = cell.push(event_view(state, event, zone));
+            expanded |= state.calendar_expanded.contains(&event_key(event));
+            cell = cell.push(event_view(state, event, now, zone));
         }
-        week = week.push(container(cell).width(Length::Fill).padding(4));
+        // ponytail: fixed day height like the web's 78px; expanded events stretch only their own cell.
+        let height = if expanded {
+            Length::Shrink
+        } else {
+            Length::Fixed(78.0)
+        };
+        week = week.push(
+            container(cell)
+                .width(Length::Fill)
+                .height(height)
+                .padding(2)
+                .style(style::day(Some(date) == today)),
+        );
         if (first_weekday + day as usize).is_multiple_of(7) {
-            section = section.push(week);
-            week = row![].spacing(4);
+            weeks = weeks.push(week);
+            week = row![];
         }
     }
     if !(first_weekday + days as usize).is_multiple_of(7) {
         for _ in (first_weekday + days as usize) % 7..7 {
-            week = week.push(container(text("")).width(Length::Fill));
+            week = week.push(blank());
         }
-        section = section.push(week);
+        weeks = weeks.push(week);
     }
-    section.into()
+    section.push(weeks).into()
+}
+
+fn event_key(event: &Event) -> String {
+    format!("{}:{}", event.uuid, event.apparition_index)
 }
 
 fn days_in_month(month: NaiveDate) -> u32 {
@@ -150,16 +181,35 @@ fn event_date(event: &Event, zone: chrono_tz::Tz) -> Option<NaiveDate> {
         .map(|instant| instant.with_timezone(&zone).date_naive())
 }
 
-fn event_view<'a>(state: &'a App, event: &Event, zone: chrono_tz::Tz) -> Element<'a, Message> {
+fn event_view<'a>(
+    state: &'a App,
+    event: &Event,
+    now: i64,
+    zone: chrono_tz::Tz,
+) -> Element<'a, Message> {
     let local_time = DateTime::<Utc>::from_timestamp(event.timestamp, 0)
         .map(|instant| instant.with_timezone(&zone).format("%H:%M").to_string())
         .unwrap_or_else(|| "time unavailable".into());
-    let mut item = column![text(format!(
-        "{local_time} — {} — {}",
-        event.platform, event.title
-    ))]
+    let key = event_key(event);
+    let expanded = state.calendar_expanded.contains(&key);
+    let chip = button(text(format!("{local_time} {}", event.title)).size(11))
+        .padding([2, 4])
+        .width(Length::Fill)
+        .style(style::event(event.timestamp >= now))
+        .on_press(Message::ToggleCalendarEvent(key));
+    if !expanded {
+        return chip.into();
+    }
+    let mut item = column![
+        chip,
+        text(format!(
+            "{local_time} — {} — {}",
+            event.platform, event.title
+        ))
+        .size(12),
+        artwork_view(state, event),
+    ]
     .spacing(4);
-    item = item.push(artwork_view(state, event));
     if let Some(prompt) = event_prompt_view(state, event) {
         item = item.push(prompt);
     }
@@ -168,12 +218,15 @@ fn event_view<'a>(state: &'a App, event: &Event, zone: chrono_tz::Tz) -> Element
         .as_deref()
         .filter(|url| actual_http_url(url).is_ok())
     {
-        item =
-            item.push(button("Open actual URL").on_press(Message::OpenActualUrl(url.to_owned())));
+        item = item.push(
+            button(text("Open actual URL").size(12))
+                .on_press(Message::OpenActualUrl(url.to_owned())),
+        );
     }
     if state.publication_exists(&event.uuid) {
         item = item.push(
-            button("Open publication").on_press(Message::JumpToPublication(event.uuid.clone())),
+            button(text("Open publication").size(12))
+                .on_press(Message::JumpToPublication(event.uuid.clone())),
         );
     }
     item.into()
@@ -253,7 +306,8 @@ pub(super) fn prepare_task(state: &mut App) -> Task<Message> {
     )
 }
 
-pub(super) fn preview_tasks(state: &mut App, offset: f32, height: f32) -> Task<Message> {
+/// Thumbnails for expanded events; collapsed chips show none.
+pub(super) fn preview_tasks(state: &mut App) -> Task<Message> {
     let Some(rows) = state.publications.as_deref() else {
         return Task::none();
     };
@@ -267,13 +321,10 @@ pub(super) fn preview_tasks(state: &mut App, offset: f32, height: f32) -> Task<M
             .filter(|result| result.is_none())
             .count(),
     );
-    let start = (offset.max(0.0) / EVENT_HEIGHT) as usize;
-    let end = ((offset.max(0.0) + height.max(0.0)) / EVENT_HEIGHT).ceil() as usize + 2;
     let mut seen = HashSet::new();
     let records = events
         .iter()
-        .skip(start)
-        .take(end.saturating_sub(start))
+        .filter(|event| state.calendar_expanded.contains(&event_key(event)))
         .filter_map(|event| {
             let basename = event.basename.as_ref()?;
             let source = state.calendar_artwork.get(basename)?.as_ref()?;

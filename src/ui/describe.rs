@@ -1,35 +1,59 @@
-use super::{App, Message};
+use super::{App, Message, Tab, style};
 use crate::{
     metadata::{Source, VISION_MODELS},
     model::{GENERATE_MARKER, Phase, phase},
 };
 use iced::{
     Element, Length, Task,
-    widget::{button, column, row, scrollable, text, text_input},
+    widget::{button, column, container, row, scrollable, text, text_input},
 };
 use serde_json::Value;
 
 const SCROLL_ID: &str = "describe-publications";
 
-pub(super) fn preview_tasks(state: &mut App, start: usize, end: usize) -> Task<Message> {
+const ROW_HEIGHT: f32 = 560.0;
+
+/// Publication thumbnails for the visible rows of the Schedule, Describe or Publish list;
+/// other tabs have no publication rows.
+pub(super) fn preview_tasks(state: &mut App, tab: Tab) -> Task<Message> {
     let Some(rows) = state.publications.as_ref() else {
         return Task::none();
     };
+    let target = state.revealed_publication();
+    let viewport = state.viewport(tab);
+    let (rows, columns, row_height) = match tab {
+        Tab::Schedule => (
+            super::schedule::ordered_rows(rows, target),
+            style::columns(viewport.width),
+            super::schedule::ROW_HEIGHT,
+        ),
+        Tab::Publish => (
+            super::publish::ordered_rows(rows, target),
+            1,
+            super::publish::ROW_HEIGHT,
+        ),
+        Tab::Describe => (
+            ordered_rows(rows, target),
+            style::columns(viewport.width),
+            ROW_HEIGHT,
+        ),
+        Tab::Pick | Tab::Calendar => return Task::none(),
+    };
+    let visible = style::visible_range(viewport, columns, row_height, rows.len());
     let capacity = 4usize.saturating_sub(
         state
-            .describe_previews
+            .row_previews
             .values()
             .filter(|result| result.is_none())
             .count(),
     );
-    let records: Vec<_> = ordered_rows(rows, state.revealed_publication())
+    let records: Vec<_> = rows
         .into_iter()
-        .filter(|row| phase(row).ok() == Some(Phase::Scheduled))
-        .skip(start)
-        .take(end.saturating_sub(start))
+        .skip(visible.start)
+        .take(visible.len())
         .filter_map(|row| {
             let uuid = row.get("uuid")?.as_str()?.to_owned();
-            if state.describe_previews.contains_key(&uuid) {
+            if state.row_previews.contains_key(&uuid) {
                 return None;
             }
             let (basename, sha) = preview_identity(row)?;
@@ -41,7 +65,7 @@ pub(super) fn preview_tasks(state: &mut App, start: usize, end: usize) -> Task<M
     let cache = root.join(".thumbs");
     let mut tasks = Vec::new();
     for (uuid, basename, sha) in records {
-        state.describe_previews.insert(uuid.clone(), None);
+        state.row_previews.insert(uuid.clone(), None);
         let task_uuid = uuid.clone();
         let root = root.clone();
         let cache = cache.clone();
@@ -57,7 +81,7 @@ pub(super) fn preview_tasks(state: &mut App, start: usize, end: usize) -> Task<M
                 .map_err(|error| error.to_string())?;
                 crate::ui::preview::prepare(source, sha, cache).await
             },
-            move |result| Message::DescribePreviewFinished {
+            move |result| Message::RowPreviewFinished {
                 uuid: task_uuid,
                 result,
             },
@@ -78,64 +102,65 @@ fn preview_identity(row: &Value) -> Option<(String, String)> {
 }
 
 pub fn view(state: &App) -> Element<'_, Message> {
-    let mut source_controls = row![text("Provider")].spacing(8);
+    let mut controls = column![text("AI provider")].spacing(8);
     for source in crate::metadata::available_sources() {
         let label = match source {
             Source::OpenRouter => "OpenRouter",
             Source::Local => "Local Ollama",
         };
-        source_controls =
-            source_controls.push(button(label).on_press(Message::SelectSource(*source)));
-    }
-    let mut model_controls = row![text("Model")].spacing(8);
-    for model in VISION_MODELS.iter() {
-        model_controls = model_controls.push(
-            button(text(model.ollama_name.clone())).on_press(Message::SelectModel(model.clone())),
+        controls = controls.push(
+            style::wide(label)
+                .style(style::tab(state.source == *source))
+                .on_press(Message::SelectSource(*source)),
         );
     }
-    let mut content = column![
-        source_controls,
-        model_controls,
-        text(format!(
+    controls = controls.push(text("Model"));
+    for model in VISION_MODELS.iter() {
+        controls = controls.push(
+            style::wide(model.ollama_name.clone())
+                .style(style::tab(state.model == *model))
+                .on_press(Message::SelectModel(model.clone())),
+        );
+    }
+    controls = controls
+        .push(text(format!(
             "Selected: {:?} / {}",
             state.source, state.model.ollama_name
-        )),
-        button("Generate marked").on_press(Message::GenerateMarked),
-    ]
-    .spacing(12);
+        )))
+        .push(style::wide("Generate marked").on_press(Message::GenerateMarked));
     if state.source == Source::Local {
-        content = content.push(local_fit_view(state));
+        controls = controls.push(local_fit_view(state));
     }
-    let mut cards = column![].spacing(12);
+    let mut cards = vec![controls.into()];
     for row in ordered_rows(
         state.publications.as_deref().unwrap_or_default(),
         state.revealed_publication(),
     ) {
-        if phase(row).ok() != Some(Phase::Scheduled) {
-            continue;
-        }
         let Some(uuid) = row.get("uuid").and_then(Value::as_str).map(str::to_owned) else {
             continue;
         };
-        cards = cards.push(metadata_card(state, row, uuid));
+        cards.push(metadata_card(state, row, uuid));
     }
-    content = content.push(
-        scrollable(cards)
+    let mut content = column![
+        scrollable(style::cards(cards))
             .id(SCROLL_ID)
             .height(Length::Fill)
-            .on_scroll(|viewport| Message::DescribeViewport {
-                offset: viewport.absolute_offset().y,
-                height: viewport.bounds().height,
-            }),
-    );
+            .on_scroll(|viewport| Message::Viewport(Tab::Describe, viewport.into()))
+    ]
+    .spacing(12);
     if state.local_install_consent_pending() {
         content = content.push(
-            column![
-                text(format!("Install {} and generate?", state.model.ollama_name)),
-                button("Confirm install and generate").on_press(Message::ConfirmLocalInstall),
-                button("Cancel").on_press(Message::CancelLocalInstall),
-            ]
-            .spacing(8),
+            container(
+                row![
+                    text(format!("Install {} and generate?", state.model.ollama_name)),
+                    button("Confirm install and generate").on_press(Message::ConfirmLocalInstall),
+                    button("Cancel").on_press(Message::CancelLocalInstall),
+                ]
+                .spacing(8),
+            )
+            .padding(8)
+            .width(Length::Fill)
+            .style(style::notice),
         );
     }
     content.into()
@@ -168,17 +193,6 @@ fn local_fit_view(state: &App) -> Element<'_, Message> {
     .into()
 }
 
-fn metadata_preview<'a>(state: &'a App, uuid: &str) -> Element<'a, Message> {
-    match state.describe_previews.get(uuid) {
-        Some(Some(Ok(path))) => iced::widget::image(iced::widget::image::Handle::from_path(path))
-            .width(Length::Fixed(160.0))
-            .height(Length::Fixed(160.0))
-            .into(),
-        Some(Some(Err(error))) => text(format!("Preview unavailable: {error}")).into(),
-        _ => text("Preview loads when this card is visible").into(),
-    }
-}
-
 fn metadata_card<'a>(state: &'a App, row: &Value, uuid: String) -> Element<'a, Message> {
     let (saved_title, saved_description) = super::row_metadata(row);
     let (title, description) = state
@@ -189,16 +203,29 @@ fn metadata_card<'a>(state: &'a App, row: &Value, uuid: String) -> Element<'a, M
     let busy = state.busy_uuids.contains(&uuid);
     let title_uuid = uuid.clone();
     let mut card = column![
-        text(uuid.clone()),
+        style::art(state.row_previews.get(&uuid), false, 240.0),
+        text(super::schedule::date_label(state, row)),
+    ]
+    .spacing(8);
+    if busy {
+        card = card.push(style::warning("Generating and saving…"));
+    } else if title.contains(GENERATE_MARKER) || description.contains(GENERATE_MARKER) {
+        card = card.push(style::warning("Marked for generation"));
+    }
+    if state.revealed_publication() == Some(uuid.as_str()) {
+        card = card.push(style::warning("Opened from Calendar"));
+    }
+    card = card.push(text("Title")).push(
         text_input("Title", &title)
             .on_input(move |value| Message::Edited {
                 uuid: title_uuid.clone(),
                 field: super::drafts::Field::Title,
-                text: value
+                text: value,
             })
-            .on_submit(Message::SaveDraft(uuid.clone())),
-    ]
-    .spacing(5);
+            .on_submit(Message::SaveDraft(uuid.clone()))
+            .style(style::input),
+    );
+    card = card.push(text("Description"));
     if let Some(editor) = state.description_editors.get(&uuid) {
         let description_uuid = uuid.clone();
         card = card.push(
@@ -208,51 +235,37 @@ fn metadata_card<'a>(state: &'a App, row: &Value, uuid: String) -> Element<'a, M
                 .on_action(move |action| Message::DescriptionAction {
                     uuid: description_uuid.clone(),
                     action,
-                }),
+                })
+                .style(style::editor),
         );
     } else {
         card = card.push(text(description.clone()));
     }
-    if state.revealed_publication() == Some(uuid.as_str()) {
-        card = card.push(text("Opened from Calendar"));
-    }
-    let dirty_title = state
-        .drafts
-        .get(&uuid)
-        .is_some_and(|d| d.is_field_dirty(super::drafts::Field::Title));
-    let dirty_description = state
-        .drafts
-        .get(&uuid)
-        .is_some_and(|d| d.is_field_dirty(super::drafts::Field::Description));
-    let preview = metadata_preview(state, &uuid);
-    card = card.push(preview);
-    card = card.push(text(format!(
+    let dirty = |field| {
+        state
+            .drafts
+            .get(&uuid)
+            .is_some_and(|d| d.is_field_dirty(field))
+    };
+    let saved = |field| if dirty(field) { "unsaved" } else { "saved" };
+    let status = format!(
         "Title: {}; description: {}",
-        if dirty_title { "unsaved" } else { "saved" },
-        if dirty_description {
-            "unsaved"
-        } else {
-            "saved"
-        }
-    )));
-    card = card.push(
-        row![
-            button("Save draft").on_press(Message::SaveDraft(uuid.clone())),
-            button("Approve metadata").on_press(Message::ApproveMetadata(uuid.clone())),
-            button("Return to Schedule").on_press(Message::ReturnToSchedule(uuid.clone())),
-            button("Generate one").on_press(Message::GenerateOne(uuid.clone())),
-        ]
-        .spacing(6),
+        saved(super::drafts::Field::Title),
+        saved(super::drafts::Field::Description)
     );
-    if busy {
-        card = card.push(text("Generating and saving…"));
-    } else if title.contains(GENERATE_MARKER) || description.contains(GENERATE_MARKER) {
-        card = card.push(text("Marked for generation"));
-    }
-    card.into()
+    style::card(
+        card.push(style::wide("Generate one").on_press(Message::GenerateOne(uuid.clone())))
+            .push(style::wide("Approve metadata").on_press(Message::ApproveMetadata(uuid.clone())))
+            .push(
+                style::wide("Return to Schedule").on_press(Message::ReturnToSchedule(uuid.clone())),
+            )
+            .push(style::wide("Save draft").on_press(Message::SaveDraft(uuid)))
+            .push(style::warning(status)),
+    )
+    .into()
 }
 
-fn ordered_rows<'a>(rows: &'a [Value], target: Option<&str>) -> Vec<&'a Value> {
+pub(super) fn ordered_rows<'a>(rows: &'a [Value], target: Option<&str>) -> Vec<&'a Value> {
     super::revealed_rows(
         rows.iter()
             .filter(|row| phase(row).ok() == Some(Phase::Scheduled)),

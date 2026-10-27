@@ -6,6 +6,7 @@ mod preview;
 pub mod prompt;
 pub mod publish;
 pub mod schedule;
+pub mod style;
 
 use crate::{
     application::Application as CoreApplication,
@@ -18,7 +19,7 @@ use crate::{
     workflow::{self, MetadataPatch},
 };
 use iced::{
-    Element, Subscription, Task, Theme,
+    Element, Length, Subscription, Task, Theme,
     keyboard::{Key, key::Named},
     widget::{button, column, container, row, text},
 };
@@ -32,7 +33,7 @@ use std::{
 
 use drafts::{Draft, Field, SentDraft};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Tab {
     Pick,
     Schedule,
@@ -144,15 +145,8 @@ pub enum Message {
         source: std::path::PathBuf,
         result: Result<std::path::PathBuf, String>,
     },
-    PreviewViewport {
-        offset: f32,
-        height: f32,
-    },
-    DescribeViewport {
-        offset: f32,
-        height: f32,
-    },
-    DescribePreviewFinished {
+    Viewport(Tab, style::Viewport),
+    RowPreviewFinished {
         uuid: String,
         result: Result<std::path::PathBuf, String>,
     },
@@ -257,10 +251,7 @@ pub enum Message {
         basename: String,
         result: Result<PathBuf, String>,
     },
-    CalendarViewport {
-        offset: f32,
-        height: f32,
-    },
+    ToggleCalendarEvent(String),
     UrlOpened {
         url: String,
         result: Result<(), String>,
@@ -308,7 +299,8 @@ pub struct App {
     prompt_search: Option<SearchMatches>,
     candidates: Vec<Candidate>,
     previews: HashMap<std::path::PathBuf, Option<Result<std::path::PathBuf, String>>>,
-    describe_previews: HashMap<String, Option<Result<std::path::PathBuf, String>>>,
+    row_previews: HashMap<String, Option<Result<std::path::PathBuf, String>>>,
+    viewports: HashMap<Tab, style::Viewport>,
     description_editors: HashMap<String, iced::widget::text_editor::Content>,
 
     pending_delete: Option<Candidate>,
@@ -346,6 +338,7 @@ pub struct App {
     calendar_error: Option<String>,
     calendar_artwork: HashMap<String, Option<PathBuf>>,
     calendar_previews: HashMap<String, Option<Result<PathBuf, String>>>,
+    calendar_expanded: HashSet<String>,
     url_opener: fn(&str) -> Result<(), String>,
 }
 
@@ -394,7 +387,8 @@ impl App {
             prompt_search: None,
             candidates: Vec::new(),
             previews: HashMap::new(),
-            describe_previews: HashMap::new(),
+            row_previews: HashMap::new(),
+            viewports: HashMap::new(),
             description_editors: HashMap::new(),
             pending_delete: None,
             custom_dates: HashMap::new(),
@@ -431,6 +425,7 @@ impl App {
             calendar_error: None,
             calendar_artwork: HashMap::new(),
             calendar_previews: HashMap::new(),
+            calendar_expanded: HashSet::new(),
             url_opener,
         };
         (app, Self::load_task(application))
@@ -480,6 +475,16 @@ impl App {
     }
     pub fn revealed_publication(&self) -> Option<&str> {
         self.revealed_publication.as_deref()
+    }
+    fn viewport(&self, tab: Tab) -> style::Viewport {
+        self.viewports.get(&tab).copied().unwrap_or_default()
+    }
+    /// Thumbnails for the visible part of `tab`'s list (the calendar loads on expand).
+    fn preview_tasks(&mut self, tab: Tab) -> Task<Message> {
+        match tab {
+            Tab::Pick => pick::preview_tasks(self),
+            _ => describe::preview_tasks(self, tab),
+        }
     }
     pub fn unresolved_publish_attempts(&self) -> impl Iterator<Item = &AttemptStatus> {
         self.publish_attempts
@@ -663,12 +668,11 @@ impl App {
             | Message::PromptSearchFinished { .. }
             | Message::PromptMatchesFinished(..) => self.update_search_results(message),
             Message::PreviewFinished { .. }
-            | Message::PreviewViewport { .. }
-            | Message::DescribeViewport { .. }
-            | Message::DescribePreviewFinished { .. }
+            | Message::Viewport(..)
+            | Message::RowPreviewFinished { .. }
             | Message::CalendarPrepared(..)
             | Message::CalendarPreviewFinished { .. }
-            | Message::CalendarViewport { .. } => self.update_previews(message),
+            | Message::ToggleCalendarEvent(..) => self.update_previews(message),
             Message::Pick(..)
             | Message::PickFinished(..)
             | Message::AskDelete(..)
@@ -1063,7 +1067,7 @@ impl App {
                 self.calendar_error = None;
                 self.calendar_artwork = prepared.artwork;
                 self.prompt_matches.extend(prepared.prompts);
-                return calendar::preview_tasks(self, 0.0, 560.0);
+                return calendar::preview_tasks(self);
             }
             Message::CalendarPrepared(Err(error)) => {
                 self.calendar_preparing = false;
@@ -1072,25 +1076,26 @@ impl App {
             }
             Message::CalendarPreviewFinished { basename, result } => {
                 self.calendar_previews.insert(basename, Some(result));
+                return calendar::preview_tasks(self);
             }
-            Message::CalendarViewport { offset, height } => {
-                return calendar::preview_tasks(self, offset, height);
+            Message::ToggleCalendarEvent(key) => {
+                if !self.calendar_expanded.remove(&key) {
+                    self.calendar_expanded.insert(key);
+                }
+                return calendar::preview_tasks(self);
             }
+            // Each finished preview frees a slot: keep filling the visible range.
             Message::PreviewFinished { source, result } => {
                 self.previews.insert(source, Some(result));
+                return pick::preview_tasks(self);
             }
-            Message::PreviewViewport { offset, height } => {
-                let start = (offset.max(0.0) / 250.0) as usize;
-                let end = ((offset.max(0.0) + height.max(0.0)) / 250.0).ceil() as usize + 2;
-                return pick::preview_tasks(self, start, end);
+            Message::Viewport(tab, viewport) => {
+                self.viewports.insert(tab, viewport);
+                return self.preview_tasks(tab);
             }
-            Message::DescribeViewport { offset, height } => {
-                let start = (offset.max(0.0) / 300.0) as usize;
-                let end = ((offset.max(0.0) + height.max(0.0)) / 300.0).ceil() as usize + 2;
-                return describe::preview_tasks(self, start, end);
-            }
-            Message::DescribePreviewFinished { uuid, result } => {
-                self.describe_previews.insert(uuid, Some(result));
+            Message::RowPreviewFinished { uuid, result } => {
+                self.row_previews.insert(uuid, Some(result));
+                return describe::preview_tasks(self, self.active_tab);
             }
             _ => unreachable!("message routed to previews handler"),
         }
@@ -1208,8 +1213,11 @@ impl App {
         self.calendar_error = None;
         self.calendar_artwork.clear();
         self.calendar_previews.clear();
-        if self.active_tab == Tab::Describe {
-            return describe::preview_tasks(self, 0, 4);
+        if matches!(
+            self.active_tab,
+            Tab::Schedule | Tab::Describe | Tab::Publish
+        ) {
+            return describe::preview_tasks(self, self.active_tab);
         }
         if self.active_tab == Tab::Calendar {
             return calendar::prepare_task(self);
@@ -1834,7 +1842,7 @@ impl App {
                 format!("Found {} candidates", self.candidates.len())
             },
         );
-        Task::batch([pick::preview_tasks(self, 0, 4), prompt_tasks(self)])
+        Task::batch([pick::preview_tasks(self), prompt_tasks(self)])
     }
 
     fn on_prompt_search_finished_ready(&mut self, matches: SearchMatches) -> Task<Message> {
@@ -1858,7 +1866,7 @@ impl App {
         self.prompt_search = Some(matches);
         self.set_candidates(candidates);
         self.result = Some(summary);
-        Task::batch([pick::preview_tasks(self, 0, 4), prompt_tasks(self)])
+        Task::batch([pick::preview_tasks(self), prompt_tasks(self)])
     }
 
     fn set_candidates(&mut self, candidates: Vec<Candidate>) {
@@ -1890,9 +1898,8 @@ impl App {
         self.active_tab = tab;
         self.revealed_publication = reveal.clone();
         let mut tasks = vec![match tab {
-            Tab::Describe => describe::preview_tasks(self, 0, 4),
             Tab::Calendar => calendar::prepare_task(self),
-            _ => Task::none(),
+            _ => self.preview_tasks(tab),
         }];
         if reveal.is_some() {
             tasks.push(match tab {
@@ -2509,31 +2516,40 @@ impl App {
     }
 
     fn loaded_view(&self, rows: &[Value]) -> Element<'_, Message> {
-        let tabs = row(Tab::ALL.into_iter().map(|(tab, label)| {
-            let control = button(label);
-            if tab == self.active_tab {
-                control.into()
+        let count = |tab| match tab {
+            Tab::Pick => Some(self.candidates.len()),
+            Tab::Schedule => Some(schedule::ordered_rows(rows, None).len()),
+            Tab::Describe => Some(describe::ordered_rows(rows, None).len()),
+            Tab::Publish => Some(publish::ordered_rows(rows, None).len()),
+            Tab::Calendar => None,
+        };
+        let mut header = row![text("Publish next").font(style::BOLD)]
+            .spacing(8)
+            .align_y(iced::Alignment::Center);
+        for (tab, label) in Tab::ALL {
+            let label = match count(tab) {
+                Some(n) => format!("{label} ({n})"),
+                None => label.to_owned(),
+            };
+            let control = button(text(label)).style(style::tab(tab == self.active_tab));
+            header = header.push(if tab == self.active_tab {
+                control
             } else {
-                control.on_press(Message::Navigate(tab)).into()
-            }
-        }))
-        .spacing(8);
-        let mut content = column![
-            tabs,
-            text(tab_name(self.active_tab)),
-            text(format!("{} publications", rows.len()))
-        ]
-        .spacing(16);
-        content = content.push(match self.active_tab {
+                control.on_press(Message::Navigate(tab))
+            });
+        }
+        if let Some(result) = &self.result {
+            header = header.push(text(result));
+        }
+        let mut content = column![match self.active_tab {
             Tab::Pick => pick::view(self),
             Tab::Schedule => schedule::view(self),
             Tab::Describe => describe::view(self),
             Tab::Publish => publish::view(self),
             Tab::Calendar => calendar::view(self),
-        });
-        if let Some(result) = &self.result {
-            content = content.push(text(result));
-        }
+        }]
+        .spacing(16)
+        .height(Length::Fill);
         if self.pending_close && self.publish_active {
             content = content.push(text("Publishing remains active until its durable outcome and process cleanup are handled."));
             content = content.push(
@@ -2544,16 +2560,25 @@ impl App {
                 .spacing(8),
             );
         }
-        content = content.push(
-            row![
-                button("Refresh").on_press(Message::Refresh),
-                button("Retry save").on_press(Message::RetrySave),
-                button("Keep editing").on_press(Message::KeepEditing),
-                button("Discard drafts and close").on_press(Message::ConfirmDiscard),
-            ]
-            .spacing(8),
-        );
-        container(content).padding(24).into()
+        let footer = row![
+            button("Refresh").on_press(Message::Refresh),
+            button("Retry save").on_press(Message::RetrySave),
+            button("Keep editing").on_press(Message::KeepEditing),
+            button("Discard drafts and close").on_press(Message::ConfirmDiscard),
+        ]
+        .spacing(8);
+        column![
+            container(header.wrap())
+                .padding(12)
+                .width(Length::Fill)
+                .style(style::header),
+            container(content).padding(20).height(Length::Fill),
+            container(footer)
+                .padding(8)
+                .width(Length::Fill)
+                .style(style::header),
+        ]
+        .into()
     }
 
     fn view(&self) -> Element<'_, Message> {
@@ -2641,7 +2666,8 @@ pub(super) fn resolve_prompt_matches(
 }
 
 fn app_theme(_: &App) -> Theme {
-    Theme::Dark
+    static THEME: std::sync::LazyLock<Theme> = std::sync::LazyLock::new(style::theme);
+    THEME.clone()
 }
 
 fn row_metadata(row: &Value) -> (String, String) {
@@ -2663,14 +2689,6 @@ fn set_option(options: &mut Vec<String>, value: String, selected: bool) {
     } else if !selected {
         options.retain(|option| option != &value);
     }
-}
-
-fn tab_name(tab: Tab) -> &'static str {
-    Tab::ALL
-        .iter()
-        .find(|(item, _)| *item == tab)
-        .map(|(_, name)| *name)
-        .unwrap_or("Pick")
 }
 
 fn parse_option_price(price: &str) -> Result<Option<f64>, String> {

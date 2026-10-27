@@ -1,14 +1,32 @@
-use super::Message;
+use super::{Message, style};
 use crate::prompts::{Lineage, PromptMatch};
 use iced::{
-    Element,
-    widget::{column, text},
+    Element, Length,
+    widget::{column, container, text},
 };
 
 pub fn view(match_: &PromptMatch) -> Element<'_, Message> {
-    column(plain_text(match_).into_iter().map(|line| text(line).into()))
-        .spacing(4)
-        .into()
+    let mut lines = plain_text(match_).into_iter();
+    let heading = text(lines.next().unwrap_or_default()).size(13);
+    if let PromptMatch::Unknown(_) = match_ {
+        return heading.color(style::MUTED).into();
+    }
+    let body = column(lines.map(|line| {
+        container(text(line).size(13))
+            .padding(6)
+            .width(Length::Fill)
+            .style(style::prompt_text)
+            .into()
+    }))
+    .spacing(4);
+    let block = column![heading, body].spacing(4);
+    match match_ {
+        PromptMatch::Exact(_) => container(block).style(style::prompt_exact),
+        _ => container(block).style(style::notice),
+    }
+    .padding(6)
+    .width(Length::Fill)
+    .into()
 }
 
 pub fn plain_text(match_: &PromptMatch) -> Vec<String> {
