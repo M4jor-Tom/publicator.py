@@ -1180,7 +1180,8 @@ def header_status(img):
 
 
 def describe_controls(img, region):
-    """Provider/model choices and Generate marked, top to bottom, in the first grid cell."""
+    """Provider, model and layout choices and Generate marked, top to bottom, in the first grid
+    cell."""
     first_card = min(cards(img, region), key=lambda c: (c[1], c[0]))
     found = [box for box in buttons(img, region, 100) if box[0] + box[2] < first_card[0]]
     return sorted(found, key=lambda b: b[1])
@@ -1197,7 +1198,7 @@ def describe_model_install_consent(ctx):
     navigate(app, "Describe")
     marked = next(row for row in app.rows() if row["state"] == "SCHEDULED" and "TODO_GENERATE" in row["title"])
     img, region, _ = previews(app, palette, "Describe")
-    openrouter, local, small, large, _ = describe_controls(img, region)
+    openrouter, local, small, large = describe_controls(img, region)[:4]
     for choice in (local, small):
         app.click(center(choice))
         app.look(lambda img: pressed(img, choice), "provider/model choice")
@@ -1264,7 +1265,7 @@ def describe_batch_progress_per_card_and_summary(ctx):
     names = [row["files"][0]["basename"] for row in marked[:3]]
     img, region, _ = previews(app, palette, "Describe")
     check(all(card_of(img, region, name, palette) for name in names), "a batch card is off screen")
-    openrouter, local, small, large, generate = describe_controls(img, region)[:5]  # not row 2
+    openrouter, local, small, large, _, _, generate = describe_controls(img, region)[:7]  # not row 2
     for choice in (local, large):  # the installed model
         app.click(center(choice))
         app.look(lambda img: pressed(img, choice), "provider/model choice")
@@ -1311,6 +1312,83 @@ def describe_batch_progress_per_card_and_summary(ctx):
     check(crop(finished, summary) != crop(running, summary), "the summary did not change")
     failed = app.row(batch[0])
     check(failed["state"] == "SCHEDULED" and "TODO_GENERATE" in failed["title"], f"failed record {failed}")
+    close_and_wait(app)
+
+
+def stacked(img):
+    """The Rows layout's cards, top to bottom, when at least two are listed and each spans the
+    list's width; else None."""
+    region, _ = list_view(img)
+    listed = sorted(cards(img, region), key=lambda c: c[1])
+    full = all(abs(c[0] - listed[0][0]) <= 2 and c[2] > (region[2] - region[0]) * 0.9 for c in listed)
+    return listed if len(listed) >= 2 and full else None
+
+
+def rows_controls(img):
+    """The Describe controls above the first stacked card, top to bottom."""
+    region, _ = list_view(img)
+    top = min(c[1] for c in cards(img, region))
+    return sorted((b for b in buttons(img, (region[0], region[1], region[2], top), 100)), key=lambda b: b[1])
+
+
+@story
+def describe_rows_layout_and_batch_order(ctx):
+    """Rows stacks one full-width card per publication, lists a running batch's cards first in
+    its order, and is still chosen after a relaunch."""
+    settings = {"installed_models": ["gemma4:31b"], "local_hold": 3, "ai_timeout_ms": 60000}
+    app = ctx.launch("gallery", settings=settings, size=(1500, 1550))
+    palette = Palette.manifest(app.fixture / "gallery-fixture-manifest.json")
+    marked = [row for row in app.rows() if row["state"] == "SCHEDULED" and "TODO_GENERATE" in row["title"]]
+    kept = {row["uuid"] for row in marked[3:6]}  # behind unmarked cards in store order
+
+    def keep_three(rows):
+        for row in rows:
+            if row["uuid"] in {r["uuid"] for r in marked} - kept:
+                row["title"], row["description"] = "Manual title", "Manual description"
+
+    app.edit_rows(keep_three)
+    navigate(app, "Describe")
+    press_footer(app, 0)
+    img, region, _ = previews(app, palette, "Describe")
+    _, _, _, _, grid, rows, _ = describe_controls(img, region)[:7]
+    check(pressed(img, grid) and not pressed(img, rows), "Grid is not the default layout")
+    app.click(center(rows))
+    app.park()
+    app.look(stacked, "one full-width card per row")
+    wait_until(lambda: json.loads((app.fixture / ".publicator/ui.json").read_text())
+               == {"describe_layout": "rows"}, "the saved layout")
+    for index in (1, 3):  # Local Ollama, then the installed model
+        choice = app.look(lambda img: rows_controls(img)[index], "Rows controls")
+        app.click(center(choice))
+        app.look(lambda img: pressed(img, rows_controls(img)[index]), "provider/model choice")
+    app.click(center(app.look(lambda img: rows_controls(img)[6], "Generate marked")))
+    app.park()
+    wait_until(lambda: (app.fixture / "local-chat-held").exists(), "the third chat reply held")
+    uuid_of = {row["files"][0]["basename"]: row["uuid"] for row in marked if row["uuid"] in kept}
+    asked = [uuid_of[palette.name[tuple(call["image_rgb"])]]
+             for call in app.lines("http-calls.jsonl") if call["path"] == "/api/chat"]
+    check(len(asked) == 2, f"chat requests before the hold: {asked}")
+    batch = asked + [uuid for uuid in uuid_of.values() if uuid not in asked]
+    names = [app.row(uuid)["files"][0]["basename"] for uuid in batch]
+
+    def batch_first(img):
+        listed = stacked(img)
+        if not listed or len(listed) < 3:
+            return None
+        region, _ = list_view(img)
+        shown = [card_of(img, region, name, palette) for name in names]
+        active = generating(img, region)
+        return shown == listed[:3] and active == [shown[2]] and img
+
+    app.look(batch_first, "the batch's cards first, in batch order, the held one generating").save(
+        ctx.root / "rows-running.png")
+    (app.fixture / "local-chat-release").write_text("release")
+    wait_until(lambda: app.row(batch[2])["state"] == "DESCRIBED", "the last record")
+    close_and_wait(app)
+    app = ctx.launch("gallery", settings=settings, size=(1500, 1550))
+    navigate(app, "Describe")
+    previews(app, palette, "Describe")
+    app.look(stacked, "Rows after a relaunch")
     close_and_wait(app)
 
 

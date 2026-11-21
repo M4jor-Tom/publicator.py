@@ -53,6 +53,14 @@ pub fn cards<'a>(children: Vec<Element<'a, Message>>) -> Element<'a, Message> {
         .into()
 }
 
+/// Cards stacked one per full-width row.
+pub fn rows<'a>(children: Vec<Element<'a, Message>>) -> Element<'a, Message> {
+    iced::widget::Column::with_children(children)
+        .spacing(GAP)
+        .width(Length::Fill)
+        .into()
+}
+
 pub fn card<'a>(content: impl Into<Element<'a, Message>>) -> Container<'a, Message> {
     container(content)
         .padding(12)

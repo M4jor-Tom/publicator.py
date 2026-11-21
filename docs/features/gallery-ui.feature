@@ -71,6 +71,12 @@ Feature: Review artwork in the native gallery
       Then only that card's state is updated for the new generation
       And other finished states and the previous batch summary remain until replaced or successfully refreshed
 
+    Scenario: Switch the Describe layout during a batch
+      When the user chooses Grid or Rows in the Describe controls
+      Then Grid shows the card grid and Rows shows one full-width card per publication, thumbnail, fields and actions side by side
+      And the choice is saved in .publicator/ui.json and survives tab switches, Refresh and restart; a missing or invalid file means Grid
+      And in both layouts the batch cards are listed first, in batch order, until the Refresh that clears its summary
+
   Rule: Publish selection is not submission
 
     Scenario: A delivery has succeeded or its outcome is unresolved

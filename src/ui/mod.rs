@@ -176,7 +176,9 @@ enum BatchProgress {
         done: usize,
         failed: usize,
     },
+    /// `ids` keep the finished batch's cards first until Refresh clears it.
     Finished {
+        ids: Vec<String>,
         succeeded: usize,
         failed: usize,
     },
@@ -282,6 +284,7 @@ pub enum Message {
     CancelLocalInstall,
     SelectSource(Source),
     SelectModel(ModelOption),
+    SelectDescribeLayout(describe::DescribeLayout),
     GenerationProgress(BatchEvent),
     GenerationFinished {
         uuid: Option<String>,
@@ -422,6 +425,7 @@ pub struct App {
     custom_dates: HashMap<String, (String, String)>,
     source: Source,
     model: ModelOption,
+    describe_layout: describe::DescribeLayout,
     generation_states: HashMap<String, GenerationState>,
     batch: Option<BatchProgress>,
     pending_generation: Option<String>,
@@ -526,6 +530,7 @@ impl App {
             custom_dates: HashMap::new(),
             source: Source::OpenRouter,
             model,
+            describe_layout: describe::load_layout(&application.store().paths().data_dir),
             generation_states: HashMap::new(),
             batch: None,
             pending_generation: None,
@@ -589,6 +594,16 @@ impl App {
     }
     pub fn current_tab(&self) -> Tab {
         self.active_tab
+    }
+    pub fn describe_layout(&self) -> describe::DescribeLayout {
+        self.describe_layout
+    }
+    /// The current batch's cards, listed first in Describe.
+    fn batch_ids(&self) -> &[String] {
+        match &self.batch {
+            Some(BatchProgress::Running { ids, .. } | BatchProgress::Finished { ids, .. }) => ids,
+            _ => &[],
+        }
     }
     pub fn local_fit_status(&self) -> Option<&LocalStatus> {
         self.local_fit.as_ref()
@@ -822,6 +837,7 @@ impl App {
             | Message::PublishKeyboardExit => self.update_keyboard(message),
             Message::SelectSource(..)
             | Message::SelectModel(..)
+            | Message::SelectDescribeLayout(..)
             | Message::ConfirmLocalInstall
             | Message::CancelLocalInstall
             | Message::LocalFitFinished { .. }
@@ -914,6 +930,7 @@ impl App {
             | Message::PublishKeyboardExit
             | Message::SelectSource(..)
             | Message::SelectModel(..)
+            | Message::SelectDescribeLayout(..)
             | Message::ConfirmLocalInstall
             | Message::CancelLocalInstall
             | Message::LocalFitFinished { .. }
@@ -1085,10 +1102,20 @@ impl App {
         Task::none()
     }
 
+    /// Switches at once; a failed save only reports itself.
+    fn select_describe_layout(&mut self, layout: describe::DescribeLayout) {
+        self.describe_layout = layout;
+        let data_dir = &self.application.store().paths().data_dir;
+        if let Err(error) = describe::save_layout(data_dir, layout) {
+            self.result = Some(format!("Layout preference was not saved: {error}"));
+        }
+    }
+
     fn update_generation(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::SelectSource(source) => return self.select_source(source),
             Message::SelectModel(model) => return self.select_model(model),
+            Message::SelectDescribeLayout(layout) => self.select_describe_layout(layout),
             Message::ConfirmLocalInstall => return self.on_confirm_local_install(),
             Message::CancelLocalInstall => {
                 self.pending_local_consent = None;
@@ -1785,6 +1812,7 @@ impl App {
             }
             self.batch = Some(match result {
                 Ok(()) => BatchProgress::Finished {
+                    ids,
                     succeeded: done,
                     failed,
                 },
@@ -2928,7 +2956,7 @@ impl App {
         let count = |tab| match tab {
             Tab::Pick => Some(self.candidates.len()),
             Tab::Schedule => Some(schedule::ordered_rows(rows, None).len()),
-            Tab::Describe => Some(describe::ordered_rows(rows, None, |_| false).len()),
+            Tab::Describe => Some(describe::ordered_rows(rows, &[], None, |_| false).len()),
             Tab::Publish => {
                 Some(publish::ordered_rows(rows, None, self.publish_locks.as_ref()).len())
             }

@@ -958,7 +958,7 @@ fn create_attempt_directory(path: &Path) -> Result<()> {
     })
 }
 
-fn create_real_directory(path: &Path, message: &str) -> Result<bool> {
+pub(crate) fn create_real_directory(path: &Path, message: &str) -> Result<bool> {
     match fs::create_dir(path) {
         Ok(()) => Ok(true),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {

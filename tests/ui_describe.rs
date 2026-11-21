@@ -1140,6 +1140,30 @@ fn describe_view_constructs_from_loaded_state() {
 }
 
 #[tokio::test]
+async fn describe_layout_is_saved_and_survives_restart_navigation_and_refresh() {
+    let f = Fixture::new();
+    f.write(json!([row(1, "SCHEDULED")]));
+    let (mut app, _) = fixture_app(&f, "http://127.0.0.1:1".into());
+    assert_eq!(app.describe_layout(), describe::DescribeLayout::Grid);
+    let _ = app.update(Message::SelectDescribeLayout(
+        describe::DescribeLayout::Rows,
+    ));
+    assert_eq!(app.describe_layout(), describe::DescribeLayout::Rows);
+    assert_eq!(app.status_message(), None);
+    assert_eq!(
+        std::fs::read_to_string(f.path(".publicator/ui.json")).unwrap(),
+        r#"{"describe_layout":"rows"}"#
+    );
+    let (mut restarted, _) = fixture_app(&f, "http://127.0.0.1:1".into());
+    assert_eq!(restarted.describe_layout(), describe::DescribeLayout::Rows);
+    let _: Element<'_, Message> = describe::view(&restarted);
+    common::ui::send(&mut restarted, Message::Navigate(Tab::Publish)).await;
+    common::ui::send(&mut restarted, Message::Navigate(Tab::Describe)).await;
+    common::ui::send(&mut restarted, Message::Refresh).await;
+    assert_eq!(restarted.describe_layout(), describe::DescribeLayout::Rows);
+}
+
+#[tokio::test]
 async fn native_multiline_description_editor_keeps_unicode_and_literal_markup() {
     let fixture = Fixture::new();
     let mut scheduled = row(900, "SCHEDULED");

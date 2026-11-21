@@ -32,7 +32,7 @@ Apps are Nix aliases backed by Rust binaries: `ui`, `da-publish`, `generate-meta
 - `tests/common/{executable,git,http,image,process}.rs` are also mounted into the crate with `#[path]`; keep them free of `publicator::` paths.
 - `assets/publicationsSchema.json` is a code asset. Data paths resolve against `--data-dir`/CWD.
 - `publications.json` is authoritative. Store writes validate and atomically replace under persistent thread/file locks (publishing receipts use the same `store::write_atomic`); `DurabilityUncertain` means the new bytes may already be committed. Never remove the sibling `.lock` while writers may exist.
-- `.publicator/` holds durable publishing receipts/intents and staged upload state; preserve it for recovery and reconcile unknown remote outcomes before retrying.
+- `.publicator/` holds durable publishing receipts/intents and staged upload state; preserve it for recovery and reconcile unknown remote outcomes before retrying. `.publicator/ui.json` holds the UI layout preference (Describe Grid/Rows).
 - `.thumbs/` is a persistent data-dir cache. Add `publicator.local.toml` (secrets, e.g. `[openrouter].key`), `.thumbs/`, `.publications.json.lock`, `.publicator/`, `.deviantart-login/`, and `.deviantart-session/` to the separate data repository's ignore rules as applicable. Do not edit that data repository without authorization.
 - Playwright publishing copies the named `.deviantart-login/` profile into a work profile; it must not mutate the original. Login is an out-of-band human action because DeviantArt's PerimeterX blocks Playwright login.
 
