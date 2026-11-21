@@ -29,7 +29,7 @@ path = "examples/ui_acceptance.rs"
 required-features = ["desktop"]
 
 [dependencies]
-iced = { version = "=0.14.0", optional = true, default-features = false, features = ["tiny-skia", "x11", "wayland", "tokio", "image-without-codecs"] }
+iced = { version = "=0.14.0", optional = true, default-features = false, features = ["advanced", "tiny-skia", "x11", "wayland", "tokio", "image-without-codecs"] }
 image = { version = "=0.25.10", optional = true, default-features = false, features = ["bmp", "gif", "jpeg", "png", "tiff", "webp"] }
 chrono = "0.4"
 chrono-tz = "0.10"

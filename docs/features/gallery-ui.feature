@@ -15,6 +15,7 @@ Feature: Review artwork in the native gallery
     Scenario: Switch tabs or jump to a publication
       When the user returns to a tab
       Then the tab retains its scroll position unless a Jump puts the revealed publication at the top
+      And Calendar's first opening in a session starts on today's week
       And native selection controls indicate focus and work from the keyboard
 
     Scenario: Scroll to unseen previews

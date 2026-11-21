@@ -6,6 +6,12 @@ Feature: Read-only publication calendar
     Then it shows two events with the publication's shared title and date
     And each retains its own platform, delivery state and actual URL
 
+  Scenario: First opening starts on today's week
+    Given months of history before the current month
+    When Calendar is first shown in a session
+    Then the week containing today in the configured schedule timezone is at the top of the list, with earlier months above it out of view
+    And if today cannot be placed, the list starts at the top
+
   Scenario: Bucket an event near midnight
     Given no date override and a submission timestamp on different dates in UTC and the schedule timezone
     When Calendar places the event

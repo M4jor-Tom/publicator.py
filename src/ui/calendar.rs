@@ -7,10 +7,13 @@ use crate::{
 };
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use iced::{
-    Element, Length, Task,
+    Element, Length, Rectangle, Task, Vector,
+    advanced::widget::{Id, Operation, operation},
     widget::{button, column, container, row, space, stack, text},
 };
 
+/// The id of the current month's week row that contains today.
+const TODAY_WEEK: &str = "calendar-today-week";
 const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 use serde_json::Value;
 use std::{
@@ -127,12 +130,24 @@ pub(super) fn month_view<'a>(
         cells.push(blank());
     }
     let mut weeks = column![];
+    // The grid row holding today, counting the leading blanks.
+    let today_week = today
+        .filter(|_| current)
+        .map(|today| (today.day() as usize - 1 + first_weekday) / 7);
+    let mut week_index = 0;
     while !cells.is_empty() {
         // Every cell of a week is as tall as its tallest day. A Shrink row gives Fill-height
         // children only the height of the siblings laid out before them (iced 0.14 flex), but a
         // stack lays its under layer out at its base layer's size: the contents set the height.
         let (backgrounds, contents): (Vec<_>, Vec<_>) = cells.drain(..7).unzip();
-        weeks = weeks.push(stack![row(contents)].push_under(row(backgrounds)));
+        let week = stack![row(contents)].push_under(row(backgrounds));
+        weeks = weeks.push(if today_week == Some(week_index) {
+            // `today_week_offset` finds this week to open the Calendar on it.
+            container(week).id(TODAY_WEEK).into()
+        } else {
+            Element::from(week)
+        });
+        week_index += 1;
     }
     section.push(weeks).into()
 }
@@ -238,6 +253,47 @@ fn artwork_view<'a>(state: &'a App, event: &Event) -> Element<'a, Message> {
             Some(Some(Err(error))) => text(format!("Preview unavailable: {error}")).into(),
         },
     }
+}
+
+/// The laid-out offset of today's week inside the Calendar list; nothing when it isn't shown.
+pub(super) fn today_week_offset() -> Task<f32> {
+    #[derive(Default)]
+    struct Find {
+        /// The list content's top and how far it can scroll.
+        list: Option<(f32, f32)>,
+        week: Option<f32>,
+    }
+    impl Operation<f32> for Find {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<f32>)) {
+            operate(self);
+        }
+        fn container(&mut self, id: Option<&Id>, bounds: Rectangle) {
+            if id == Some(&Id::new(TODAY_WEEK)) {
+                self.week = Some(bounds.y);
+            }
+        }
+        fn scrollable(
+            &mut self,
+            id: Option<&Id>,
+            bounds: Rectangle,
+            content_bounds: Rectangle,
+            _translation: Vector,
+            _state: &mut dyn operation::Scrollable,
+        ) {
+            if id == Some(&Id::new(super::Tab::Calendar.scroll_id())) {
+                let end = (content_bounds.height - bounds.height).max(0.0);
+                self.list = Some((content_bounds.y, end));
+            }
+        }
+        fn finish(&self) -> operation::Outcome<f32> {
+            match (self.list, self.week) {
+                // Clamped as drawn: an offset past the end would follow later growth down.
+                (Some((top, end)), Some(week)) => operation::Outcome::Some((week - top).min(end)),
+                _ => operation::Outcome::None,
+            }
+        }
+    }
+    iced::advanced::widget::operate(Find::default())
 }
 
 pub(super) fn prepare_task(state: &mut App) -> Task<Message> {

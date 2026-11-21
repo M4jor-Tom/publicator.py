@@ -2267,6 +2267,9 @@ impl App {
         self.active_tab = tab;
         // The new tab's placeholders report themselves; the old tab's never report hiding.
         self.shown_previews.clear();
+        // Calendar first opens on today's week; afterwards it resumes like every tab.
+        let first_calendar =
+            tab == Tab::Calendar && reveal.is_none() && !self.scroll_offsets.contains_key(&tab);
         // A revealed publication is moved first in its list, so it shows at the top.
         let offset = match reveal {
             Some(_) => Default::default(),
@@ -2275,6 +2278,18 @@ impl App {
         self.revealed_publication = reveal;
         let scroll = iced::widget::operation::scroll_to(tab.scroll_id(), offset);
         match tab {
+            Tab::Calendar if first_calendar => Task::batch([
+                calendar::prepare_task(self),
+                scroll,
+                calendar::today_week_offset().then(|y| {
+                    let offset = iced::widget::scrollable::AbsoluteOffset { x: 0.0, y };
+                    // Stored like a user scroll: programmatic scrolls report no offset.
+                    Task::batch([
+                        iced::widget::operation::scroll_to(Tab::Calendar.scroll_id(), offset),
+                        Task::done(Message::Scrolled(Tab::Calendar, offset)),
+                    ])
+                }),
+            ]),
             Tab::Calendar => Task::batch([calendar::prepare_task(self), scroll]),
             _ => scroll,
         }
