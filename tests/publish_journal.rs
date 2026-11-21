@@ -591,8 +591,11 @@ fn resolved_receipts_accept_only_their_own_decision_and_terminal() {
     assert_eq!(durable(&applied), before);
 }
 
-#[test]
-fn unresolved_attempt_blocks_deleting_its_publication_until_reconciled() {
+/// Runs `act` while an unresolved attempt names publication 1: it must be refused with the
+/// store unchanged. Then reconciles the attempt and returns `act`'s second result.
+fn blocked_until_reconciled<R>(
+    act: impl Fn(&publicator::application::Application) -> publicator::error::Result<R>,
+) -> (Fixture, std::sync::Arc<publicator::store::Store>, R) {
     let f = publish_fixture();
     let (job, snap) = job_for(&f);
     let journal = PublishJournal::new(f.root.path()).unwrap();
@@ -601,11 +604,12 @@ fn unresolved_attempt_blocks_deleting_its_publication_until_reconciled() {
         publicator::store::Store::new(f.store.paths().clone(), f.store.config().clone()).unwrap(),
     );
     let application = common::offline_app(store.clone());
+    let before = std::fs::read(&f.store.paths().json).unwrap();
     assert!(matches!(
-        application.delete_publication(&id(1), 1_800_000_000),
+        act(&application),
         Err(publicator::error::Error::ReconciliationRequired(_))
     ));
-    assert_eq!(store.read().unwrap().len(), 1);
+    assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), before);
     journal
         .reconcile(
             &store,
@@ -613,8 +617,20 @@ fn unresolved_attempt_blocks_deleting_its_publication_until_reconciled() {
             publicator::publish_journal::ReconcileOutcome::NotSubmitted,
         )
         .unwrap();
-    application
-        .delete_publication(&id(1), 1_800_000_000)
-        .unwrap();
+    let result = act(&application).unwrap();
+    (f, store, result)
+}
+
+#[test]
+fn unresolved_attempt_blocks_rolling_back_its_publication_until_reconciled() {
+    let (_f, _, phase) = blocked_until_reconciled(|application| application.roll_back(&id(1)));
+    assert_eq!(phase, publicator::model::Phase::Scheduled);
+}
+
+#[test]
+fn unresolved_attempt_blocks_deleting_its_publication_until_reconciled() {
+    let (_f, store, ()) = blocked_until_reconciled(|application| {
+        application.delete_publication(&id(1), 1_800_000_000)
+    });
     assert!(store.read().unwrap().is_empty());
 }

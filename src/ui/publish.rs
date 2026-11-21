@@ -226,6 +226,11 @@ fn platform_cell<'a>(state: &'a App, publication: &'a Value) -> Element<'a, Mess
     if let Some(apparition) = da {
         cell = cell.push(options_view(state, uuid, apparition));
     }
+    if matches!(phase(publication), Ok(Phase::Described)) {
+        cell = cell.push(button("Return to Describe").on_press_maybe(
+            (!state.options_locked(uuid)).then(|| Message::ReturnToDescribe(uuid.to_owned())),
+        ));
+    }
     cell.into()
 }
 

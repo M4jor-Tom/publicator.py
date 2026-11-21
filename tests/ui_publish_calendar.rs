@@ -783,6 +783,37 @@ async fn active_publish_locks_option_edits() {
 }
 
 #[tokio::test]
+async fn return_to_describe_rolls_back_only_an_unlocked_idle_row() {
+    let (mut app, store, _root) = options_app();
+    let before = std::fs::read(&store.paths().json).unwrap();
+    let uuid = "00000000-0000-4000-8000-000000000009".to_owned();
+    let _ = app.update(Message::PublishLocksFinished(Ok([uuid.clone()].into())));
+    let _ = common::ui::send(&mut app, Message::ReturnToDescribe(uuid.clone())).await;
+    assert_eq!(std::fs::read(&store.paths().json).unwrap(), before);
+    let _ = app.update(Message::PublishLocksFinished(Ok(
+        std::collections::HashSet::new(),
+    )));
+    let publish = app.update(Message::PublishSelected);
+    let _ = common::ui::run(app.update(Message::ReturnToDescribe(uuid.clone()))).await;
+    assert_eq!(std::fs::read(&store.paths().json).unwrap(), before);
+    for message in common::ui::run(publish).await.messages {
+        let _ = app.update(message);
+    }
+    let _ = app.update(Message::LoadFinished(0, Ok(store.read().unwrap().into())));
+    let _ = app.update(Message::PublishLocksFinished(Ok(
+        std::collections::HashSet::new(),
+    )));
+    let task = app.update(Message::ReturnToDescribe(uuid));
+    common::ui::finish_workflow(&mut app, task).await;
+    let row = &store.read().unwrap()[0];
+    assert_eq!(row["state"], "SCHEDULED");
+    let original: serde_json::Value = serde_json::from_slice(&before).unwrap();
+    assert_eq!(row["title"], original[0]["title"]);
+    assert_eq!(row["description"], original[0]["description"]);
+    assert_eq!(app.status_message(), Some("Returned to Describe"));
+}
+
+#[tokio::test]
 async fn invalid_publish_option_input_keeps_saved_bytes_unchanged() {
     let (mut app, store, _root) = options_app();
     let before = std::fs::read(&store.paths().json).unwrap();

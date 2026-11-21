@@ -56,6 +56,15 @@ enum Command {
         #[arg(long)]
         json: Option<PathBuf>,
     },
+    /// Move an undelivered publication back one state: DESCRIBED to SCHEDULED, SCHEDULED to PICKED.
+    RollBack {
+        #[arg(long)]
+        uuid: String,
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+        #[arg(long)]
+        json: Option<PathBuf>,
+    },
     CheckSteps,
 }
 #[derive(Args)]
@@ -168,6 +177,11 @@ async fn run() -> Result<()> {
             data_dir,
             json,
         } => delete_publication(&uuid, data_dir, json),
+        Command::RollBack {
+            uuid,
+            data_dir,
+            json,
+        } => roll_back(&uuid, data_dir, json),
         Command::CheckSteps => until_interrupted(check_steps()).await,
     }
 }
@@ -225,6 +239,15 @@ fn delete_publication(uuid: &str, data_dir: Option<PathBuf>, json: Option<PathBu
         .as_secs() as i64;
     Application::new(store, metadata_client(None)?).delete_publication(uuid, now)?;
     println!("deleted {uuid}");
+    Ok(())
+}
+fn roll_back(uuid: &str, data_dir: Option<PathBuf>, json: Option<PathBuf>) -> Result<()> {
+    let (_, _, store) = paths(data_dir, json)?;
+    let state = match Application::new(store, metadata_client(None)?).roll_back(uuid)? {
+        Phase::Scheduled => "SCHEDULED",
+        _ => "PICKED",
+    };
+    println!("rolled back {uuid} to {state}");
     Ok(())
 }
 async fn generate_meta(args: GenerateMetaArgs) -> Result<()> {

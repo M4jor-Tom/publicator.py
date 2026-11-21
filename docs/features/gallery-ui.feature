@@ -33,7 +33,7 @@ Feature: Review artwork in the native gallery
       When the user opens Delete on a Pick, Schedule or Describe tile
       Then the confirmation stays visible without moving the list
       And confirming in Pick deletes the unpicked file; in Schedule or Describe it removes only the entry and its unsaved draft
-      And a DESCRIBED row must return from Publish before tile deletion; the CLI can delete it directly
+      And a DESCRIBED row must use Return to Describe in Publish before tile deletion; the CLI can delete it directly
 
     Scenario: A draft changes while its save is in flight
       When the earlier save completes
@@ -78,6 +78,13 @@ Feature: Review artwork in the native gallery
       Then its ordinary rows and count include only pending DeviantArt deliveries; successful sends remain in Calendar
       And a completed row opened from Calendar or a row awaiting reconciliation is locked
       And only registered platform cells can execute; retries skip recorded successes
+
+    Scenario: Return a pending row to Describe
+      Given a DESCRIBED row with a pending DeviantArt delivery
+      When the user clicks Return to Describe in Publish
+      Then the CLI's roll-back makes it SCHEDULED, so it leaves Publish and shows in Describe with its saved title and description
+      And the button is disabled while another operation or a publish run is active, or an unresolved attempt locks the row
+      And unsaved options refuse it until saved; delivered and APPEARED rows have no such button
 
     Scenario: Close, refresh or submit again during publishing
       When a close is requested, including after draft discard, save or status refresh

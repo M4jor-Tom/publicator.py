@@ -51,6 +51,27 @@ Feature: Persist publication state in publications.json
         | any apparition is published_or_scheduled                 |
         | the publication is APPEARED                              |
 
+  Rule: Rolling back moves an undelivered publication back exactly one state
+
+    Scenario: Roll back one step at a time
+      Given a DESCRIBED publication with no successful delivery or unresolved attempt
+      When a user runs roll-back for its UUID
+      Then it becomes SCHEDULED, and a second roll-back makes it PICKED
+      And its title, description and dates are kept
+
+    Scenario Outline: Refuse rollback
+      Given <protected state>
+      When roll-back is requested
+      Then the entry is unchanged
+
+      Examples:
+        | protected state                                                       |
+        | the publication is PICKED, and the error points at delete-publication |
+        | the publication is APPEARED                                           |
+        | any apparition is published_or_scheduled                              |
+        | an unresolved attempt names this UUID                                 |
+        | another publisher holds the publisher lock                            |
+
   Rule: Legacy migration is a validated transformation, not title guessing
 
     Scenario: Recover a partially delivered publication

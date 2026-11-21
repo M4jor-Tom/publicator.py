@@ -276,6 +276,7 @@ pub enum Message {
     SaveDraft(String),
     ApproveMetadata(String),
     ReturnToSchedule(String),
+    ReturnToDescribe(String),
     GenerateOne(String),
     GenerateMarked,
     ConfirmLocalInstall,
@@ -856,7 +857,8 @@ impl App {
             | Message::OptionTierChanged { .. }
             | Message::OptionGalleryChanged { .. }
             | Message::SaveOptions(..)
-            | Message::OptionsSaved { .. } => self.update_options(message),
+            | Message::OptionsSaved { .. }
+            | Message::ReturnToDescribe(..) => self.update_options(message),
             Message::ReconcileUrlChanged { .. }
             | Message::ReconcileAttempt { .. }
             | Message::ReconcileFinished { .. }
@@ -1178,6 +1180,7 @@ impl App {
             } => self.on_option_gallery_changed(uuid, value, selected),
             Message::SaveOptions(uuid) => self.save_options_task(uuid),
             Message::OptionsSaved { uuid, result } => self.on_options_saved(uuid, result),
+            Message::ReturnToDescribe(uuid) => self.return_to_describe(uuid),
             _ => unreachable!("message routed to options handler"),
         }
     }
@@ -2480,6 +2483,35 @@ impl App {
             .as_ref()
             .is_some_and(|locks| locks.contains(uuid))
             .then(|| "Unresolved publish attempt must be reconciled before editing options".into())
+    }
+
+    /// Sends a DESCRIBED Publish row back to Describe through the CLI's guarded rollback.
+    fn return_to_describe(&mut self, uuid: String) -> Task<Message> {
+        if self.options_locked(&uuid) {
+            return Task::none();
+        }
+        if self
+            .publish_options
+            .get(&uuid)
+            .is_some_and(|options| options.dirty)
+        {
+            self.result = Some("Save options before returning to Describe".into());
+            return Task::none();
+        }
+        let application = self.application.clone();
+        self.busy = true;
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || application.roll_back(&uuid).map(|_| ()))
+                    .await
+                    .unwrap_or_else(|error| Err(crate::error::Error::Config(error.to_string())))
+                    .map_err(|error| error.to_string())
+            },
+            |result| Message::WorkflowFinished {
+                message: "Returned to Describe".into(),
+                result,
+            },
+        )
     }
 
     fn save_options_task(&mut self, uuid: String) -> Task<Message> {

@@ -1229,6 +1229,56 @@ fn dummy_data_initializes_a_fresh_valid_root_and_refuses_to_reinitialize_it() {
 }
 
 #[test]
+fn roll_back_steps_back_one_state_and_refuses_picked_and_appeared() {
+    let root = tempdir().unwrap();
+    let data_dir = root.path().to_str().unwrap();
+    let json = root.path().join("publications.json");
+    fs::write(
+        &json,
+        serde_json::to_vec(&serde_json::json!([
+            common::row(1, "DESCRIBED"),
+            common::row(2, "APPEARED")
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    let roll_back = |n| {
+        cli(
+            root.path(),
+            &[
+                "roll-back",
+                "--data-dir",
+                data_dir,
+                "--uuid",
+                &common::id(n),
+            ],
+        )
+    };
+    for state in ["SCHEDULED", "PICKED"] {
+        let rolled = roll_back(1);
+        assert!(
+            rolled.status.success(),
+            "{}",
+            String::from_utf8_lossy(&rolled.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&rolled.stdout).trim(),
+            format!("rolled back {} to {state}", common::id(1))
+        );
+        let rows: serde_json::Value = serde_json::from_slice(&fs::read(&json).unwrap()).unwrap();
+        assert_eq!(rows[0]["state"], state);
+        assert_eq!(rows[0]["title"], "Title");
+        assert_eq!(rows[0]["description"], "Description");
+    }
+    let before = fs::read(&json).unwrap();
+    let picked = roll_back(1);
+    assert!(!picked.status.success());
+    assert!(String::from_utf8_lossy(&picked.stderr).contains("delete-publication"));
+    assert!(!roll_back(2).status.success());
+    assert_eq!(fs::read(&json).unwrap(), before);
+}
+
+#[test]
 fn delete_publication_removes_only_the_named_undelivered_entry() {
     let root = tempdir().unwrap();
     let data_dir = root.path().to_str().unwrap();

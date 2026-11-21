@@ -90,6 +90,36 @@ impl Application {
     /// reconciliation runs meanwhile, and refuses a publication an unresolved attempt names:
     /// its receipt must stay reconcilable against the row.
     pub fn delete_publication(&self, uuid: &str, now: i64) -> Result<()> {
+        self.unattempted(uuid, "deletion", || {
+            self.mutate(Some(uuid), |store| {
+                workflow::delete_publication(store, uuid, now)
+            })
+        })
+    }
+    /// Moves an undelivered publication back one state (DESCRIBED to SCHEDULED, SCHEDULED to
+    /// PICKED) under the same guards as deletion, returning the new phase.
+    pub fn roll_back(&self, uuid: &str) -> Result<Phase> {
+        self.unattempted(uuid, "rollback", || {
+            self.mutate(Some(uuid), |store| {
+                match phase(lookup(&store.read()?, uuid)?)? {
+                    Phase::Described => {
+                        workflow::return_to_metadata(store, uuid).map(|()| Phase::Scheduled)
+                    }
+                    Phase::Scheduled => {
+                        workflow::return_to_scheduling(store, uuid).map(|()| Phase::Picked)
+                    }
+                    Phase::Picked => Err(Error::InvalidState(
+                        "PICKED has no earlier state; use delete-publication to unpick it".into(),
+                    )),
+                    Phase::Appeared => Err(Error::InvalidState(
+                        "APPEARED publications cannot be rolled back".into(),
+                    )),
+                }
+            })
+        })
+    }
+    /// Runs `f` under the publisher lock unless an unresolved attempt names `uuid`.
+    fn unattempted<R>(&self, uuid: &str, action: &str, f: impl FnOnce() -> Result<R>) -> Result<R> {
         let data_dir = &self.store.paths().data_dir;
         let _lock = crate::publish_journal::publisher_lock(data_dir)?;
         if crate::publish_journal::PublishJournal::new(data_dir)?
@@ -97,13 +127,11 @@ impl Application {
             .iter()
             .any(|attempt| attempt.uuid == uuid)
         {
-            return Err(Error::ReconciliationRequired(
-                "unresolved publish attempt blocks deletion".into(),
-            ));
+            return Err(Error::ReconciliationRequired(format!(
+                "unresolved publish attempt blocks {action}"
+            )));
         }
-        self.mutate(Some(uuid), |store| {
-            workflow::delete_publication(store, uuid, now)
-        })
+        f()
     }
     pub async fn generate_one(&self, uuid: &str, request: GenerationRequest) -> Result<Generated> {
         validate_request(&request)?;
